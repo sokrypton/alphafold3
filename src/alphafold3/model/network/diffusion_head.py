@@ -186,9 +186,33 @@ class DiffusionHead(hk.Module):
         name='single_cond_initial_projection',
     )(single_cond)
 
-    noise_embedding = noise_level_embeddings.noise_embeddings(
-        sigma_scaled_noise_level=noise_level / SIGMA_DATA
-    )
+    if self.global_config.of3_weights:
+      # When using ported OF3 weights the Fourier constants differ from AF3's
+      # hardcoded values (JAX vs PyTorch RNG produce different numbers for
+      # seed=42). Load them as proper Haiku parameters so they travel with the
+      # params file rather than being monkey-patched at runtime.
+      _dim = len(noise_level_embeddings._WEIGHT)
+      fourier_weight = hk.get_parameter(
+          'fourier_embedding_weight',
+          shape=[_dim],
+          dtype=jnp.float32,
+          init=hk.initializers.Constant(0.0),
+      )
+      fourier_bias = hk.get_parameter(
+          'fourier_embedding_bias',
+          shape=[_dim],
+          dtype=jnp.float32,
+          init=hk.initializers.Constant(0.0),
+      )
+      noise_embedding = noise_level_embeddings.noise_embeddings(
+          sigma_scaled_noise_level=noise_level / SIGMA_DATA,
+          weight=fourier_weight,
+          bias=fourier_bias,
+      )
+    else:
+      noise_embedding = noise_level_embeddings.noise_embeddings(
+          sigma_scaled_noise_level=noise_level / SIGMA_DATA
+      )
     single_cond += hm.Linear(
         self.config.conditioning.seq_channel,
         precision='highest',
@@ -341,7 +365,12 @@ def sample(
     gamma = config.gamma_0 * (noise_level > config.gamma_min)
     t_hat = noise_level_prev * (1 + gamma)
 
-    noise_scale = config.noise_scale * jnp.sqrt(t_hat**2 - noise_level_prev**2)
+    # Guard against -0.0 (IEEE negative zero) when gamma=0: t_hat ==
+    # noise_level_prev, so t_hat**2 - noise_level_prev**2 == -0.0 and
+    # XLA's sqrt(-0.0) returns NaN.
+    noise_scale = config.noise_scale * jnp.sqrt(
+        jnp.maximum(0.0, t_hat**2 - noise_level_prev**2)
+    )
     noise = noise_scale * jax.random.normal(key_noise, positions.shape)
     positions_noisy = positions + noise
 

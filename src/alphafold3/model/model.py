@@ -275,6 +275,13 @@ class Model(hk.Module):
     if key is None:
       key = hk.next_rng_key()
 
+    if self.global_config.of3_weights:
+      # OF3 uses 0-indexed atomic numbers (C=5, N=6, O=7) while AF3's
+      # featurization uses 1-indexed GetAtomicNum() (C=6, N=7, O=8).
+      # The ported embed_ref_element weight (128×128) expects 0-indexed values.
+      batch = dict(batch)
+      batch['ref_element'] = jnp.maximum(0, batch['ref_element'] - 1)
+
     batch = feat_batch.Batch.from_data_dict(batch)
 
     embedding_module = evoformer_network.Evoformer(

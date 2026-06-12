@@ -261,6 +261,7 @@ struct Position3 {
   float x;
   float y;
   float z;
+  Position3(float x, float y, float z) : x(x), y(y), z(z) {}
 };
 
 float DistanceSquared(Position3 v1, Position3 v2) {

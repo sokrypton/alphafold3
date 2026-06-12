@@ -141,10 +141,16 @@ _BIAS = [
 # pylint: enable=bad-continuation
 
 
-def noise_embeddings(sigma_scaled_noise_level: jnp.ndarray) -> jnp.ndarray:
+def noise_embeddings(
+    sigma_scaled_noise_level: jnp.ndarray,
+    weight: jnp.ndarray | None = None,
+    bias: jnp.ndarray | None = None,
+) -> jnp.ndarray:
   """Returns Fourier noise level embeddings for diffusion model."""
   transformed_noise_level = (1 / 4) * jnp.log(sigma_scaled_noise_level)
-  weight = jnp.array(_WEIGHT, dtype=jnp.float32)
-  bias = jnp.array(_BIAS, dtype=jnp.float32)
+  if weight is None:
+    weight = jnp.array(_WEIGHT, dtype=jnp.float32)
+  if bias is None:
+    bias = jnp.array(_BIAS, dtype=jnp.float32)
   embeddings = transformed_noise_level[..., None] * weight + bias
   return jnp.cos(2 * jnp.pi * embeddings)

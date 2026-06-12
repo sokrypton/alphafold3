@@ -42,3 +42,6 @@ class GlobalConfig(base_config.BaseConfig):
   flash_attention_implementation: tokamax.DotProductAttentionImplementation = (
       'triton'
   )
+  # When True, enables OpenFold3 weight compatibility mode.
+  # Set to False (default) when using original AlphaFold3 weights.
+  of3_weights: bool = False

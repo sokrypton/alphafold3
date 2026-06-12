@@ -147,7 +147,7 @@ def add_metadata_to_mmcif(
   cif['_software.pdbx_ordinal'] = ['1']
   cif['_software.name'] = ['AlphaFold']
   cif['_software.version'] = [
-      f'AlphaFold-beta-20231127 ({model_id.decode("ascii")})'
+      f'AlphaFold-beta-20231127 ({model_id.rstrip(b"\x00").decode("ascii")})'
   ]
   cif['_software.type'] = ['package']
   cif['_software.description'] = ['Structure prediction']

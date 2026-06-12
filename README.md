@@ -34,6 +34,49 @@ business days. You may only use AlphaFold 3 model parameters if received
 directly from Google. Use is subject to these
 [terms of use](https://github.com/google-deepmind/alphafold3/blob/main/WEIGHTS_TERMS_OF_USE.md).
 
+## OpenFold3 Weights (Publicly Available Alternative)
+
+[OpenFold3](https://github.com/aqlaboratory/openfold3), developed by the AlQuraishi Lab at Columbia University and the OpenFold Consortium, is an independent reproduction of AlphaFold 3 that has released model weights under the Apache 2.0 license. These weights can be used with this codebase as a freely available alternative to the Google DeepMind parameters.
+
+**Step 1 — Download OpenFold3 weights:**
+
+```bash
+# Via AWS S3 (no account required):
+aws s3 cp s3://openfold/staging/of3-p2-155k.pt ./of3-p2-155k.pt --no-sign-request
+
+# Or via HuggingFace:
+pip install huggingface_hub
+huggingface-cli download OpenFold/OpenFold3 --local-dir of3_weights/
+```
+
+Weights are also hosted at [huggingface.co/OpenFold/OpenFold3](https://huggingface.co/OpenFold/OpenFold3).
+
+**Step 2 — Convert to AlphaFold 3 format:**
+
+A conversion script is included in this repository:
+
+```bash
+python convert_of3_weights.py \
+  --of3_checkpoint ./of3-p2-155k.pt \
+  --output_dir ./af3_of3_params/
+```
+
+This produces `af3_of3_params/of3_ported_weights.bin.zst` (~1.4 GB).
+
+**Step 3 — Run inference:**
+
+Pass `--of3_weights` to `run_alphafold.py` to enable the architectural adjustments needed for OpenFold3 parameters:
+
+```bash
+python run_alphafold.py \
+  --json_path=fold_input.json \
+  --model_dir=./af3_of3_params/ \
+  --output_dir=./output/ \
+  --of3_weights
+```
+
+The OpenFold3 weights are subject to the [Apache 2.0 License](https://www.apache.org/licenses/LICENSE-2.0) and may be used for both academic and commercial purposes, without requiring a separate access request.
+
 ## Installation and Running Your First Prediction
 
 See the [installation documentation](docs/installation.md).

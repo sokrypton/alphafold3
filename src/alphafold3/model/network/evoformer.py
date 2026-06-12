@@ -168,6 +168,14 @@ class Evoformer(hk.Module):
         gather_idxs[:, 0], gather_idxs[:, 1]
     ].set(1.0)
 
+    if self.global_config.of3_weights:
+      # OF3 weights were trained with a symmetric bond matrix (both i→j and
+      # j→i set for each bond). AF3's featurization only provides one direction
+      # from the CCD bond table, so we symmetrize here.
+      contact_matrix = contact_matrix.at[
+          gather_idxs[:, 1], gather_idxs[:, 0]
+      ].set(1.0)
+
     # Because all the padded index's are 0's.
     contact_matrix = contact_matrix.at[0, 0].set(0.0)
 

@@ -392,6 +392,61 @@ _COMPRESS_LARGE_OUTPUT_FILES = flags.DEFINE_bool(
     ' saved, are already stored in a compressed format.',
 )
 
+# OpenFold3 weight support.
+_OF3_CHECKPOINT = flags.DEFINE_string(
+    'of3_checkpoint',
+    None,
+    'Path to an OpenFold3 .pt checkpoint file. When provided, the weights are'
+    ' converted to AF3 format on first use and cached in --model_dir. The model'
+    ' is then run with OF3-compatible settings (of3_weights=True). Weights are'
+    ' freely available from the public AWS bucket:\n'
+    '  aws s3 cp s3://openfold/staging/of3-p2-155k.pt ./of3-p2-155k.pt'
+    ' --no-sign-request',
+)
+_OF3_WEIGHTS = flags.DEFINE_bool(
+    'of3_weights',
+    False,
+    'Use OF3-compatible model settings (of3_weights=True). Set automatically'
+    ' when --of3_checkpoint is provided. Also set this flag when --model_dir'
+    ' already points to a directory of pre-converted OF3 weights.',
+)
+
+
+def _maybe_convert_of3_weights(of3_checkpoint: str, model_dir: str) -> str:
+  """Convert OF3 checkpoint to AF3 format if not already done.
+
+  Converts on first call; subsequent calls reuse the cached result.
+  Returns the model_dir to use (may differ from the input if weights are
+  written to a sub-directory of model_dir).
+  """
+  import time
+  from alphafold3.model.of3_weight_converter import (
+      load_of3_checkpoint,
+      map_of3_to_af3,
+      save_af3_params,
+  )
+
+  out_dir = pathlib.Path(model_dir)
+  marker = out_dir / 'of3_ported_weights.bin.zst'
+  if marker.exists():
+    print(f'OF3 weights already converted at {out_dir}, skipping conversion.')
+    return str(out_dir)
+
+  print(f'Converting OF3 checkpoint: {of3_checkpoint}')
+  t0 = time.perf_counter()
+  sd = load_of3_checkpoint(of3_checkpoint)
+  print(f'  Loaded {len(sd)} tensors ({time.perf_counter()-t0:.1f}s)')
+
+  t0 = time.perf_counter()
+  af3_params = map_of3_to_af3(sd)
+  n = sum(v.size for s in af3_params.values() for v in s.values())
+  print(f'  Converted {len(af3_params)} scopes, {n:,} elements ({time.perf_counter()-t0:.1f}s)')
+
+  t0 = time.perf_counter()
+  out = save_af3_params(af3_params, out_dir)
+  print(f'  Saved {out}  ({out.stat().st_size/1e6:.0f} MB, {time.perf_counter()-t0:.1f}s)')
+  return str(out_dir)
+
 
 def make_model_config(
     *,
@@ -400,6 +455,7 @@ def make_model_config(
     num_recycles: int = 10,
     return_embeddings: bool = False,
     return_distogram: bool = False,
+    of3_weights: bool = False,
 ) -> model.Model.Config:
   """Returns a model config with some defaults overridden."""
   config = model.Model.Config()
@@ -410,6 +466,7 @@ def make_model_config(
   config.num_recycles = num_recycles
   config.return_embeddings = return_embeddings
   config.return_distogram = return_distogram
+  config.global_config.of3_weights = of3_weights
   return config
 
 
@@ -973,6 +1030,13 @@ def main(_):
   else:
     data_pipeline_config = None
 
+  # Handle OF3 weight conversion before inference.
+  model_dir = MODEL_DIR.value
+  use_of3_weights = _OF3_WEIGHTS.value
+  if _OF3_CHECKPOINT.value:
+    model_dir = _maybe_convert_of3_weights(_OF3_CHECKPOINT.value, model_dir)
+    use_of3_weights = True
+
   if _RUN_INFERENCE.value:
     devices = jax.local_devices(backend='gpu')
     print(
@@ -991,9 +1055,10 @@ def main(_):
             num_recycles=_NUM_RECYCLES.value,
             return_embeddings=_SAVE_EMBEDDINGS.value,
             return_distogram=_SAVE_DISTOGRAM.value,
+            of3_weights=use_of3_weights,
         ),
         device=devices[_GPU_DEVICE.value],
-        model_dir=pathlib.Path(MODEL_DIR.value),
+        model_dir=pathlib.Path(model_dir),
     )
     # Check we can load the model parameters before launching anything.
     print('Checking that model parameters can be loaded...')

@@ -213,6 +213,41 @@ class Transformer(hk.Module):
       single_cond: jnp.ndarray,
       pair_cond: jnp.ndarray | None,
   ) -> jnp.ndarray:
+    assert self.config.num_blocks % self.config.super_block_size == 0
+    num_super_blocks = self.config.num_blocks // self.config.super_block_size
+
+    if self.global_config.of3_weights and pair_cond is not None:
+      # OF3 mode: per-block pair LayerNorm + projection. pair_cond is shared
+      # across all blocks; each block in the layer_stack gets its own LN/Linear
+      # params stacked along axis 0.
+      def block(act):  # pylint: disable=function-redefined
+        pair_act = hm.LayerNorm(
+            name='pair_input_layer_norm',
+            use_fast_variance=False,
+            create_offset=False,
+        )(pair_cond)
+        block_pair_logits = hm.Linear(
+            self.config.attention.num_head,
+            name='pair_logits_projection',
+        )(pair_act)
+        block_pair_logits = jnp.transpose(block_pair_logits, [2, 0, 1])
+        act += self_attention(
+            act, mask, block_pair_logits,
+            self.config.attention, self.global_config, single_cond,
+            name=self.name,
+        )
+        act += transition_block(
+            act, self.config.num_intermediate_factor,
+            self.global_config, single_cond, name=self.name,
+        )
+        return act
+
+      def super_block(act):  # pylint: disable=function-redefined
+        return hk.experimental.layer_stack(self.config.super_block_size)(block)(act)
+
+      return hk.experimental.layer_stack(num_super_blocks)(super_block)(act)
+
+    # Original AF3 mode: single shared pair LayerNorm precomputed before all blocks.
     def block(act, pair_logits):
       act += self_attention(
           act,
@@ -241,9 +276,6 @@ class Transformer(hk.Module):
           use_fast_variance=False,
           create_offset=False,
       )(pair_cond)
-
-    assert self.config.num_blocks % self.config.super_block_size == 0
-    num_super_blocks = self.config.num_blocks // self.config.super_block_size
 
     def super_block(act):
       if pair_act is None:

@@ -41,7 +41,10 @@ class AtomCrossAttEncoderConfig(base_config.BaseConfig):
 
 
 def _per_atom_conditioning(
-    config: AtomCrossAttEncoderConfig, batch: feat_batch.Batch, name: str
+    config: AtomCrossAttEncoderConfig,
+    batch: feat_batch.Batch,
+    name: str,
+    global_config: model_config.GlobalConfig | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
   """computes single and pair conditioning for all atoms in each token."""
 
@@ -138,7 +141,9 @@ def atom_cross_att_encoder(
   # Compute single conditioning from atom meta data and convert to queries
   # layout.
   # (num_subsets, num_queries, channels)
-  token_atoms_single_cond, _ = _per_atom_conditioning(config, batch, name)
+  token_atoms_single_cond, _ = _per_atom_conditioning(
+      config, batch, name, global_config
+  )
   token_atoms_mask = batch.predicted_structure_info.atom_mask
   queries_single_cond = atom_layout.convert(
       batch.atom_cross_att.token_atoms_to_queries,
@@ -170,6 +175,8 @@ def atom_cross_att_encoder(
         trunk_single_cond,
         layout_axes=(-2,),
     )
+
+  queries_single_cond = queries_single_cond * queries_mask[..., None]
 
   if token_atoms_act is None:
     # if no token_atoms_act is given (e.g. begin of evoformer), we use the
@@ -278,13 +285,17 @@ def atom_cross_att_encoder(
   )
   keys_ref_space_uid = atom_layout.convert(
       batch.atom_cross_att.queries_to_keys,
-      batch.ref_structure.ref_space_uid,
+      queries_ref_space_uid,
       layout_axes=(-2, -1),
   )
 
   offsets_valid = (
       queries_ref_space_uid[:, :, None] == keys_ref_space_uid[:, None, :]
   )
+  if global_config.of3_weights:
+    # OF3 was trained with padded keys correctly excluded from offsets_valid.
+    # Padded key atoms have ref_space_uid=0 (zero-fill), colliding with token 0.
+    offsets_valid = offsets_valid & keys_mask[:, None, :].astype(jnp.bool_)
   offsets = queries_ref_pos[:, :, None, :] - keys_ref_pos[:, None, :, :]
   pair_act += (
       hm.Linear(
