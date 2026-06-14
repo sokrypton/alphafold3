@@ -72,7 +72,7 @@ FetchContent_MakeAvailable(pybind11 abseil-cpp pybind11_abseil cifpp dssp)
 
 find_package(
   Python3
-  COMPONENTS Interpreter Development NumPy
+  COMPONENTS Interpreter Development.Module NumPy
   REQUIRED)
 
 include_directories(${PYTHON_INCLUDE_DIRS})
