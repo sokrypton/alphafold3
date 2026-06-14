@@ -33,17 +33,25 @@ import csv
 import dataclasses
 import datetime
 import functools
+import logging
 import os
 import pathlib
+
+# Silence tokamax CPU-fallback errors before any other imports fire them.
+# tokamax logs at ERROR when a GPU kernel isn't available, then falls back
+# silently — these are not real errors on CPU-only machines.
+logging.getLogger('tokamax').setLevel(logging.CRITICAL)
 import shutil
 import string
 import textwrap
 import time
 import typing
 from typing import overload
+import warnings
 
 from absl import app
 from absl import flags
+from absl import logging as absl_logging
 from alphafold3.common import folding_input
 from alphafold3.common import resources
 from alphafold3.constants import chemical_components
@@ -57,6 +65,10 @@ from alphafold3.model import params
 from alphafold3.model import post_processing
 from alphafold3.model.components import utils
 import haiku as hk
+# Suppress "Unable to initialize backend 'tpu'" at JAX import time.
+logging.getLogger('jax._src.xla_bridge').setLevel(logging.ERROR)
+# Suppress XLA C++ delay-kernel timing noise (cuda_timer.cc).
+os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '3')
 import jax
 from jax import numpy as jnp
 import numpy as np
@@ -235,7 +247,7 @@ _SEQRES_DATABASE_PATH = flags.DEFINE_string(
 _JACKHMMER_N_CPU = flags.DEFINE_integer(
     'jackhmmer_n_cpu',
     # Unfortunately, os.process_cpu_count() is only available in Python 3.13+.
-    min(len(os.sched_getaffinity(0)), 8),
+    min(len(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else os.cpu_count() or 8, 8),
     'Number of CPUs to use for Jackhmmer. Defaults to min(cpu_count, 8). Going'
     ' above 8 CPUs provides very little additional speedup.',
     lower_bound=0,
@@ -251,7 +263,7 @@ _JACKHMMER_MAX_PARALLEL_SHARDS = flags.DEFINE_integer(
 _NHMMER_N_CPU = flags.DEFINE_integer(
     'nhmmer_n_cpu',
     # Unfortunately, os.process_cpu_count() is only available in Python 3.13+.
-    min(len(os.sched_getaffinity(0)), 8),
+    min(len(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else os.cpu_count() or 8, 8),
     'Number of CPUs to use for Nhmmer. Defaults to min(cpu_count, 8). Going'
     ' above 8 CPUs provides very little additional speedup.',
     lower_bound=0,
@@ -302,10 +314,12 @@ _FIX_STANDALONE_GLYCANS = flags.DEFINE_bool(
 )
 
 # JAX inference performance tuning.
-_JAX_COMPILATION_CACHE_DIR = flags.DEFINE_string(
-    'jax_compilation_cache_dir',
-    None,
-    'Path to a directory for the JAX compilation cache.',
+_CACHE_DIR = flags.DEFINE_string(
+    'cache_dir',
+    '/tmp/alphafold_cache',
+    'Directory for all inference caches (JAX compilation and tokamax'
+    ' autotuning). Persists within a session. For cross-session persistence on'
+    ' Colab, point to a mounted Google Drive path.',
 )
 _GPU_DEVICE = flags.DEFINE_integer(
     'gpu_device',
@@ -319,8 +333,8 @@ _GPU_DEVICE = flags.DEFINE_integer(
 _BUCKETS = flags.DEFINE_list(
     'buckets',
     # pyformat: disable
-    ['256', '512', '768', '1024', '1280', '1536', '2048', '2560', '3072',
-     '3584', '4096', '4608', '5120'],
+    ['32', '64', '128', '256', '512', '768', '1024', '1280', '1536', '2048',
+     '2560', '3072', '3584', '4096', '4608', '5120'],
     # pyformat: enable
     'Strictly increasing order of token sizes for which to cache compilations.'
     ' For any input with more tokens than the largest bucket size, a new bucket'
@@ -410,6 +424,31 @@ _OF3_WEIGHTS = flags.DEFINE_bool(
     ' when --of3_checkpoint is provided. Also set this flag when --model_dir'
     ' already points to a directory of pre-converted OF3 weights.',
 )
+_NOJIT = flags.DEFINE_bool(
+    'nojit',
+    False,
+    'Disable JAX JIT compilation. Useful for debugging.',
+)
+
+_USE_MSA_SERVER = flags.DEFINE_bool(
+    'use_msa_server',
+    False,
+    'Query the ColabFold/MMseqs2 server to generate MSAs for protein and RNA'
+    ' chains that are missing them. Requires internet access. Results are'
+    ' cached in --cache_dir so subsequent runs skip the network.',
+)
+
+_MSA_SERVER_URL = flags.DEFINE_string(
+    'msa_server_url',
+    'https://api.colabfold.com',
+    'URL of the ColabFold MSA server.',
+)
+
+_MSA_SERVER_USER_AGENT = flags.DEFINE_string(
+    'msa_server_user_agent',
+    'alphafold3/1.0',
+    'HTTP User-Agent string sent to the MSA server.',
+)
 
 
 def _maybe_convert_of3_weights(of3_checkpoint: str, model_dir: str) -> str:
@@ -482,6 +521,22 @@ class ModelRunner:
     self._model_config = config
     self._device = device
     self._model_dir = model_dir
+    self._autotune_result = self._load_autotune_cache()
+
+  @property
+  def _autotune_cache_path(self) -> str | None:
+    return (
+        os.path.join(_CACHE_DIR.value, 'tokamax_autotune.json')
+        if _CACHE_DIR.value else None
+    )
+
+  def _load_autotune_cache(self):
+    path = self._autotune_cache_path
+    if path and os.path.exists(path):
+      print(f'Loading tokamax autotune cache from {path}')
+      with open(path) as f:
+        return tokamax.AutotuningResult.load(f)
+    return None
 
   @functools.cached_property
   def model_params(self) -> hk.Params:
@@ -498,9 +553,10 @@ class ModelRunner:
     def forward_fn(batch):
       return model.Model(self._model_config)(batch)
 
-    return functools.partial(
-        jax.jit(forward_fn.apply, device=self._device), self.model_params
-    )
+    apply_fn = forward_fn.apply
+    if not _NOJIT.value:
+      apply_fn = jax.jit(apply_fn, device=self._device)
+    return functools.partial(apply_fn, self.model_params)
 
   def run_inference(
       self, featurised_example: features.BatchDict, rng_key: jnp.ndarray
@@ -513,7 +569,22 @@ class ModelRunner:
         self._device,
     )
 
-    result = self._model(rng_key, featurised_example)
+    if self._autotune_result is None and self._autotune_cache_path:
+      try:
+        self._autotune_result = tokamax.autotune(self._model, rng_key, featurised_example)
+        os.makedirs(os.path.dirname(os.path.abspath(self._autotune_cache_path)), exist_ok=True)
+        with open(self._autotune_cache_path, 'w') as f:
+          self._autotune_result.dump(f)
+        print(f'Tokamax autotune cache saved to {self._autotune_cache_path}')
+        print('Subsequent runs will load this cache and skip autotuning.')
+      except Exception:
+        pass  # Autotune not supported on this device/jaxlib combo; runs fine without it.
+
+    if self._autotune_result is not None:
+      with self._autotune_result:
+        result = self._model(rng_key, featurised_example)
+    else:
+      result = self._model(rng_key, featurised_example)
     result = jax.tree.map(np.asarray, result)
     result = jax.tree.map(
         lambda x: x.astype(jnp.float32) if x.dtype == jnp.bfloat16 else x,
@@ -683,9 +754,24 @@ def write_outputs(
   max_ranking_score = None
   max_ranking_result = None
 
-  output_terms = (
-      pathlib.Path(alphafold3.cpp.__file__).parent / 'OUTPUT_TERMS_OF_USE.md'
-  ).read_text()
+  if _OF3_WEIGHTS.value:
+    output_terms = (
+        '# OUTPUT TERMS OF USE\n\n'
+        'These structure predictions were generated using OpenFold3 model weights,\n'
+        'which are licensed under the Apache License, Version 2.0.\n\n'
+        'The AlphaFold 3 Output Terms of Use (which restrict commercial use) do NOT\n'
+        'apply to outputs generated with OpenFold3 weights. You are free to use these\n'
+        'outputs for any purpose, including commercial applications, subject only to\n'
+        'the Apache 2.0 license.\n\n'
+        'OpenFold3 weights: https://github.com/aqlaboratory/openfold\n'
+        'Apache License 2.0: https://www.apache.org/licenses/LICENSE-2.0\n\n'
+        'AlphaFold 3 code is copyright Google DeepMind, also Apache 2.0:\n'
+        'https://github.com/google-deepmind/alphafold3\n'
+    )
+  else:
+    output_terms = (
+        pathlib.Path(alphafold3.cpp.__file__).parent / 'OUTPUT_TERMS_OF_USE.md'
+    ).read_text()
 
   os.makedirs(output_dir, exist_ok=True)
   for results_for_seed in all_inference_results:
@@ -882,6 +968,10 @@ def process_fold_input(
     print('Running data pipeline...')
     fold_input = pipeline.DataPipeline(data_pipeline_config).process(fold_input)
 
+  if _USE_MSA_SERVER.value:
+    from alphafold3.data import msa_server as _msa_server
+    _msa_server.save_msas(fold_input, output_dir)
+
   write_fold_input_json(fold_input, output_dir)
   if model_runner is None:
     print('Skipping model inference...')
@@ -914,10 +1004,33 @@ def process_fold_input(
 
 
 def main(_):
-  if _JAX_COMPILATION_CACHE_DIR.value is not None:
-    jax.config.update(
-        'jax_compilation_cache_dir', _JAX_COMPILATION_CACHE_DIR.value
-    )
+  # Suppress tokamax noise: autotuning cache-miss spam and CPU-fallback errors
+  # for gated_linear_unit (tokamax logs at ERROR but handles the fallback).
+  # tokamax uses absl logging, which has its own handler that doesn't propagate
+  # to the root logger — so we attach the filter to both.
+  class _SuppressTokamax(logging.Filter):
+    def filter(self, record):
+      msg = record.getMessage()
+      return 'Autotuning cache miss' not in msg and 'Failed to run implementation' not in msg
+  _tokamax_filter = _SuppressTokamax()
+  logging.getLogger().addFilter(_tokamax_filter)
+  logging.getLogger('absl').addFilter(_tokamax_filter)
+  try:
+    absl_logging.get_absl_handler().addFilter(_tokamax_filter)
+  except Exception:
+    pass
+
+  # Suppress int64-truncation UserWarning from featurization (expected without
+  # JAX_ENABLE_X64).
+  warnings.filterwarnings('ignore', message='.*int64.*')
+
+  # Reduce absl verbosity so pipeline INFO logs (bucket sizes etc.) are hidden.
+  absl_logging.set_verbosity(absl_logging.WARNING)
+
+  if _CACHE_DIR.value is not None:
+    _jax_cache = os.path.join(_CACHE_DIR.value, 'jax')
+    os.makedirs(_jax_cache, exist_ok=True)
+    jax.config.update('jax_compilation_cache_dir', _jax_cache)
 
   if _JSON_PATH.value is None == _INPUT_DIR.value is None:
     raise ValueError(
@@ -955,7 +1068,10 @@ def main(_):
 
   if _RUN_INFERENCE.value:
     # Fail early on incompatible devices, but only if we're running inference.
-    gpu_devices = jax.local_devices(backend='gpu')
+    try:
+      gpu_devices = jax.local_devices(backend='gpu')
+    except RuntimeError:
+      gpu_devices = []
     if gpu_devices:
       compute_capability = float(
           gpu_devices[_GPU_DEVICE.value].compute_capability
@@ -980,19 +1096,6 @@ def main(_):
               ' https://developer.nvidia.com/cuda-gpus) the'
               ' --flash_attention_implementation must be set to "xla".'
           )
-
-  notice = textwrap.wrap(
-      'Running AlphaFold 3. Please note that standard AlphaFold 3 model'
-      ' parameters are only available under terms of use provided at'
-      ' https://github.com/google-deepmind/alphafold3/blob/main/WEIGHTS_TERMS_OF_USE.md.'
-      ' If you do not agree to these terms and are using AlphaFold 3 derived'
-      ' model parameters, cancel execution of AlphaFold 3 inference with'
-      ' CTRL-C, and do not use the model parameters.',
-      break_long_words=False,
-      break_on_hyphens=False,
-      width=80,
-  )
-  print('\n' + '\n'.join(notice) + '\n')
 
   max_template_date = datetime.date.fromisoformat(_MAX_TEMPLATE_DATE.value)
   if _RUN_DATA_PIPELINE.value:
@@ -1037,8 +1140,25 @@ def main(_):
     model_dir = _maybe_convert_of3_weights(_OF3_CHECKPOINT.value, model_dir)
     use_of3_weights = True
 
+  if not use_of3_weights:
+    notice = textwrap.wrap(
+        'Running AlphaFold 3. Please note that standard AlphaFold 3 model'
+        ' parameters are only available under terms of use provided at'
+        ' https://github.com/google-deepmind/alphafold3/blob/main/WEIGHTS_TERMS_OF_USE.md.'
+        ' If you do not agree to these terms and are using AlphaFold 3 derived'
+        ' model parameters, cancel execution of AlphaFold 3 inference with'
+        ' CTRL-C, and do not use the model parameters.',
+        break_long_words=False,
+        break_on_hyphens=False,
+        width=80,
+    )
+    print('\n' + '\n'.join(notice) + '\n')
+
   if _RUN_INFERENCE.value:
-    devices = jax.local_devices(backend='gpu')
+    try:
+      devices = jax.local_devices(backend='gpu')
+    except RuntimeError:
+      devices = jax.local_devices()
     print(
         f'Found local devices: {devices}, using device {_GPU_DEVICE.value}:'
         f' {devices[_GPU_DEVICE.value]}'
@@ -1071,12 +1191,19 @@ def main(_):
     if _NUM_SEEDS.value is not None:
       print(f'Expanding fold job {fold_input.name} to {_NUM_SEEDS.value} seeds')
       fold_input = fold_input.with_multiple_seeds(_NUM_SEEDS.value)
+    if _USE_MSA_SERVER.value:
+      from alphafold3.data import msa_server as _msa_server
+      fold_input = _msa_server.fill_missing_msas(
+          fold_input,
+          host_url=_MSA_SERVER_URL.value,
+          user_agent=_MSA_SERVER_USER_AGENT.value,
+      )
     process_fold_input(
         fold_input=fold_input,
         data_pipeline_config=data_pipeline_config,
         model_runner=model_runner,
         output_dir=os.path.join(_OUTPUT_DIR.value, fold_input.sanitised_name()),
-        buckets=tuple(int(bucket) for bucket in _BUCKETS.value),
+        buckets=None if _NOJIT.value else tuple(int(bucket) for bucket in _BUCKETS.value),
         ref_max_modified_date=max_template_date,
         conformer_max_iterations=_CONFORMER_MAX_ITERATIONS.value,
         resolve_msa_overlaps=_RESOLVE_MSA_OVERLAPS.value,
@@ -1089,6 +1216,10 @@ def main(_):
   print(f'Done running {num_fold_inputs} fold jobs.')
 
 
-if __name__ == '__main__':
+def run():
   flags.mark_flags_as_required(['output_dir'])
   app.run(main)
+
+
+if __name__ == '__main__':
+  run()

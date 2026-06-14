@@ -114,6 +114,7 @@
     "bfloat16": "all",
     "final_init": "zeros",
     "flash_attention_implementation": "triton",
+    "of3_weights": false,
     "pair_attention_chunk_size": [
       [
         1536,

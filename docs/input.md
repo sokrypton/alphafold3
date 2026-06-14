@@ -657,6 +657,52 @@ Or you can simply fully omit the `templates` field thus setting it implicitly to
 }
 ```
 
+### MSA via ColabFold/MMseqs2 Server
+
+If you do not have the genetic databases installed locally, you can use the
+public [ColabFold](https://colabfold.mmseqs.com/) MMseqs2 server to generate
+MSAs on the fly:
+
+```bash
+python run_alphafold.py \
+  --json_path=my_input.json \
+  --model_dir=... \
+  --output_dir=... \
+  --use_msa_server \
+  --norun_data_pipeline
+```
+
+The `--use_msa_server` flag queries `https://api.colabfold.com` and populates
+`unpairedMsa` (and `pairedMsa` for multi-chain protein jobs) before the model
+runs. No local databases are required, so `--norun_data_pipeline` should be
+passed to skip the Jackhmmer/Nhmmer search stage.
+
+**Notes:**
+
+*   **Protein only.** The ColabFold server covers UniRef30 + environmental
+    databases for proteins. RNA chains automatically receive a query-sequence-only
+    stub (MSA-free), and DNA chains are unaffected.
+*   **JSON preparation.** Leave `unpairedMsa` and `pairedMsa` unset (or `null`)
+    for chains whose MSA should come from the server. Chains that already have
+    an MSA set in the JSON are left unchanged.
+*   **Saved MSA files.** After a successful run, the fetched MSAs are written to
+    `<output_dir>/<job_name>/msas/` as `<chain_id>_unpaired.a3m` and (for
+    multi-protein jobs) `<chain_id>_paired.a3m`. You can reuse these files in
+    subsequent runs by embedding them in the JSON to avoid re-querying the server.
+*   **Rate limits.** The public server is a shared resource. For large batches
+    prefer local databases or a self-hosted ColabFold instance (pass its URL via
+    `--msa_server_url`).
+*   **Homo-oligomers.** Use a list of chain IDs for the same sequence to
+    model homo-oligomers. The server is queried once per unique sequence:
+
+    ```json
+    "protein": {
+      "id": ["A", "B", "C"],
+      "sequence": "MKTAYIAKQRQISFVKSHFSRQ...",
+      "templates": []
+    }
+    ```
+
 ## Bonds
 
 To manually specify covalent bonds, use the `bondedAtomPairs` field. This is

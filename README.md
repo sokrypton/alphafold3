@@ -41,12 +41,7 @@ directly from Google. Use is subject to these
 **Step 1 — Download OpenFold3 weights:**
 
 ```bash
-# Via AWS S3 (no account required):
-aws s3 cp s3://openfold/staging/of3-p2-155k.pt ./of3-p2-155k.pt --no-sign-request
-
-# Or via HuggingFace:
-pip install huggingface_hub
-huggingface-cli download OpenFold/OpenFold3 --local-dir of3_weights/
+wget https://openfold.s3.amazonaws.com/staging/of3-p2-155k.pt
 ```
 
 Weights are also hosted at [huggingface.co/OpenFold/OpenFold3](https://huggingface.co/OpenFold/OpenFold3).

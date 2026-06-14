@@ -22,11 +22,6 @@ import sys
 import time
 from pathlib import Path
 
-# Ensure alphafold3 package is importable when running from the repo root
-_HERE = Path(__file__).parent
-sys.path.insert(0, str(_HERE / 'src'))
-
-
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description='Convert OpenFold3 (PyTorch) weights to AlphaFold3 (JAX) format',
@@ -88,6 +83,10 @@ def main() -> int:
     print(f'\nDone. Use with:\n'
           f'  python run_alphafold.py --model_dir {args.output_dir} --of3_weights ...')
     return 0
+
+
+def run():
+    sys.exit(main())
 
 
 if __name__ == '__main__':
