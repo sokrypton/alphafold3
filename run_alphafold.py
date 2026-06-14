@@ -430,6 +430,26 @@ _NOJIT = flags.DEFINE_bool(
     'Disable JAX JIT compilation. Useful for debugging.',
 )
 
+_USE_MSA_SERVER = flags.DEFINE_bool(
+    'use_msa_server',
+    False,
+    'Query the ColabFold/MMseqs2 server to generate MSAs for protein and RNA'
+    ' chains that are missing them. Requires internet access. Results are'
+    ' cached in --cache_dir so subsequent runs skip the network.',
+)
+
+_MSA_SERVER_URL = flags.DEFINE_string(
+    'msa_server_url',
+    'https://api.colabfold.com',
+    'URL of the ColabFold MSA server.',
+)
+
+_MSA_SERVER_USER_AGENT = flags.DEFINE_string(
+    'msa_server_user_agent',
+    'alphafold3/1.0',
+    'HTTP User-Agent string sent to the MSA server.',
+)
+
 
 def _maybe_convert_of3_weights(of3_checkpoint: str, model_dir: str) -> str:
   """Convert OF3 checkpoint to AF3 format if not already done.
@@ -734,9 +754,24 @@ def write_outputs(
   max_ranking_score = None
   max_ranking_result = None
 
-  output_terms = (
-      pathlib.Path(alphafold3.cpp.__file__).parent / 'OUTPUT_TERMS_OF_USE.md'
-  ).read_text()
+  if _OF3_WEIGHTS.value:
+    output_terms = (
+        '# OUTPUT TERMS OF USE\n\n'
+        'These structure predictions were generated using OpenFold3 model weights,\n'
+        'which are licensed under the Apache License, Version 2.0.\n\n'
+        'The AlphaFold 3 Output Terms of Use (which restrict commercial use) do NOT\n'
+        'apply to outputs generated with OpenFold3 weights. You are free to use these\n'
+        'outputs for any purpose, including commercial applications, subject only to\n'
+        'the Apache 2.0 license.\n\n'
+        'OpenFold3 weights: https://github.com/aqlaboratory/openfold\n'
+        'Apache License 2.0: https://www.apache.org/licenses/LICENSE-2.0\n\n'
+        'AlphaFold 3 code is copyright Google DeepMind, also Apache 2.0:\n'
+        'https://github.com/google-deepmind/alphafold3\n'
+    )
+  else:
+    output_terms = (
+        pathlib.Path(alphafold3.cpp.__file__).parent / 'OUTPUT_TERMS_OF_USE.md'
+    ).read_text()
 
   os.makedirs(output_dir, exist_ok=True)
   for results_for_seed in all_inference_results:
@@ -932,6 +967,10 @@ def process_fold_input(
   else:
     print('Running data pipeline...')
     fold_input = pipeline.DataPipeline(data_pipeline_config).process(fold_input)
+
+  if _USE_MSA_SERVER.value:
+    from alphafold3.data import msa_server as _msa_server
+    _msa_server.save_msas(fold_input, output_dir)
 
   write_fold_input_json(fold_input, output_dir)
   if model_runner is None:
@@ -1152,6 +1191,13 @@ def main(_):
     if _NUM_SEEDS.value is not None:
       print(f'Expanding fold job {fold_input.name} to {_NUM_SEEDS.value} seeds')
       fold_input = fold_input.with_multiple_seeds(_NUM_SEEDS.value)
+    if _USE_MSA_SERVER.value:
+      from alphafold3.data import msa_server as _msa_server
+      fold_input = _msa_server.fill_missing_msas(
+          fold_input,
+          host_url=_MSA_SERVER_URL.value,
+          user_agent=_MSA_SERVER_USER_AGENT.value,
+      )
     process_fold_input(
         fold_input=fold_input,
         data_pipeline_config=data_pipeline_config,
