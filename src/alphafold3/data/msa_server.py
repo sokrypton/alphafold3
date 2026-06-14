@@ -138,7 +138,11 @@ def _query_server(
                 raw_block = raw_block.strip()
                 if not raw_block:
                     continue
-                lines = raw_block.splitlines(keepends=True)
+                # Append \n so the last line always terminates; without this,
+                # the last sequence in the block has no trailing newline and
+                # the next block's header gets concatenated onto it when we
+                # join blocks from multiple files.
+                lines = (raw_block + '\n').splitlines(keepends=True)
                 first = lines[0].strip() if lines else ''
                 if not first.startswith('>'):
                     continue
@@ -150,9 +154,10 @@ def _query_server(
                     blocks[m] = list(lines)
                 else:
                     # Merge hits from additional files (e.g. bfd after uniref).
-                    # Skip the ">M" header line to avoid a duplicate; keep the
-                    # query sequence row (harmless as a pseudo-hit) and all hits.
-                    blocks[m].extend(lines[1:])
+                    # Skip the ">M" header (lines[0]) AND the query sequence
+                    # (lines[1]) — a bare sequence line with no preceding header
+                    # would be concatenated onto the previous hit by AF3's parser.
+                    blocks[m].extend(lines[2:])
 
     return [''.join(blocks.get(m, [])) for m in m_ids]
 
