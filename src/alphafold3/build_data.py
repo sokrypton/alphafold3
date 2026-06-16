@@ -24,8 +24,12 @@ import os
 import pathlib
 import site
 
+import pickle
+
 import alphafold3.constants.converters
 from alphafold3.constants.converters import ccd_pickle_gen
+from alphafold3.constants.converters import chemical_component_sets_gen
+from alphafold3.common import safe_pickle
 
 
 def build_data():
@@ -48,4 +52,22 @@ def build_data():
 
   out_root = resources.files(alphafold3.constants.converters)
   ccd_pickle_path = out_root.joinpath('ccd.pickle')
+  chemical_component_sets_pickle_path = out_root.joinpath(
+      'chemical_component_sets.pickle'
+  )
+  ccd_codes_path = out_root.joinpath('ccd_codes.txt')
+
   ccd_pickle_gen.main(['', str(cif_path), str(ccd_pickle_path)])
+
+  print(f'Loading {ccd_pickle_path}', flush=True)
+  with open(str(ccd_pickle_path), 'rb') as f:
+    ccd = safe_pickle.load(f)
+
+  result = chemical_component_sets_gen.find_ions_and_glycans_in_ccd(ccd)
+  with open(str(chemical_component_sets_pickle_path), 'wb') as f:
+    pickle.dump(result, f)
+  print(f'Written {chemical_component_sets_pickle_path}', flush=True)
+
+  codes = sorted(ccd.keys())
+  pathlib.Path(ccd_codes_path).write_text('\n'.join(codes))
+  print(f'Wrote {len(codes):,} CCD codes to {ccd_codes_path}', flush=True)
