@@ -19,6 +19,9 @@ jobs:
           - name-prefix: "all tests"
             python-version: '3.12'
             os: ubuntu-latest
+          - name-prefix: "all tests"
+            python-version: '3.13'
+            os: ubuntu-latest
 
     steps:
     - uses: actions/checkout@v6
