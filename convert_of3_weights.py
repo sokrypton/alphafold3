@@ -56,6 +56,7 @@ def main() -> int:
         load_of3_checkpoint,
         map_of3_to_af3,
         save_af3_params,
+        write_variant_marker,
     )
 
     print(f'Loading {args.of3_checkpoint}  (use_ema={args.use_ema}) ...')
@@ -80,6 +81,7 @@ def main() -> int:
     t0 = time.perf_counter()
     out = save_af3_params(af3_params, args.output_dir)
     print(f'  {out}  ({out.stat().st_size/1e6:.0f} MB, {time.perf_counter()-t0:.1f}s)')
+    print(f'  OF3 variant: {write_variant_marker(args.output_dir, sd)}')
     print(f'\nDone. Use with:\n'
           f'  python run_alphafold.py --model_dir {args.output_dir} --of3_weights ...')
     return 0

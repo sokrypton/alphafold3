@@ -216,10 +216,15 @@ class Transformer(hk.Module):
     assert self.config.num_blocks % self.config.super_block_size == 0
     num_super_blocks = self.config.num_blocks // self.config.super_block_size
 
-    if self.global_config.of3_weights and pair_cond is not None:
-      # OF3 mode: per-block pair LayerNorm + projection. pair_cond is shared
-      # across all blocks; each block in the layer_stack gets its own LN/Linear
-      # params stacked along axis 0.
+    if (
+        self.global_config.of3_weights
+        and not self.global_config.of3_openbind
+        and pair_cond is not None
+    ):
+      # OF3 preview-2 mode: per-block pair LayerNorm + projection. pair_cond is
+      # shared across all blocks; each block in the layer_stack gets its own
+      # LN/Linear params stacked along axis 0. openbind runs the pair LayerNorm
+      # once, so it takes AF3's own path below.
       def block(act):  # pylint: disable=function-redefined
         pair_act = hm.LayerNorm(
             name='pair_input_layer_norm',

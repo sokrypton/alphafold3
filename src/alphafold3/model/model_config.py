@@ -45,3 +45,10 @@ class GlobalConfig(base_config.BaseConfig):
   # When True, enables OpenFold3 weight compatibility mode.
   # Set to False (default) when using original AlphaFold3 weights.
   of3_weights: bool = False
+  # Which OpenFold3 checkpoint layout of3_weights refers to. OpenFold3 >= 0.5.0
+  # ("openbind") moved the diffusion transformer's pair LayerNorm out of
+  # attention pair bias and runs it once, and computes the column-attention
+  # pair bias from z the way AlphaFold3 does; both bring it back to
+  # AlphaFold3's own layout, so two preview-2 compatibility branches have to be
+  # switched off. Ignored unless of3_weights is True.
+  of3_openbind: bool = False

@@ -7,7 +7,9 @@ reproduce or re-implement AlphaFold3 from the released source.
 **Repositories**
 - AF3 source: [sokrypton/alphafold3](https://github.com/sokrypton/alphafold3) (fork of google-deepmind/alphafold3)
 - OF3 source: [aqlaboratory/openfold3](https://github.com/aqlaboratory/openfold)
-- OF3 weights: `s3://openfold/staging/of3-p2-155k.pt` (public, no sign required)
+- OF3 weights: `s3://openfold3-data/openfold3-parameters/of3-ob-2025-06-30-174k.pt`
+  (OpenFold3 >= 0.5.0, "openbind") and `s3://openfold/staging/of3-p2-155k.pt`
+  (preview-2) — both public, no sign required
 
 ---
 
@@ -104,6 +106,43 @@ So mapping `linear_i → left` is **correct in the trunk and wrong in the confid
 **Checked and confirmed consistent** (no fix needed): the PAE/PDE bin decoding — AF3's `linspace(0, 31.0, 63)` + half-step + catch-all and OF3's `get_bin_centers(0, 32, 64)` both yield centers `0.25, 0.75, …, 31.75`; and the representative-atom choice feeding `linear_distance` — AF3's pseudo-beta (CB, CA for Gly, C4 for purines, C2 for pyrimidines, atom 0 for ligands) matches OF3's `get_token_representative_atoms` exactly.
 
 ---
+
+## Two OF3 checkpoint releases
+
+The port was written against preview-2 (`of3-p2-155k`). OpenFold3 >= 0.5.0
+("openbind", `of3-ob-2025-06-30-174k`) reverted two of the divergences it
+compensates for, so those two adjustments are switched off for openbind
+weights and left in force for preview-2. Everything else — the residue
+alphabet permutation, the element one-hot shift, the atom cross-attention
+masks, the bond symmetrisation, the i/j crossings, the Fourier buffers —
+applies to both.
+
+| what | preview-2 | openbind |
+|---|---|---|
+| Diffusion transformer pair LayerNorm | one per block, inside `attention_pair_bias` | one on the transformer, run once (AF3's own layout) |
+| Column attention pair bias | `Linear(z[k, q])` | `Linear(z[q, k])`, per AF3 Algorithm 15 |
+
+Consequences for the code:
+
+| File | openbind change |
+|---|---|
+| `model_config.py` | `GlobalConfig.of3_openbind`, gating the two preview-2-only branches |
+| `network/diffusion_transformer.py` | openbind takes AF3's shared-LayerNorm path; the per-block branch is preview-2 only |
+| `network/modules.py` | the `GridSelfAttention` bias axis swap is preview-2 only |
+| `of3_weight_converter.py` | openbind's shared LayerNorm scale and per-super-block pair-logits Linear go to AF3's `pair_input_layer_norm` and `__layer_stack_with_per_layer` scopes, rather than being stacked into each block |
+
+The release is detected from the checkpoint itself: openbind has
+`diffusion_module.diffusion_transformer.layer_norm_z.weight` and preview-2 has
+the same tensor once per block inside `attention_pair_bias`, so the two are
+mutually exclusive and no version string is needed. `convert_of3_weights.py`
+and `run_alphafold.py --of3_checkpoint` write the result to an `of3_variant`
+file next to the converted parameters, which is what a later
+`--model_dir`-only run reads; `--of3_openbind={auto,true,false}` overrides it.
+A wrong choice is caught rather than silently tolerated: the two layouts
+occupy different parameter scopes, so the run stops with `Unable to retrieve
+parameter 'scale' for module '.../transformer/pair_input_layer_norm'`. Both
+directions were checked (openbind weights forced to preview-2 and the reverse).
+The marker and the warning exist so this does not have to be diagnosed by hand.
 
 ## Verification
 
@@ -215,11 +254,11 @@ if self.transpose and self.global_config.of3_weights:
     nonbatched_bias = jnp.swapaxes(nonbatched_bias, -1, -2)
 ```
 
-Anyone reimplementing triangle attention ending node should use `Linear(z[q, k])` per the paper if training from scratch.
+Anyone reimplementing triangle attention ending node should use `Linear(z[q, k])` per the paper if training from scratch. OpenFold3 >= 0.5.0 did exactly that: `TriangleAttention.forward` gained a `transpose_bias` argument, set for the ending node, which restores the paper's ordering. The swap above is therefore applied only for preview-2 weights (`of3_openbind=False`).
 
 ### 4. Diffusion transformer pair conditioning (per-block vs. shared)
 
-OF3 applies a separate `LayerNorm + Linear` to the pair representation inside **each** diffusion transformer block. AF3's original code applied a single shared LayerNorm before all blocks. This is a genuine architectural difference that produces incompatible parameter layouts. If training AF3 from scratch, the choice must match whatever convention the weights were trained with.
+OF3 preview-2 applies a separate `LayerNorm + Linear` to the pair representation inside **each** diffusion transformer block. AF3's original code applied a single shared LayerNorm before all blocks. This is a genuine architectural difference that produces incompatible parameter layouts. If training AF3 from scratch, the choice must match whatever convention the weights were trained with. OpenFold3 >= 0.5.0 moved the pair LayerNorm out of attention pair bias and runs it once "to match the AlphaFold3 SI", so openbind weights use AF3's own shared layout and the per-block branch is preview-2 only.
 
 ### 5. Fourier noise embeddings
 

@@ -35,9 +35,23 @@ https://storage.googleapis.com/alphafold3/af3.bin.zst. Use is subject to these
 
 [OpenFold3](https://github.com/aqlaboratory/openfold3), developed by the AlQuraishi Lab at Columbia University and the OpenFold Consortium, is an independent reproduction of AlphaFold 3 that has released model weights under the Apache 2.0 license. These weights can be used with this codebase as a freely available alternative to the Google DeepMind parameters.
 
+Two OpenFold3 releases are supported. They lay out the diffusion transformer's
+pair bias differently, and the code picks the right layout for whichever
+checkpoint you convert:
+
+| checkpoint | release |
+|---|---|
+| `of3-ob-2025-06-30-174k.pt` | OpenFold3 >= 0.5.0, "openbind" |
+| `of3-p2-155k.pt` | preview-2 |
+
 **Step 1 — Download OpenFold3 weights:**
 
 ```bash
+# openbind (OpenFold3 >= 0.5.0)
+aws s3 cp s3://openfold3-data/openfold3-parameters/of3-ob-2025-06-30-174k.pt . \
+  --no-sign-request
+
+# or preview-2
 wget https://openfold.s3.amazonaws.com/staging/of3-p2-155k.pt
 ```
 
@@ -49,11 +63,12 @@ A conversion script is included in this repository:
 
 ```bash
 python convert_of3_weights.py \
-  --of3_checkpoint ./of3-p2-155k.pt \
+  --of3_checkpoint ./of3-ob-2025-06-30-174k.pt \
   --output_dir ./af3_of3_params/
 ```
 
-This produces `af3_of3_params/of3_ported_weights.bin.zst` (~1.4 GB).
+This produces `af3_of3_params/of3_ported_weights.bin.zst` (~1.4 GB), alongside
+an `of3_variant` file naming the release the weights came from.
 
 **Step 3 — Run inference:**
 
@@ -66,6 +81,39 @@ python run_alphafold.py \
   --output_dir=./output/ \
   --of3_weights
 ```
+
+The release-specific settings come from the `of3_variant` file written in
+Step 2. If it is missing — weights converted by some other route — the run
+warns and assumes preview-2; pass `--of3_openbind=true` for openbind weights,
+or `--of3_openbind=false` to force preview-2. The wrong choice is not silent:
+the two releases keep the diffusion transformer's pair bias in different
+parameter scopes, so the run stops with `Unable to retrieve parameter 'scale'
+for module '.../transformer/pair_input_layer_norm'` instead of returning a
+structure.
+
+`run_alphafold.py --of3_checkpoint=./of3-ob-2025-06-30-174k.pt
+--model_dir=./af3_of3_params/` collapses Steps 2 and 3 — it converts on first
+use, caches the result in `--model_dir` and runs inference with the matching
+settings.
+
+**What has been checked.** The openbind weights have been exercised here on
+protein monomers and protein–protein complexes, run with precomputed MSAs
+(`--norun_data_pipeline`).
+
+Structural templates have been checked for a single protein chain. Given a
+full-coverage template inline in the input JSON, the prediction reproduces it —
+0.26 Å over 153 CA, TM 0.997, against 8.11 Å and TM 0.461 for the same input
+with no template — and confidence rises from pTM 0.58 to 0.95. AlphaFold 3's
+own weights respond by the same amount on the same input (0.21 Å, pTM 0.93).
+That shows the template path reaches the model and behaves as it does under
+AlphaFold 3's weights; it is not a measurement of template-based accuracy on a
+held-out target, since the template used was 99% identical to the query.
+
+Not covered by any check in this repository: DNA and RNA chains, ligands, ions,
+post-translational modifications and other covalent bonds, glycans, templates
+on more than one chain, and the full genetic database data pipeline. Those paths
+may well work — the conversion covers the corresponding weights — but nothing
+here demonstrates it, so treat them as unverified.
 
 The OpenFold3 weights are subject to the [Apache 2.0 License](https://www.apache.org/licenses/LICENSE-2.0) and may be used for both academic and commercial purposes, without requiring a separate access request.
 

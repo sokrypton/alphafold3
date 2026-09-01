@@ -226,9 +226,14 @@ class GridSelfAttention(hk.Module):
         self.config.num_head, use_bias=False, name='pair_bias_projection'
     )(act)
     nonbatched_bias = jnp.transpose(nonbatched_bias, [2, 0, 1])
-    # OpenFold3 computes the pair bias from transposed z for column-wise attention;
-    # swap axes to match that convention when of3_weights=True.
-    if self.transpose and self.global_config.of3_weights:
+    # OpenFold3 preview-2 computed the pair bias from transposed z for
+    # column-wise attention; swap axes to match that convention. openbind
+    # indexes z the way AF3 does (Algorithm 15), so it keeps AF3's own axes.
+    if (
+        self.transpose
+        and self.global_config.of3_weights
+        and not self.global_config.of3_openbind
+    ):
       nonbatched_bias = jnp.swapaxes(nonbatched_bias, -1, -2)
 
     num_residues = act.shape[0]

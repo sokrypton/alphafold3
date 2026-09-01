@@ -464,9 +464,11 @@ _OF3_CHECKPOINT = flags.DEFINE_string(
     'Path to an OpenFold3 .pt checkpoint file. When provided, the weights are'
     ' converted to AF3 format on first use and cached in --model_dir. The model'
     ' is then run with OF3-compatible settings (of3_weights=True). Weights are'
-    ' freely available from the public AWS bucket:\n'
-    '  aws s3 cp s3://openfold/staging/of3-p2-155k.pt ./of3-p2-155k.pt'
-    ' --no-sign-request',
+    ' freely available from the public AWS buckets:\n'
+    '  aws s3 cp s3://openfold3-data/openfold3-parameters/'
+    'of3-ob-2025-06-30-174k.pt . --no-sign-request  # OpenFold3 >= 0.5.0\n'
+    '  aws s3 cp s3://openfold/staging/of3-p2-155k.pt . --no-sign-request'
+    '  # preview-2',
 )
 _OF3_WEIGHTS = flags.DEFINE_bool(
     'of3_weights',
@@ -474,6 +476,15 @@ _OF3_WEIGHTS = flags.DEFINE_bool(
     'Use OF3-compatible model settings (of3_weights=True). Set automatically'
     ' when --of3_checkpoint is provided. Also set this flag when --model_dir'
     ' already points to a directory of pre-converted OF3 weights.',
+)
+_OF3_OPENBIND = flags.DEFINE_enum(
+    'of3_openbind',
+    'auto',
+    ['auto', 'true', 'false'],
+    'Whether the OF3 weights are openbind (OpenFold3 >= 0.5.0), which needs a'
+    ' different diffusion transformer layout than preview-2. "auto" reads the'
+    ' of3_variant marker written beside the converted weights in --model_dir.'
+    ' Only set this if that marker is missing or wrong.',
 )
 _NOJIT = flags.DEFINE_bool(
     'nojit',
@@ -514,6 +525,7 @@ def _maybe_convert_of3_weights(of3_checkpoint: str, model_dir: str) -> str:
       load_of3_checkpoint,
       map_of3_to_af3,
       save_af3_params,
+      write_variant_marker,
   )
 
   out_dir = pathlib.Path(model_dir)
@@ -535,6 +547,7 @@ def _maybe_convert_of3_weights(of3_checkpoint: str, model_dir: str) -> str:
   t0 = time.perf_counter()
   out = save_af3_params(af3_params, out_dir)
   print(f'  Saved {out}  ({out.stat().st_size/1e6:.0f} MB, {time.perf_counter()-t0:.1f}s)')
+  print(f'  OF3 variant: {write_variant_marker(out_dir, sd)}')
   return str(out_dir)
 
 
@@ -546,6 +559,7 @@ def make_model_config(
     return_embeddings: bool = False,
     return_distogram: bool = False,
     of3_weights: bool = False,
+    of3_openbind: bool = False,
 ) -> model.Model.Config:
   """Returns a model config with some defaults overridden."""
   config = model.Model.Config()
@@ -557,6 +571,7 @@ def make_model_config(
   config.return_embeddings = return_embeddings
   config.return_distogram = return_distogram
   config.global_config.of3_weights = of3_weights
+  config.global_config.of3_openbind = of3_openbind
   return config
 
 
@@ -1212,6 +1227,27 @@ def main(_):
     model_dir = _maybe_convert_of3_weights(_OF3_CHECKPOINT.value, model_dir)
     use_of3_weights = True
 
+  # Which OF3 layout the weights follow: the explicit flag wins, otherwise the
+  # marker written next to them at conversion time, otherwise preview-2.
+  use_of3_openbind = False
+  if use_of3_weights:
+    from alphafold3.model.of3_weight_converter import read_variant_marker
+
+    if _OF3_OPENBIND.value == 'auto':
+      variant = read_variant_marker(model_dir)
+      if variant is None:
+        print(
+            f'Warning: no of3_variant marker in {model_dir}; assuming'
+            ' preview-2 weights. Pass --of3_openbind=true if these are'
+            ' openbind (OpenFold3 >= 0.5.0) weights: the two releases keep the'
+            " diffusion transformer's pair bias in different parameter scopes,"
+            ' so the wrong choice stops on a missing parameter.'
+        )
+      use_of3_openbind = variant == 'openbind'
+    else:
+      use_of3_openbind = _OF3_OPENBIND.value == 'true'
+    print(f'OF3 weights: variant={"openbind" if use_of3_openbind else "p2"}')
+
   if not use_of3_weights:
     notice = textwrap.wrap(
         'Running AlphaFold 3. Please note that standard AlphaFold 3 model'
@@ -1252,6 +1288,7 @@ def main(_):
             return_embeddings=_SAVE_EMBEDDINGS.value,
             return_distogram=_SAVE_DISTOGRAM.value,
             of3_weights=use_of3_weights,
+            of3_openbind=use_of3_openbind,
         ),
         device=device,
         model_dir=model_dir,

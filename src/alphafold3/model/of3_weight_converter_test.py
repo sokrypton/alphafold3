@@ -30,6 +30,11 @@ AF3 class c end up pulling from". That is checked against AF3's real featurizers
 (`msa_features`, `residue_names`), which makes these behavioural tests rather
 than a restatement of the converter's internal tables.
 
+The same file also converts the two OF3 checkpoint layouts - preview-2 and
+openbind (OpenFold3 >= 0.5.0) - whose diffusion transformers store the pair
+bias differently; `CheckpointVariantTest` and `DiffusionTransformerLayoutTest`
+cover telling them apart and mapping each one.
+
 Neither the openfold3 package nor an OF3 checkpoint is required. The OF3
 alphabet is transcribed from `openfold3/core/data/resources/residues.py`
 (`STANDARD_RESIDUES_WITH_GAP_3`). `CheckpointLayoutTest` optionally validates
@@ -128,6 +133,97 @@ def _template_aatype_mapping_statement() -> str:
       if 'aatype_linear_1' in line and line.lstrip().startswith('for ')
   )
   return '\n'.join(lines[idx : idx + 3])
+
+
+# Toy diffusion transformer dimensions. Small enough to write out by hand,
+# but with every axis a different length so a wrong reshape cannot pass.
+_TOY_N_BLOCKS = 6
+_TOY_N_SUPER = 3
+_TOY_NUM_HEAD = 2
+_TOY_HEAD_DIM = 3
+_TOY_C_Z = 5
+_TOY_C_SINGLE = 4
+_TOY_ACT = _TOY_NUM_HEAD * _TOY_HEAD_DIM  # 6
+
+# Real key prefix: the toy state dicts and a real checkpoint are read the same
+# way, so the variant checks below apply to both.
+_DIFF_TRANSFORMER_PREFIX = 'diffusion_module.diffusion_transformer'
+
+# The two tensors that move between the layouts: preview-2 keeps a pair
+# LayerNorm inside every block, openbind keeps one on the transformer. The
+# per-block pair *projection* stays per block in both.
+_PER_BLOCK_PAIR_NORM = 'attention_pair_bias.layer_norm_z.weight'
+_PER_BLOCK_PAIR_PROJ = 'attention_pair_bias.linear_z.weight'
+
+
+def _toy_diff_transformer_state_dict(
+    per_block_pair_norm: bool = True,
+) -> dict[str, np.ndarray]:
+  """Self-attention blocks of a diffusion transformer, in OF3 (out, in) layout.
+
+  Every tensor is drawn from one seeded generator, so each one is distinct and
+  a parameter that ends up in the wrong scope is visible.
+  """
+  rng = np.random.default_rng(0)
+
+  def w(*shape: int) -> np.ndarray:
+    return rng.standard_normal(shape).astype(np.float32)
+
+  def adaln(prefix: str) -> dict[str, np.ndarray]:
+    return {
+        f'{prefix}.layer_norm_s.weight': w(_TOY_C_SINGLE),
+        f'{prefix}.linear_g.weight': w(_TOY_ACT, _TOY_C_SINGLE),
+        f'{prefix}.linear_g.bias': w(_TOY_ACT),
+        f'{prefix}.linear_s.weight': w(_TOY_ACT, _TOY_C_SINGLE),
+    }
+
+  sd = {}
+  for block in range(_TOY_N_BLOCKS):
+    pa = f'{_DIFF_TRANSFORMER_PREFIX}.blocks.{block}.attention_pair_bias'
+    pt = f'{_DIFF_TRANSFORMER_PREFIX}.blocks.{block}.conditioned_transition'
+    sd.update(adaln(f'{pa}.layer_norm_a'))
+    if per_block_pair_norm:
+      sd[f'{pa}.layer_norm_z.weight'] = w(_TOY_C_Z)
+    sd[f'{pa}.linear_z.weight'] = w(_TOY_NUM_HEAD, _TOY_C_Z)
+    for name in ('q', 'k', 'v', 'g', 'o'):
+      sd[f'{pa}.mha.linear_{name}.weight'] = w(_TOY_ACT, _TOY_ACT)
+    sd[f'{pa}.mha.linear_q.bias'] = w(_TOY_ACT)
+    sd[f'{pa}.linear_ada_out.weight'] = w(_TOY_ACT, _TOY_ACT)
+    sd[f'{pa}.linear_ada_out.bias'] = w(_TOY_ACT)
+    sd.update(adaln(f'{pt}.layer_norm'))
+    sd[f'{pt}.swiglu.linear_a.weight'] = w(2 * _TOY_ACT, _TOY_ACT)
+    sd[f'{pt}.swiglu.linear_b.weight'] = w(2 * _TOY_ACT, _TOY_ACT)
+    sd[f'{pt}.linear_out.weight'] = w(_TOY_ACT, 2 * _TOY_ACT)
+    sd[f'{pt}.linear_g.weight'] = w(_TOY_ACT, _TOY_ACT)
+    sd[f'{pt}.linear_g.bias'] = w(_TOY_ACT)
+  if not per_block_pair_norm:
+    sd[f'{_DIFF_TRANSFORMER_PREFIX}.layer_norm_z.weight'] = w(_TOY_C_Z)
+  return sd
+
+
+def _convert_toy_block(sd: dict, **kwargs) -> dict[str, np.ndarray]:
+  return converter.convert_diff_self_attn_block(
+      sd,
+      0,
+      _DIFF_TRANSFORMER_PREFIX,
+      'transformer',
+      _TOY_NUM_HEAD,
+      _TOY_HEAD_DIM,
+      **kwargs,
+  )
+
+
+def _network_source(filename: str) -> str:
+  """Source of a file in model/network, read rather than imported.
+
+  Importing those modules pulls in the CCD pickles that `build_data` writes;
+  the rest of this file needs neither them nor a checkpoint.
+  """
+  path = os.path.join(
+      os.path.dirname(os.path.abspath(converter.__file__)), 'network', filename
+  )
+  with open(path) as f:
+    return f.read()
 
 
 def _converted_source_rows(param_scope: str) -> np.ndarray:
@@ -493,6 +589,144 @@ class PairEmbeddingIndexConventionTest(parameterized.TestCase):
     self.assertEqual(idx_for, {'aatype_linear_1': 3, 'aatype_linear_2': 2})
 
 
+class CheckpointVariantTest(parameterized.TestCase):
+  """Telling openbind (OpenFold3 >= 0.5.0) and preview-2 checkpoints apart.
+
+  Getting this backwards is caught, but only once the model runs: the two
+  layouts put the diffusion transformer's pair bias in different parameter
+  scopes, so the run stops on a missing parameter. The signature is therefore
+  a single tensor that only one of the two layouts has, rather than a version
+  string.
+  """
+
+  _SHARED_PAIR_NORM = f'{_DIFF_TRANSFORMER_PREFIX}.layer_norm_z.weight'
+  _BLOCK_PAIR_NORM = f'{_DIFF_TRANSFORMER_PREFIX}.blocks.0.{_PER_BLOCK_PAIR_NORM}'
+
+  def test_shared_pair_layer_norm_reads_as_openbind(self):
+    sd = {self._SHARED_PAIR_NORM: np.zeros(_TOY_C_Z, dtype=np.float32)}
+    self.assertTrue(converter.is_openbind_checkpoint(sd))
+    self.assertEqual(converter.checkpoint_variant(sd), 'openbind')
+
+  def test_per_block_pair_layer_norm_reads_as_preview2(self):
+    sd = {self._BLOCK_PAIR_NORM: np.zeros(_TOY_C_Z, dtype=np.float32)}
+    self.assertFalse(converter.is_openbind_checkpoint(sd))
+    self.assertEqual(converter.checkpoint_variant(sd), 'p2')
+
+  @parameterized.named_parameters(
+      ('openbind', False, 'openbind'),
+      ('preview2', True, 'p2'),
+  )
+  def test_toy_state_dicts_are_recognised(self, per_block_pair_norm, expected):
+    sd = _toy_diff_transformer_state_dict(per_block_pair_norm)
+    self.assertEqual(converter.checkpoint_variant(sd), expected)
+
+  def test_marker_round_trips_through_the_params_directory(self):
+    """A run given only --model_dir has to recover the variant from disk."""
+    params_dir = self.create_tempdir().full_path
+    self.assertIsNone(converter.read_variant_marker(params_dir))
+
+    sd = _toy_diff_transformer_state_dict(per_block_pair_norm=False)
+    self.assertEqual(converter.write_variant_marker(params_dir, sd), 'openbind')
+    self.assertEqual(converter.read_variant_marker(params_dir), 'openbind')
+
+
+class DiffusionTransformerLayoutTest(parameterized.TestCase):
+  """Mapping each layout's diffusion transformer pair bias.
+
+  preview-2 runs a pair LayerNorm inside every block, so its scale and the
+  pair-logits projection are stacked with the block parameters. openbind runs
+  the LayerNorm once, which is stock AF3's own layout: the scale hangs off the
+  transformer and AF3 gives each super block one Linear emitting the pair
+  logits of all its blocks at once.
+  """
+
+  def test_openbind_block_drops_only_the_pair_bias_parameters(self):
+    sd = _toy_diff_transformer_state_dict()
+
+    with_pair = _convert_toy_block(sd)
+    without_pair = _convert_toy_block(sd, per_block_pair_bias=False)
+
+    self.assertEqual(
+        set(with_pair) - set(without_pair),
+        {'pair_input_layer_norm/scale', 'pair_logits_projection/weights'},
+    )
+    self.assertEmpty(set(without_pair) - set(with_pair))
+    for key, value in without_pair.items():
+      with self.subTest(param=key):
+        np.testing.assert_array_equal(value, with_pair[key])
+
+  def test_preview2_block_carries_the_pair_bias_parameters(self):
+    sd = _toy_diff_transformer_state_dict()
+    pa = f'{_DIFF_TRANSFORMER_PREFIX}.blocks.0.attention_pair_bias'
+
+    converted = _convert_toy_block(sd)
+
+    np.testing.assert_array_equal(
+        converted['pair_input_layer_norm/scale'],
+        sd[f'{pa}.layer_norm_z.weight'],
+    )
+    np.testing.assert_array_equal(
+        converted['pair_logits_projection/weights'],
+        sd[f'{pa}.linear_z.weight'].T,
+    )
+
+  def test_openbind_checkpoint_has_no_per_block_pair_layer_norm_to_read(self):
+    """Asking for the preview-2 layout has to fail, not silently drop weights."""
+    sd = _toy_diff_transformer_state_dict(per_block_pair_norm=False)
+
+    self.assertIsNotNone(_convert_toy_block(sd, per_block_pair_bias=False))
+    with self.assertRaises(KeyError):
+      _convert_toy_block(sd)
+
+  def test_pair_logits_are_grouped_by_super_block(self):
+    sd = _toy_diff_transformer_state_dict(per_block_pair_norm=False)
+    super_size = _TOY_N_BLOCKS // _TOY_N_SUPER
+
+    grouped = converter._pair_logits_super_blocks(  # pylint: disable=protected-access
+        sd, _DIFF_TRANSFORMER_PREFIX, _TOY_N_BLOCKS, _TOY_N_SUPER
+    )
+
+    self.assertEqual(
+        grouped.shape,
+        (_TOY_N_SUPER, _TOY_C_Z, super_size, _TOY_NUM_HEAD),
+    )
+    for super_block in range(_TOY_N_SUPER):
+      for block in range(super_size):
+        with self.subTest(super_block=super_block, block=block):
+          index = super_block * super_size + block
+          np.testing.assert_array_equal(
+              grouped[super_block, :, block, :],
+              sd[f'{_DIFF_TRANSFORMER_PREFIX}.blocks.{index}.{_PER_BLOCK_PAIR_PROJ}'].T,
+          )
+
+
+class Preview2ModelBranchTest(parameterized.TestCase):
+  """The two preview-2-only model branches must stay gated on of3_openbind.
+
+  Both compensate for something openbind reverted to AF3's own convention. The
+  diffusion transformer's per-block pair LayerNorm changes which parameter
+  scopes are read, so leaving it on for openbind weights raises. The column
+  attention pair bias axis swap changes no shape at all, so leaving that one on
+  corrupts the fold silently - which is why it is gated here rather than left
+  to fail somewhere. Every *other* of3_weights branch (model.py,
+  atom_cross_attention.py, evoformer.py, diffusion_head.py) applies to both
+  checkpoints and must not be gated.
+
+  Driving the modules would need a built model, so check the source: these two
+  files hold one of3_weights branch each, which has to name of3_openbind.
+  """
+
+  @parameterized.named_parameters(
+      ('diffusion_transformer_pair_layer_norm', 'diffusion_transformer.py'),
+      ('column_attention_pair_bias', 'modules.py'),
+  )
+  def test_the_of3_weights_branch_is_gated_on_of3_openbind(self, filename):
+    source = _network_source(filename)
+
+    self.assertEqual(source.count('of3_weights'), 1)
+    self.assertEqual(source.count('of3_openbind'), 1)
+
+
 class CheckpointLayoutTest(parameterized.TestCase):
   """Validates the hardcoded block offsets against a real OF3 checkpoint.
 
@@ -553,6 +787,16 @@ class CheckpointLayoutTest(parameterized.TestCase):
   def test_input_dim_matches_assumed_layout(self, key, expected_in_dim):
     self.assertIn(key, self._sd)
     self.assertEqual(self._sd[key].shape[-1], expected_in_dim)
+
+  def test_exactly_one_pair_layer_norm_layout_is_present(self):
+    """The variant signature is only unambiguous if the layouts are exclusive."""
+    shared = f'{_DIFF_TRANSFORMER_PREFIX}.layer_norm_z.weight'
+    per_block = f'{_DIFF_TRANSFORMER_PREFIX}.blocks.0.{_PER_BLOCK_PAIR_NORM}'
+
+    self.assertNotEqual(shared in self._sd, per_block in self._sd)
+    self.assertEqual(
+        converter.is_openbind_checkpoint(self._sd), shared in self._sd
+    )
 
 
 if __name__ == '__main__':

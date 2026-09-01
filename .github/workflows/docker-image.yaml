@@ -1,0 +1,133 @@
+# Build the container image batch-infer runs, from AlphaFold 3's own
+# docker/Dockerfile, and push it to this repository's GitHub package registry.
+#
+# Manual only: nothing is built on push. The runner is native x86_64, which is
+# the point - the image has to be linux/amd64 for the cluster, and emulating
+# that on an arm64 laptop makes the C++ extension build (236 targets, -flto)
+# take hours.
+#
+# Weights are never in the image, only Apache-2.0 code and the CCD tables.
+
+name: docker-image
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to build'
+        required: true
+        default: 'add_openbind_porter'
+      tag_prefix:
+        description: 'Tag prefix; the short commit is appended'
+        required: true
+        default: 'openbind'
+      weights:
+        description: 'Also build the -weights image (adds the converted OpenFold3 parameters under /models)'
+        type: boolean
+        required: true
+        default: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Free disk space
+        # A runner has ~14 GB free on /, where Docker keeps its data. The CUDA
+        # base image, the CUDA wheels and the build tree together need more, so
+        # drop toolchains this build has no use for.
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Name the image after the commit it was built from
+        id: image
+        run: |
+          echo "tag=${{ inputs.tag_prefix }}-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+          echo "owner=$(echo '${{ github.repository_owner }}' | tr 'A-Z' 'a-z')" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        id: push
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/${{ steps.image.outputs.owner }}/alphafold3:${{ steps.image.outputs.tag }}
+          # Attestations would turn the tag into a multi-manifest index, which
+          # `apptainer pull docker://...` does not handle cleanly.
+          provenance: false
+          sbom: false
+
+      - name: Free the build cache before the second image
+        if: ${{ inputs.weights }}
+        # The base image was pushed, so the derived build pulls it from the
+        # registry; the builder cache is no longer needed and the convert stage
+        # wants room for torch plus the 2.2 GB checkpoint.
+        run: |
+          docker builder prune --all --force
+          df -h /
+
+      - name: Add the OpenFold3 openbind weights under /models
+        id: push_weights
+        if: ${{ inputs.weights }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.weights
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            BASE_IMAGE=ghcr.io/${{ steps.image.outputs.owner }}/alphafold3:${{ steps.image.outputs.tag }}
+          tags: ghcr.io/${{ steps.image.outputs.owner }}/alphafold3:${{ steps.image.outputs.tag }}-weights
+          provenance: false
+          sbom: false
+
+      - name: Report how to pull it
+        run: |
+          IMAGE=ghcr.io/${{ steps.image.outputs.owner }}/alphafold3:${{ steps.image.outputs.tag }}
+          {
+            echo "### Image"
+            echo ''
+            echo '```'
+            echo "$IMAGE"
+            echo "digest: ${{ steps.push.outputs.digest }}"
+            if [ -n '${{ steps.push_weights.outputs.digest }}' ]; then
+              echo "$IMAGE-weights   (adds the openbind parameters under /models)"
+              echo "digest: ${{ steps.push_weights.outputs.digest }}"
+            fi
+            echo '```'
+            echo ''
+            echo 'On the cluster (login node):'
+            echo ''
+            echo '```bash'
+            echo 'export APPTAINER_TMPDIR=/tmp/apptainer_pull.$$ && mkdir -p "$APPTAINER_TMPDIR"'
+            echo "apptainer pull alphafold3_${{ steps.image.outputs.tag }}.sif docker://$IMAGE"
+            echo 'rm -rf "$APPTAINER_TMPDIR"'
+            echo '```'
+            echo ''
+            echo 'The -weights image needs no model directory:'
+            echo ''
+            echo '```bash'
+            echo 'apptainer exec --nv IMAGE.sif python3 /app/alphafold/run_alphafold.py \\'
+            echo '    --model_dir=/models --of3_weights --json_path=... --output_dir=...'
+            echo '```'
+            echo ''
+            echo 'The package is private on first push; make it public once under'
+            echo 'Packages -> alphafold3 -> Package settings -> Change visibility.'
+          } >> "$GITHUB_STEP_SUMMARY"

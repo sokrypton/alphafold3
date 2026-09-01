@@ -1,0 +1,65 @@
+# AlphaFold 3 + OpenFold3 openbind weights, ready to use.
+#
+# Derives from the image built by docker/Dockerfile (upstream AlphaFold 3's own,
+# unmodified) and adds the converted OpenFold3 openbind parameters under
+# /models, so a run needs no external weights directory:
+#
+#   apptainer exec IMAGE.sif python3 /app/alphafold/run_alphafold.py \
+#       --model_dir=/models --of3_weights ...
+#
+# The of3_variant marker travels with them, so the release is auto-detected and
+# --of3_openbind is not needed.
+#
+# Why a derived image rather than extra stages in docker/Dockerfile: that file
+# is byte-identical to google-deepmind/alphafold3's, which is what keeps merging
+# upstream free. This one only adds.
+#
+# Only the OpenFold3 weights are here (Apache-2.0, redistributable). Google's
+# AlphaFold 3 parameters are NOT and must never be added: they are licensed
+# per-user and may not be redistributed.
+
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE} AS convert
+
+# The checkpoint is public; torch is only needed to read it, so both stay in
+# this throwaway stage rather than in the published image.
+ARG OF3_CHECKPOINT=of3-ob-2025-06-30-174k.pt
+ARG OF3_CHECKPOINT_URL=https://openfold3-data.s3.amazonaws.com/openfold3-parameters
+RUN uv pip install --python /alphafold3_venv/bin/python3 \
+        torch --index-url https://download.pytorch.org/whl/cpu \
+ && wget -q "${OF3_CHECKPOINT_URL}/${OF3_CHECKPOINT}" -O /tmp/${OF3_CHECKPOINT} \
+ && python3 /app/alphafold/convert_of3_weights.py \
+        --of3_checkpoint /tmp/${OF3_CHECKPOINT} --output_dir /models \
+ && rm /tmp/${OF3_CHECKPOINT} \
+ && ls -l /models && cat /models/of3_variant
+
+FROM ${BASE_IMAGE}
+ARG OF3_CHECKPOINT=of3-ob-2025-06-30-174k.pt
+ARG OF3_CHECKPOINT_URL=https://openfold3-data.s3.amazonaws.com/openfold3-parameters
+
+COPY --from=convert /models /models
+
+# Apache-2.0 requires the licence text and attribution to travel with the
+# weights. The text is the same document AlphaFold 3 ships; the NOTICE records
+# whose weights these are and where they came from.
+RUN cp /app/alphafold/LICENSE /models/LICENSE \
+ && printf '%s\n' \
+    'OpenFold3 model parameters' \
+    '' \
+    'of3_ported_weights.bin.zst holds the OpenFold3 "openbind" parameters' \
+    "(${OF3_CHECKPOINT}), converted from PyTorch to the AlphaFold 3 format by" \
+    'convert_of3_weights.py in this image. of3_variant records which OpenFold3' \
+    'release they are, and is read automatically by run_alphafold.py.' \
+    '' \
+    'Source:    '"${OF3_CHECKPOINT_URL}/${OF3_CHECKPOINT}" \
+    'Upstream:  https://github.com/aqlaboratory/openfold3' \
+    'Authors:   AlQuraishi Laboratory, Columbia University, and the OpenFold' \
+    '           Consortium' \
+    'Licence:   Apache License 2.0 (see LICENSE in this directory)' \
+    '' \
+    'This image contains no AlphaFold 3 model parameters from Google DeepMind.' \
+    > /models/NOTICE
+
+ENV OF3_OPENBIND_PARAMS=/models
+
+LABEL org.opencontainers.image.description="AlphaFold 3 with OpenFold3 openbind weights under /models"

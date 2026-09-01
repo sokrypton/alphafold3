@@ -7,6 +7,11 @@ Implements the 5 systematic mapping rules:
   4. SwiGLU weight concatenation (linear_a ++ linear_b → transition1)
   5. Layer stack aggregation (N separate blocks → (N, ...) stacked tensors)
 
+Two OF3 checkpoint layouts are supported, told apart by
+`is_openbind_checkpoint`: preview-2 (`of3-p2-155k`) and openbind (OpenFold3
+>= 0.5.0, e.g. `of3-ob-2025-06-30-174k`), which runs the diffusion
+transformer's pair LayerNorm once rather than once per block.
+
 No dependency on OpenFold3 source code — only PyTorch and NumPy are required
 to run the conversion.
 """
@@ -167,6 +172,22 @@ def _get(sd: dict, key: str) -> np.ndarray:
 
 def _has(sd: dict, key: str) -> bool:
     return key in sd
+
+
+# ─── Checkpoint variants ──────────────────────────────────────────────────────
+
+# openbind hoisted the diffusion transformer's pair LayerNorm out of
+# attention_pair_bias and runs it once, storing it as a single tensor on the
+# transformer; preview-2 stores one per block. Presence of the shared tensor is
+# therefore an unambiguous one-key signature, and needs no version string.
+_OPENBIND_SHARED_PAIR_NORM_KEY = (
+    'diffusion_module.diffusion_transformer.layer_norm_z.weight'
+)
+
+
+def is_openbind_checkpoint(sd: dict) -> bool:
+    """True for an openbind (OpenFold3 >= 0.5.0) checkpoint, False for preview-2."""
+    return _has(sd, _OPENBIND_SHARED_PAIR_NORM_KEY)
 
 
 # ─── Parameter dict helpers ───────────────────────────────────────────────────
@@ -527,15 +548,17 @@ def _diff_cond_transition_params(sd: dict, prefix: str, name: str) -> dict[str, 
 
 
 def convert_diff_self_attn_block(sd: dict, block_idx: int, prefix_base: str,
-                                  name: str, H: int, D: int) -> dict[str, np.ndarray]:
+                                  name: str, H: int, D: int, *,
+                                  per_block_pair_bias: bool = True) -> dict[str, np.ndarray]:
     pa = f'{prefix_base}.blocks.{block_idx}.attention_pair_bias'
     pt = f'{prefix_base}.blocks.{block_idx}.conditioned_transition'
     d = {}
     d.update(_diff_adaln_params(sd, f'{pa}.layer_norm_a', name))
-    # Per-block pair LayerNorm + projection stored without name prefix to match
-    # bare hm.LayerNorm(name='pair_input_layer_norm') in diffusion_transformer.py
-    d['pair_input_layer_norm/scale'] = _get(sd, f'{pa}.layer_norm_z.weight')
-    d['pair_logits_projection/weights'] = _t(_get(sd, f'{pa}.linear_z.weight'))
+    if per_block_pair_bias:
+        # Per-block pair LayerNorm + projection stored without name prefix to match
+        # bare hm.LayerNorm(name='pair_input_layer_norm') in diffusion_transformer.py
+        d['pair_input_layer_norm/scale'] = _get(sd, f'{pa}.layer_norm_z.weight')
+        d['pair_logits_projection/weights'] = _t(_get(sd, f'{pa}.linear_z.weight'))
     qw = _get(sd, f'{pa}.mha.linear_q.weight')
     d[f'{name}q_projection/weights'] = qw.T.reshape(-1, H, D)
     d[f'{name}q_projection/bias'] = _get(sd, f'{pa}.mha.linear_q.bias').reshape(H, D)
@@ -588,10 +611,27 @@ def _pair_logits_flat(sd: dict, prefix_base: str, n_blocks: int) -> np.ndarray:
     )
 
 
+def _pair_logits_super_blocks(sd: dict, prefix_base: str, n_blocks: int,
+                                n_super: int) -> np.ndarray:
+    """Pair-logits weights grouped the way AF3 stores them, per super block.
+
+    AF3 gives each super block a single Linear emitting the pair logits of all
+    of its blocks at once, so the stacked weights are
+    (n_super, c_z, super_block_size, num_head). OF3 keeps one Linear per block,
+    with block ``s * super_block_size + b`` belonging to super block ``s``.
+    """
+    flat = _pair_logits_flat(sd, prefix_base, n_blocks)  # (c_z, n_blocks, num_head)
+    c_z, _, num_head = flat.shape
+    grouped = flat.reshape(c_z, n_super, n_blocks // n_super, num_head)
+    return grouped.transpose(1, 0, 2, 3)
+
+
 def _stack_main_transformer(sd: dict, prefix_base: str, name: str,
-                              n_blocks: int, n_super: int, H: int, D: int) -> dict[str, np.ndarray]:
+                              n_blocks: int, n_super: int, H: int, D: int, *,
+                              per_block_pair_bias: bool = True) -> dict[str, np.ndarray]:
     super_size = n_blocks // n_super
-    all_blocks = [convert_diff_self_attn_block(sd, i, prefix_base, name, H, D)
+    all_blocks = [convert_diff_self_attn_block(sd, i, prefix_base, name, H, D,
+                                                per_block_pair_bias=per_block_pair_bias)
                   for i in range(n_blocks)]
     result = {}
     for key in all_blocks[0]:
@@ -774,9 +814,24 @@ def map_diffusion_head(sd: dict, params: dict, *,
     tr_base = f'{dm}.diffusion_transformer'
     tr_name = 'transformer'
     tr_scope = f'{scope}/{tr_name}'
-    tr_stacked = _stack_main_transformer(sd, tr_base, tr_name, n_diff_blocks, n_super_blocks, diff_H, diff_D)
-    tr_inner = f'{tr_scope}/__layer_stack_no_per_layer/__layer_stack_no_per_layer'
-    _populate_scope(params, tr_inner, tr_stacked)
+    openbind = is_openbind_checkpoint(sd)
+    tr_stacked = _stack_main_transformer(sd, tr_base, tr_name, n_diff_blocks,
+                                         n_super_blocks, diff_H, diff_D,
+                                         per_block_pair_bias=not openbind)
+    if openbind:
+        # A single pair LayerNorm and one pair-logits Linear per super block:
+        # stock AF3's own layout, so both hang off the transformer itself and
+        # the blocks go into the with_per_layer scopes.
+        tag = '__layer_stack_with_per_layer'
+        _populate_scope(params, f'{tr_scope}/{tag}/{tag}', tr_stacked)
+        _set(params, f'{tr_scope}/pair_input_layer_norm', 'scale',
+             _get(sd, f'{tr_base}.layer_norm_z.weight'))
+        _set(params, f'{tr_scope}/{tag}/pair_logits_projection', 'weights',
+             _pair_logits_super_blocks(sd, tr_base, n_diff_blocks, n_super_blocks))
+    else:
+        # preview-2 carries a pair LayerNorm and projection inside every block.
+        tr_inner = f'{tr_scope}/__layer_stack_no_per_layer/__layer_stack_no_per_layer'
+        _populate_scope(params, tr_inner, tr_stacked)
 
     _set(params, f'{scope}/single_cond_embedding_norm', 'scale', _get(sd, f'{dm}.layer_norm_s.weight'))
     _set(params, f'{scope}/single_cond_embedding_projection', 'weights', _t(_get(sd, f'{dm}.linear_s.weight')))
@@ -864,6 +919,29 @@ def load_of3_checkpoint(ckpt_path: Path | str, use_ema: bool = True) -> dict:
         (k[len('model.'):] if k.startswith('model.') else k): v
         for k, v in state_dict.items()
     }
+
+
+# Written next to the converted params so a later --model_dir-only run can tell
+# which OF3 layout they came from without the checkpoint at hand.
+VARIANT_MARKER_FILENAME = 'of3_variant'
+
+
+def checkpoint_variant(sd: dict) -> str:
+    """Name of the checkpoint's layout, 'openbind' or 'p2'."""
+    return 'openbind' if is_openbind_checkpoint(sd) else 'p2'
+
+
+def write_variant_marker(output_dir: Path | str, sd: dict) -> str:
+    """Record the checkpoint's layout beside its converted params."""
+    variant = checkpoint_variant(sd)
+    (Path(output_dir) / VARIANT_MARKER_FILENAME).write_text(variant + '\n')
+    return variant
+
+
+def read_variant_marker(model_dir: Path | str) -> str | None:
+    """Read back write_variant_marker; None if the directory has no marker."""
+    marker = Path(model_dir) / VARIANT_MARKER_FILENAME
+    return marker.read_text().strip() if marker.exists() else None
 
 
 def save_af3_params(params: dict[str, dict[str, np.ndarray]], output_dir: Path | str) -> Path:
