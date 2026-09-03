@@ -22,6 +22,7 @@
 from collections.abc import Mapping, Sequence
 import dataclasses
 import datetime
+import functools
 import itertools
 from typing import Any, Self, TypeAlias
 
@@ -928,6 +929,33 @@ class TokenFeatures:
   is_nonstandard_polymer_chain: xnp_ndarray
   is_water: xnp_ndarray
 
+  # chai-1 only: (num_tokens, 2560) ESM2 embeddings. chai's TOKEN feature stream
+  # is MOSTLY this -- zeroing it drops the token embedding to corr 0.327 and rms
+  # 0.183 of chai's own (tools/oracles/chai1/cmp_token_stream.py). Defaulted to
+  # None so it must stay LAST, and so every existing caller and every other
+  # model is byte-unchanged: absent key -> None -> the forward never builds the
+  # projection.
+  esm_embeddings: xnp_ndarray | None = None
+
+  # (num_tokens,) per-token cyclic period. 0 (or absent) means "not cyclic" and
+  # the relative-position encoding is byte-unchanged; a positive value wraps the
+  # residue offset modulo that period, which is how a cyclic peptide or a
+  # circular permutant tells the pair representation that its first and last
+  # residues are covalently adjacent rather than maximally distant. Defaulted to
+  # None so it must stay LAST and every existing caller is unaffected.
+  cyclic_period: xnp_ndarray | None = None
+
+  # (num_tokens,) 1 on the tokens of a MODIFIED residue (a PTM or a modified
+  # nucleotide), 0 elsewhere. Only boltz-2 consumes it, through its
+  # `modified_conditioning_init` embedding, and only in combination with the
+  # unknown restype -- that pair is the signature it was trained to read as
+  # "this token is a modified residue, take its shape from the reference
+  # conformer". Feeding one without the other does nothing at all: measured on
+  # phospho-ubiquitin, restype-only 6.42 A and flag-only 6.53 A on the
+  # phosphate, both together 3.10 A with a correct 1.61 A OG-P bond. Defaulted
+  # to None so it stays LAST and every existing caller is unaffected.
+  is_modified: xnp_ndarray | None = None
+
   @classmethod
   def compute_features(
       cls,
@@ -1022,6 +1050,9 @@ class TokenFeatures:
         is_ligand=batch['is_ligand'],
         is_nonstandard_polymer_chain=batch['is_nonstandard_polymer_chain'],
         is_water=batch['is_water'],
+        esm_embeddings=batch.get('esm_embeddings'),
+        cyclic_period=batch.get('cyclic_period'),
+        is_modified=batch.get('is_modified'),
     )
 
   def as_data_dict(self) -> BatchDict:
@@ -1242,11 +1273,107 @@ jax.tree_util.register_dataclass(
 )
 
 
+# Bond-order codes carried on ligand bonds.  The order is the one boltz-2 trains
+# on (`boltz.data.const.bond_types`), which is also the natural chemical ordering,
+# so a model that wants boltz's `type_bonds` only has to add 1 (their 0 means "no
+# bond").  A model that does not read bond orders is unaffected: the codes ride in
+# their own feature and nothing else changes.
+BOND_ORDER_OTHER = 0
+BOND_ORDER_SINGLE = 1
+BOND_ORDER_DOUBLE = 2
+BOND_ORDER_TRIPLE = 3
+BOND_ORDER_AROMATIC = 4
+BOND_ORDER_COVALENT = 5
+
+_MMCIF_VALUE_ORDER_TO_BOND_ORDER = {
+    'SING': BOND_ORDER_SINGLE,
+    'DOUB': BOND_ORDER_DOUBLE,
+    'TRIP': BOND_ORDER_TRIPLE,
+}
+
+
+@functools.lru_cache(maxsize=256)
+def _ccd_bond_orders(
+    ccd: chemical_components.Ccd, res_name: str
+) -> Mapping[tuple[str, str], int]:
+  """{(atom_a, atom_b) sorted: bond-order code} for one chemical component.
+
+  Aromatic wins over the value order, because RDKit reports a kekulised aromatic
+  bond as AROMATIC once the mol is sanitised, and that is what boltz featurises
+  from.  Components with no CCD entry (SMILES-only ligands) get an empty mapping,
+  i.e. every bond falls back to OTHER.
+  """
+  ccd_cif = ccd.get(res_name)
+  if not ccd_cif:
+    return {}
+  atom_1 = ccd_cif.get('_chem_comp_bond.atom_id_1', ())
+  atom_2 = ccd_cif.get('_chem_comp_bond.atom_id_2', ())
+  value_order = ccd_cif.get('_chem_comp_bond.value_order', ())
+  aromatic = ccd_cif.get(
+      '_chem_comp_bond.pdbx_aromatic_flag', ('N',) * len(atom_1)
+  )
+  orders = {}
+  for a, b, order, arom in zip(
+      atom_1, atom_2, value_order, aromatic, strict=False
+  ):
+    if arom == 'Y':
+      code = BOND_ORDER_AROMATIC
+    else:
+      code = _MMCIF_VALUE_ORDER_TO_BOND_ORDER.get(order, BOND_ORDER_OTHER)
+    orders[tuple(sorted((a, b)))] = code
+  return orders
+
+
+def _bond_orders_for_layout(
+    bond_layout: atom_layout.AtomLayout,
+    all_tokens: atom_layout.AtomLayout,
+    ccd: chemical_components.Ccd | None,
+) -> np.ndarray:
+  """Per-bond order codes for a [num_bonds, 2] bond layout.
+
+  Intra-residue bonds (both ends in the same chain/residue) are looked up in that
+  residue's CCD bond table.  Anything else is an inter-residue or inter-chain link,
+  which is COVALENT by construction -- `get_bond_layout` only ever admits bonds of
+  mmCIF type `covale`, and the intra-ligand graph appended by `RefStructure` is the
+  only other source.
+  """
+  num_bonds = bond_layout.shape[0]
+  orders = np.full((num_bonds,), BOND_ORDER_COVALENT, dtype=np.int32)
+  if not num_bonds or ccd is None:
+    return orders
+  res_names = {}
+  for chain_id, res_id, res_name in zip(
+      all_tokens.chain_id,
+      all_tokens.res_id,
+      all_tokens.res_name
+      if all_tokens.res_name is not None
+      else [None] * all_tokens.shape[0],
+      strict=True,
+  ):
+    res_names[(chain_id, res_id)] = res_name
+  for i in range(num_bonds):
+    key_a = (bond_layout.chain_id[i, 0], bond_layout.res_id[i, 0])
+    key_b = (bond_layout.chain_id[i, 1], bond_layout.res_id[i, 1])
+    if key_a != key_b:
+      continue
+    res_name = res_names.get(key_a)
+    if res_name is None:
+      continue
+    pair = tuple(
+        sorted((bond_layout.atom_name[i, 0], bond_layout.atom_name[i, 1]))
+    )
+    orders[i] = _ccd_bond_orders(ccd, res_name).get(pair, BOND_ORDER_OTHER)
+  return orders
+
+
 @dataclasses.dataclass(frozen=True)
 class LigandLigandBondInfo:
   """Contains information about the location of ligand-ligand bonds."""
 
   tokens_to_ligand_ligand_bonds: atom_layout.GatherInfo
+  # Bond-order code per bond row, int32, shape [num_tokens * 10]. See
+  # BOND_ORDER_*. Padding rows are OTHER and are masked out by the gather anyway.
+  bond_order: xnp_ndarray
 
   @classmethod
   def compute_features(
@@ -1254,6 +1381,7 @@ class LigandLigandBondInfo:
       all_tokens: atom_layout.AtomLayout,
       bond_layout: atom_layout.AtomLayout | None,
       padding_shapes: PaddingShapes,
+      ccd: chemical_components.Ccd | None = None,
   ) -> Self:
     """Computes the InterChainBondInfo features.
 
@@ -1261,6 +1389,8 @@ class LigandLigandBondInfo:
       all_tokens: AtomLayout for tokens; shape (num_tokens,).
       bond_layout: Bond layout for ligand-ligand bonds.
       padding_shapes: Padding shapes.
+      ccd: The chemical components dictionary, used to type each intra-residue
+        bond. Without it every bond falls back to COVALENT.
 
     Returns:
       A LigandLigandBondInfo object.
@@ -1320,21 +1450,36 @@ class LigandLigandBondInfo:
     gather_idx = atom_layout.compute_gather_idxs(
         source_layout=all_tokens, target_layout=adjusted_bond_layout
     )
-    return cls(tokens_to_ligand_ligand_bonds=gather_idx)
+    # Padded rows carry empty atom names and would key nothing; they are OTHER.
+    bond_order = _bond_orders_for_layout(adjusted_bond_layout, all_tokens, ccd)
+    bond_order[~adjusted_bond_layout.atom_name.astype(bool).all(axis=1)] = (
+        BOND_ORDER_OTHER
+    )
+    return cls(
+        tokens_to_ligand_ligand_bonds=gather_idx, bond_order=bond_order
+    )
 
   @classmethod
   def from_data_dict(cls, batch: BatchDict) -> Self:
+    gather_info = atom_layout.GatherInfo.from_dict(
+        batch, key_prefix='tokens_to_ligand_ligand_bonds'
+    )
+    # Batches hand-built by callers (and every batch featurised before bond
+    # orders existed) have no order feature; OTHER everywhere is what those
+    # inputs effectively meant, and models that ignore the field are unaffected.
+    bond_order = batch.get('ligand_ligand_bond_order')
+    if bond_order is None:
+      bond_order = np.zeros(gather_info.gather_idxs.shape[:1], dtype=np.int32)
     return cls(
-        tokens_to_ligand_ligand_bonds=atom_layout.GatherInfo.from_dict(
-            batch, key_prefix='tokens_to_ligand_ligand_bonds'
-        )
+        tokens_to_ligand_ligand_bonds=gather_info, bond_order=bond_order
     )
 
   def as_data_dict(self) -> BatchDict:
     return {
         **self.tokens_to_ligand_ligand_bonds.as_dict(
             key_prefix='tokens_to_ligand_ligand_bonds'
-        )
+        ),
+        'ligand_ligand_bond_order': self.bond_order,
     }
 
 
@@ -1665,6 +1810,37 @@ def get_reference(
     features[atom_name]['charge'] = charge
     features[atom_name]['atom_name_chars'] = atom_name_chars
   return features, from_atom, dest_atom
+
+
+@dataclasses.dataclass(frozen=True)
+class Chirals:
+  """Chiral-centre plane pairs and their signed ideal dihedrals (RoseTTAFold3).
+
+  Optional: absent from every batch except RF3's, so from_data_dict falls back to an
+  empty (0, 4) / (0,) pair, which makes the model's chiral branch a no-op.
+  """
+
+  # Array of atom index quadruples (centre, i, j, k), int32, shape [num_centres, 4].
+  # Indices are into the FLATTENED dense-atom layout (token * max_atoms + slot).
+  centers: xnp_ndarray
+  # Signed ideal dihedral per row, float32, shape [num_centres]. 0 marks padding.
+  angles: xnp_ndarray
+
+  @classmethod
+  def empty(cls) -> Self:
+    return cls(centers=np.zeros((0, 4), dtype=np.int32),
+               angles=np.zeros((0,), dtype=np.float32))
+
+  @classmethod
+  def from_data_dict(cls, batch: BatchDict) -> Self:
+    centers = batch.get('chiral_centers')
+    angles = batch.get('chiral_angles')
+    if centers is None or angles is None:
+      return cls.empty()
+    return cls(centers=centers, angles=angles)
+
+  def as_data_dict(self) -> BatchDict:
+    return {'chiral_centers': self.centers, 'chiral_angles': self.angles}
 
 
 @dataclasses.dataclass(frozen=True)

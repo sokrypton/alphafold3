@@ -215,10 +215,57 @@ def select_model_files(
     else:
       if models:
         if len(models) > 1:
-          raise RuntimeError(f'Multiple models matched in {model_dir}')
+          # Two blobs, one slot. By far the likeliest cause is two STORAGE
+          # PRECISIONS of the same model side by side (`x.bin.zst` next to
+          # `x.int8.bin.zst`), which is why weights.default_dir gives each
+          # precision its own directory. Say so: "Multiple models matched"
+          # sends the reader looking for a second model that is not there.
+          raise RuntimeError(
+              f'Multiple models matched in {model_dir}: '
+              f'{", ".join(sorted(models))}. A directory must hold ONE blob; '
+              'if these are the same model at different storage precisions, '
+              'keep them in separate directories.')
         _, model_files = models.popitem()
         return model_files, is_compressed
   raise FileNotFoundError(f'No models matched in {model_dir}')
+
+
+_Q_SCALE_SUFFIX = '__q_scale'
+
+
+def _dequantise_records(records):
+  """Undo bfloat16 / int8 storage. A float32 blob passes through untouched.
+
+  Kept here rather than imported from `converters` so that loading a published
+  blob never depends on the conversion package being installed -- converters is
+  a standalone tool, run once, off the inference path.
+  """
+  scales = {}
+  payload = []
+  for scope, name, arr in records:
+    if name.endswith(_Q_SCALE_SUFFIX):
+      scales[(scope, name[: -len(_Q_SCALE_SUFFIX)])] = np.asarray(arr)
+    else:
+      payload.append((scope, name, np.asarray(arr)))
+  half = (np.uint16, np.float16)
+  if not scales and not any(a.dtype in half for _, _, a in payload):
+    return payload
+
+  out = []
+  for scope, name, arr in payload:
+    scale = scales.pop((scope, name), None)
+    if scale is not None:
+      shape = arr.shape
+      arr = (arr.reshape(-1, shape[-1]).astype(np.float32)
+             * scale).reshape(shape)
+    elif arr.dtype == np.uint16:          # a bfloat16 bit pattern
+      arr = (arr.astype(np.uint32) << 16).view(np.float32)
+    elif arr.dtype == np.float16:
+      arr = arr.astype(np.float32)
+    out.append((scope, name, arr))
+  if scales:
+    raise RecordError(f'{len(scales)} quantisation scales with no parameter')
+  return out
 
 
 def get_model_haiku_params(model_dir: epath.PathLike) -> hk.Params:
@@ -226,8 +273,76 @@ def get_model_haiku_params(model_dir: epath.PathLike) -> hk.Params:
   params: dict[str, dict[str, jnp.Array]] = {}
   model_files, is_compressed = select_model_files(model_dir)
   with open_for_reading(model_files, is_compressed) as stream:  # pyrefly: ignore[bad-argument-type]
-    for scope, name, arr in read_records(stream):
-      params.setdefault(scope, {})[name] = jnp.array(arr)
+    records = list(read_records(stream))
+  # A blob may be stored float32, bfloat16 or int8-with-scales (converters/
+  # quantise.py). Only the loader knows which; everything above this line sees
+  # float32 either way, so a smaller download is not a different code path.
+  records = _dequantise_records(records)
+  for scope, name, arr in records:
+    params.setdefault(scope, {})[name] = jnp.array(arr)
   if not params:
     raise FileNotFoundError(f'Model missing from "{model_dir}"')
+  return params
+
+
+def read_shape_manifest(model_dir: epath.PathLike, model_name: str):
+  """The <model>.shapes.json written beside a converted blob, or None.
+
+  Derived from the graph at conversion time (converters/shapes.py) so that
+  loading never has to ask jax.eval_shape what the parameter tree is.
+  """
+  path = epath.Path(model_dir) / f'{model_name}.shapes.json'
+  if not path.exists():
+    return None
+  import json
+
+  with path.open('r') as fh:
+    return json.load(fh)
+
+
+def fill_from_manifest(
+    params: hk.Params, manifest, *, log=print
+) -> hk.Params:
+  """Add zero arrays for parameters the graph wants and the blob lacks.
+
+  A converter that covers a model's structure path but not, say, its affinity
+  head leaves real gaps: haiku would otherwise fail deep inside the forward pass
+  with a message that names one parameter and no reason. Filling them makes the
+  gap explicit and survivable -- and ZERO rather than random, so a head running
+  on them is reproducibly inert rather than quietly plausible.
+
+  Whatever is filled is reported. A silent fill is how chai-1 ran in production
+  with random-init template and MSA parameters.
+  """
+  shapes = manifest['shapes']
+  filled = []
+  mismatched = []
+  for scope, leaves in shapes.items():
+    for name, (dtype, shape) in leaves.items():
+      if name in params.get(scope, {}):
+        got = tuple(params[scope][name].shape)
+        if got != tuple(shape):
+          mismatched.append(f'{scope}/{name} is {got}, graph wants {tuple(shape)}')
+        continue
+      params.setdefault(scope, {})[name] = jnp.zeros(tuple(shape),
+                                                     jnp.dtype(dtype))
+      filled.append(f'{scope}/{name}')
+  if filled:
+    log(f'WARNING: {len(filled)} parameters are not in these weights and were '
+        f'set to ZERO -- whatever reads them is inert. First few: '
+        f'{", ".join(filled[:5])}')
+  # __meta__ is the blob's provenance record, not a parameter.
+  unexpected = sorted(f'{scope}/{name}' for scope, leaves in params.items()
+                      for name in leaves
+                      if scope != '__meta__' and name not in shapes.get(scope, {}))
+  if unexpected:
+    log(f'WARNING: {len(unexpected)} parameters in these weights are not in the '
+        f'graph and will be ignored. First few: {", ".join(unexpected[:5])}')
+  if mismatched:
+    # Not a warning: a parameter of the wrong shape is a converter that disagrees
+    # with the graph about the architecture, and running anyway would either
+    # crash somewhere unrelated or -- worse -- broadcast into something plausible.
+    raise ValueError(
+        f'{len(mismatched)} parameters have the wrong shape for this graph:\n  '
+        + '\n  '.join(mismatched[:10]))
   return params

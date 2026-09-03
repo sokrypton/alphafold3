@@ -398,6 +398,7 @@ class WholePdbPipeline:
         all_tokens,
         ligand_ligand_bonds,
         padding_shapes,
+        ccd=ccd,
     )
 
     # Create the Pseudo-beta layout for distogram head and distance error head.

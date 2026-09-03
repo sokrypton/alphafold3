@@ -1,0 +1,37 @@
+boltz2	128	NATIVE L=128 recycles=3 steps=200 kernels=False: first   8.89s (incl warmup) | steady  8.782s (median 8.824, n=3)
+rosettafold3	128	NATIVE-RF3 first  26.42s | steady 16.811s | featurise  3.506s | steady-minus-featurise 13.305s | all [26.42, 16.76, 16.81]
+protenix2	128	NATIVE-PROTENIX2 L=128 kernels=torch WARM first  11.37s | steady 10.843s | all [11.37, 10.79, 10.82, 10.87]
+opendde	128	NATIVE-OPENDDE L=128 kernels=torch WARM first  10.62s | steady 10.179s | all [10.62, 10.17, 10.17, 10.19]
+openfold3	128	NATIVE-OPENFOLD3 L=128 WARM first  13.19s | steady 10.585s | all [13.19, 14.1, 10.62, 10.55]
+boltz2	192	NATIVE L=192 recycles=3 steps=200 kernels=False: first  11.67s (incl warmup) | steady 11.485s (median 11.506, n=3)
+rosettafold3	192	NATIVE-RF3 first  31.74s | steady 22.538s | featurise  4.054s | steady-minus-featurise 18.483s | all [31.74, 22.53, 22.54]
+protenix2	192	NATIVE-PROTENIX2 L=192 kernels=torch WARM first  13.97s | steady 13.625s | all [13.97, 13.64, 13.62, 13.63]
+opendde	192	NATIVE-OPENDDE L=192 kernels=torch WARM first  16.45s | steady 16.193s | all [16.45, 16.2, 16.17, 16.21]
+openfold3	192	NATIVE-OPENFOLD3 L=192 WARM first  12.82s | steady 12.066s | all [12.82, 12.05, 12.05, 12.08]
+boltz2	256	NATIVE L=256 recycles=3 steps=200 kernels=False: first  17.29s (incl warmup) | steady 17.152s (median 17.188, n=3)
+rosettafold3	256	NATIVE-RF3 first  41.50s | steady 32.302s | featurise  4.451s | steady-minus-featurise 27.852s | all [41.5, 32.3, 32.29]
+protenix2	256	NATIVE-PROTENIX2 L=256 kernels=torch WARM first  18.08s | steady 17.309s | all [18.08, 17.29, 17.3, 17.32]
+opendde	256	NATIVE-OPENDDE L=256 kernels=torch WARM first  29.94s | steady 29.638s | all [29.94, 29.63, 29.64, 29.64]
+openfold3	256	NATIVE-OPENFOLD3 L=256 WARM first  17.35s | steady 15.107s | all [17.35, 15.07, 15.1, 15.11]
+boltz2	384	NATIVE L=384 recycles=3 steps=200 kernels=False: first  38.68s (incl warmup) | steady 38.638s (median 38.752, n=3)
+rosettafold3	384	NATIVE-RF3 first  70.75s | steady 61.763s | featurise  5.551s | steady-minus-featurise 56.212s | all [70.75, 61.66, 61.76]
+protenix2	384	NATIVE-PROTENIX2 L=384 kernels=torch WARM first  32.36s | steady 32.026s | all [32.36, 31.88, 32.01, 32.04]
+opendde	384	NATIVE-OPENDDE L=384 NO_TIMINGS (predict never called)
+openfold3	384	NATIVE-OPENFOLD3 L=384 WARM first  26.77s | steady 24.775s | all [26.77, 24.68, 24.72, 24.83]
+boltz2	512	FAILED
+rosettafold3	512	FAILED
+protenix2	512	NATIVE-PROTENIX2 L=512 kernels=torch WARM first  61.24s | steady 61.224s | all [61.24, 60.98, 61.16, 61.29]
+opendde	512	NATIVE-OPENDDE L=512 NO_TIMINGS (predict never called)
+openfold3	512	NATIVE-OPENFOLD3 L=512 WARM first  44.37s | steady 42.666s | all [44.37, 42.39, 42.58, 42.75]
+boltz2	768	FAILED
+rosettafold3	768	FAILED
+protenix2	768	NATIVE-PROTENIX2 L=768 NO_TIMINGS (predict never called)
+opendde	768	NATIVE-OPENDDE L=768 NO_TIMINGS (predict never called)
+openfold3	768	NATIVE-OPENFOLD3 L=768 WARM first  93.58s | steady 92.187s | all [93.58, 91.72, 92.1, 92.28]
+chai1	384	NATIVE-CHAI1 L=384 bucket=384 first  87.63s | steady 67.983s | model 57.096s | outside-model 10.887s | all [87.63, 68.02, 67.94, 68.03]
+chai1	512	NATIVE-CHAI1 L=512 bucket=512 first 124.89s | steady 105.370s | model 94.221s | outside-model 11.149s | all [124.89, 105.42, 105.36, 105.38]
+chai1	768	NATIVE-CHAI1 L=768 bucket=768 first 227.63s | steady 208.919s | model 196.463s | outside-model 12.456s | all [227.63, 208.92, 208.8, 209.04]
+boltz2	512	NATIVE L=512 recycles=3 steps=200 kernels=False: first  75.77s (incl warmup) | steady 76.103s (median 76.458, n=3)
+rosettafold3	512	NATIVE-RF3 first 117.45s | steady 108.521s | featurise  6.513s | steady-minus-featurise 102.008s | all [117.45, 108.52, 108.52]
+boltz2	768	NATIVE L=768 recycles=3 steps=200 kernels=False: first 210.31s (incl warmup) | steady 210.726s (median 210.762, n=3)
+rosettafold3	768	OOM

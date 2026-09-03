@@ -62,14 +62,36 @@ class DistogramHead(hk.Module):
     seq_mask = batch.token_features.mask.astype(bool)
     pair_mask = seq_mask[:, None] * seq_mask[None, :]
 
-    left_half_logits = hm.Linear(
-        self.config.num_bins,
-        initializer=self.global_config.final_init,
-        name='half_logits',
-    )(pair_act)
+    if self.global_config.model == 'chai1':
+      # chai has no distogram head of its own -- its trunk returns only
+      # (single, pair). This one was trained post-hoc on the frozen trunk
+      # (sokrypton/chai-lab@dgram) and is an MLP, not AF3's single linear:
+      # LayerNorm -> 2*c_z -> GELU -> num_bins. It also symmetrises with the
+      # MEAN rather than AF3's sum, which is not a rescaling once the softmax
+      # sees it. The GELU is torch's exact erf form, so approximate=False --
+      # jax defaults to the tanh approximation and the difference is silent.
+      hidden = jax.nn.gelu(
+          hm.Linear(2 * pair_act.shape[-1], initializer='linear', use_bias=True,
+                    name='hidden')(
+                        hm.LayerNorm(name='input_layer_norm')(pair_act)),
+          approximate=False)
+      half_logits = hm.Linear(
+          self.config.num_bins, initializer=self.global_config.final_init,
+          use_bias=True, name='half_logits')(hidden)
+      logits = (half_logits + jnp.swapaxes(half_logits, -2, -3)) / 2
+    else:
+      left_half_logits = hm.Linear(
+          self.config.num_bins,
+          initializer=self.global_config.final_init,
+          # Four ported families train a bias here and stock AF3 does not; see
+          # model_config.DISTOGRAM_BIAS, including which of them need the
+          # converter to halve it because their native symmetrises first.
+          use_bias=self.global_config.model in model_config.DISTOGRAM_BIAS,
+          name='half_logits',
+      )(pair_act)
 
-    right_half_logits = left_half_logits
-    logits = left_half_logits + jnp.swapaxes(right_half_logits, -2, -3)
+      right_half_logits = left_half_logits
+      logits = left_half_logits + jnp.swapaxes(right_half_logits, -2, -3)
     probs = jax.nn.softmax(logits, axis=-1)
     breaks = jnp.linspace(
         self.config.first_break,

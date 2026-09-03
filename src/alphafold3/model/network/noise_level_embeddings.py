@@ -146,7 +146,13 @@ def noise_embeddings(
     weight: jnp.ndarray | None = None,
     bias: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
-  """Returns Fourier noise level embeddings for diffusion model."""
+  """Returns Fourier noise level embeddings for diffusion model.
+
+  A model with a TRAINED Fourier embedding (OpenFold3, IntelliFold-v2) passes its
+  weight/bias in explicitly -- the diffusion head reads them as haiku params that
+  travel in the checkpoint (gated by global_config.trained_fourier). With neither
+  supplied this falls back to AF3's hardcoded _WEIGHT/_BIAS constants.
+  """
   transformed_noise_level = (1 / 4) * jnp.log(sigma_scaled_noise_level)
   if weight is None:
     weight = jnp.array(_WEIGHT, dtype=jnp.float32)

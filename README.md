@@ -31,43 +31,63 @@ download the AlphaFold 3 model parameters from
 https://storage.googleapis.com/alphafold3/af3.bin.zst. Use is subject to these
 [terms of use](https://github.com/google-deepmind/alphafold3/blob/main/WEIGHTS_TERMS_OF_USE.md).
 
-## OpenFold3 Weights (Publicly Available Alternative)
+## Other AF3-family models
 
-[OpenFold3](https://github.com/aqlaboratory/openfold3), developed by the AlQuraishi Lab at Columbia University and the OpenFold Consortium, is an independent reproduction of AlphaFold 3 that has released model weights under the Apache 2.0 license. These weights can be used with this codebase as a freely available alternative to the Google DeepMind parameters.
+Several groups have published AlphaFold3-architecture models with freely
+available weights. This fork runs any of them through this same code and the
+same input JSON — one `--model` flag decides which forward branches, config
+shapes, sampler constants and input conventions are used.
 
-**Step 1 — Download OpenFold3 weights:**
+| `--model` | model | weights |
+|---|---|---|
+| `alphafold3` | AlphaFold 3 (Google DeepMind) | request from DeepMind |
+| `openfold3` | [OpenFold3](https://github.com/aqlaboratory/openfold3) (AlQuraishi Lab) | Apache 2.0 |
+| `intellifold2` | [IntelliFold-v2](https://huggingface.co/intelligenAI/intellifold) (IntelligenAI) | see upstream |
+| `opendde` | [OpenDDE](https://huggingface.co/aurekaresearch/OpenDDE) (Aureka Research) | see upstream |
+| `boltz2` | [Boltz-2](https://github.com/jwohlwend/boltz) | MIT |
+| `protenix2` | [Protenix-v2](https://github.com/bytedance/Protenix) (ByteDance) | Apache 2.0 |
+| `rosettafold3` | [RoseTTAFold3](https://files.ipd.uw.edu/pub/rf3/) (RosettaCommons) | see upstream |
+| `chai1` | [chai-1](https://github.com/chaidiscovery/chai-lab) (Chai Discovery) | Apache 2.0 |
+
+Weights are converted **once, offline** — a run never needs PyTorch or the
+original checkpoint:
 
 ```bash
-wget https://openfold.s3.amazonaws.com/staging/of3-p2-155k.pt
+# downloads the published checkpoint, converts it, writes the shape manifest
+python -m converters.convert --model openfold3 --out ./params/openfold3
 ```
 
-Weights are also hosted at [huggingface.co/OpenFold/OpenFold3](https://huggingface.co/OpenFold/OpenFold3).
-
-**Step 2 — Convert to AlphaFold 3 format:**
-
-A conversion script is included in this repository:
-
-```bash
-python convert_of3_weights.py \
-  --of3_checkpoint ./of3-p2-155k.pt \
-  --output_dir ./af3_of3_params/
-```
-
-This produces `af3_of3_params/of3_ported_weights.bin.zst` (~1.4 GB).
-
-**Step 3 — Run inference:**
-
-Pass `--of3_weights` to `run_alphafold.py` to enable the architectural adjustments needed for OpenFold3 parameters:
+Then run any model on the same input file:
 
 ```bash
 python run_alphafold.py \
+  --model=openfold3 \
+  --model_dir=./params/openfold3 \
   --json_path=fold_input.json \
-  --model_dir=./af3_of3_params/ \
-  --output_dir=./output/ \
-  --of3_weights
+  --output_dir=./output/
 ```
 
-The OpenFold3 weights are subject to the [Apache 2.0 License](https://www.apache.org/licenses/LICENSE-2.0) and may be used for both academic and commercial purposes, without requiring a separate access request.
+chai-1 additionally folds with ESM2 token embeddings, which are most of its
+token feature stream — without them it is a different model (a natural protein
+folds to 5.70 Å where chai reaches 0.642). Precompute them once, in whatever
+environment has chai's traced ESM archive, and pass them in:
+
+```bash
+python converters/esm_embed.py --sequence MQIFVKT... --out esm.npz
+python run_alphafold.py --model=chai1 --esm_embeddings=esm.npz ...
+```
+
+### Cyclic chains
+
+`--cyclic=A,B` (or `--cyclic=all`) makes those chains' relative-position
+encoding wrap, so they have no N- or C-terminus. This is not an AlphaFold 3
+feature — the input JSON has no way to say it — but the encoding is shared, so
+**every model here honours it**. A chain left out is byte-identical to before.
+
+The terms of use written beside a prediction follow the weights that made it,
+not AlphaFold 3's. See [converters/README.md](converters/README.md) for what
+each conversion involves and [OF3_AF3_PORTING_NOTES.md](OF3_AF3_PORTING_NOTES.md)
+for the conventions that differ between these codebases and why.
 
 ## Installation and Running Your First Prediction
 

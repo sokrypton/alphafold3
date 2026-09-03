@@ -57,14 +57,18 @@ from absl import logging as absl_logging
 from alphafold3.common import folding_input
 from alphafold3.common import resources
 from alphafold3.constants import chemical_components
+from alphafold3.constants import decoded_ccd
 import alphafold3.cpp
 from alphafold3.data import featurisation
 from alphafold3.data import pipeline
 from alphafold3.data.tools import shards
 from alphafold3.model import features
 from alphafold3.model import model
+from alphafold3.model import model_registry
+from alphafold3.model.pipeline import model_features
 from alphafold3.model import params
 from alphafold3.model import post_processing
+from alphafold3.model import weights
 from alphafold3.model.components import utils
 from etils import epath
 import haiku as hk
@@ -107,8 +111,17 @@ _OUTPUT_DIR = epath.DEFINE_path(
 )
 MODEL_DIR = epath.DEFINE_path(
     'model_dir',
-    _DEFAULT_MODEL_DIR.as_posix(),
-    'Path to the model to use for inference.',
+    None,
+    'Path to the model to use for inference. Defaults to $HOME/models for'
+    ' AlphaFold 3 itself, and to a per-model cache directory for the ported'
+    ' models, whose converted weights are fetched on first use.',
+)
+_DOWNLOAD_WEIGHTS = flags.DEFINE_bool(
+    'download_weights',
+    True,
+    'Whether a ported model whose weights are not in --model_dir may fetch the'
+    ' published conversion. Never applies to AlphaFold 3 itself, whose'
+    ' parameters must be requested from Google DeepMind.',
 )
 
 # Control which stages to run.
@@ -457,24 +470,57 @@ _COMPRESS_LARGE_OUTPUT_FILES = flags.DEFINE_bool(
     ' saved, are already stored in a compressed format.',
 )
 
-# OpenFold3 weight support.
-_OF3_CHECKPOINT = flags.DEFINE_string(
-    'of3_checkpoint',
+# Which model family to run. `alphafold3` is DeepMind's own; the rest are ported
+# AF3-family models whose weights we convert offline (see converters/README.md)
+# and load from --model_dir. The name selects the forward branches, the config
+# shapes and the sampler constants all at once -- see
+# alphafold3.model.model_registry.
+_MODEL = flags.DEFINE_enum(
+    'model',
+    'alphafold3',
+    sorted(model_registry.MODEL_SPECS),
+    'Which model to run. Its weights must already be in --model_dir: conversion'
+    ' is a separate offline step (python -m converters.convert --model NAME'
+    ' --out DIR), so a run never needs torch or the original checkpoint.',
+)
+
+_ESM_EMBEDDINGS = flags.DEFINE_string(
+    'esm_embeddings',
     None,
-    'Path to an OpenFold3 .pt checkpoint file. When provided, the weights are'
-    ' converted to AF3 format on first use and cached in --model_dir. The model'
-    ' is then run with OF3-compatible settings (of3_weights=True). Weights are'
-    ' freely available from the public AWS bucket:\n'
-    '  aws s3 cp s3://openfold/staging/of3-p2-155k.pt ./of3-p2-155k.pt'
-    ' --no-sign-request',
+    'Path to an npz of precomputed ESM2 token embeddings, as written by'
+    ' `python -m converters.esm_embed`. Only chai-1 reads them, and running it'
+    ' without them is running a different model: its token feature stream is'
+    ' mostly ESM2, and a natural protein folds to 5.70 A without them where'
+    ' chai-1 reaches 0.642. They are precomputed because chai ships ESM as a'
+    ' TorchScript archive and this path does not import torch.',
 )
-_OF3_WEIGHTS = flags.DEFINE_bool(
-    'of3_weights',
-    False,
-    'Use OF3-compatible model settings (of3_weights=True). Set automatically'
-    ' when --of3_checkpoint is provided. Also set this flag when --model_dir'
-    ' already points to a directory of pre-converted OF3 weights.',
+_FEATURISE_OFF = flags.DEFINE_list(
+    'featurise_off',
+    [],
+    'Input conventions to switch OFF for this model, by name (see'
+    ' model_registry._FEATURISE), e.g. --featurise_off=padded_keys. For'
+    ' measuring whether a convention is load-bearing: each one is silent when'
+    ' wrong, so the only way to know what it buys is to run without it.',
 )
+_CYCLIC = flags.DEFINE_list(
+    'cyclic',
+    [],
+    'Chains to treat as CYCLIC -- their relative-position encoding wraps, so'
+    ' they have no N- or C-terminus. Pass chain ids ("A,B"), or "all" for every'
+    ' polymer chain. This is not an AlphaFold 3 feature and is not specific to'
+    ' any one model: the encoding is shared, so every model here honours it,'
+    ' and a chain left out is byte-identical to before.',
+)
+_WEIGHTS_PRECISION = flags.DEFINE_enum(
+    'weights_precision', 'fp32', ['fp32', 'fp16', 'int8'],
+    'Which published form of the weights to fetch. fp32 is what the converters'
+    ' write and the default. fp16 and int8 are the same weights stored smaller'
+    ' (12.4 GB of models becomes 6.4 or 2.6), expanded on load, which is worth'
+    ' it on a metered or slow connection such as Colab. Measured cost of int8'
+    ' on rosettafold3: within sampling noise on protein, ligand, RNA and a'
+    ' D/L peptide, with stereochemistry unchanged -- see docs/ported_models.md.'
+    ' Ignored when --model_dir points at weights you already have.')
+
 _NOJIT = flags.DEFINE_bool(
     'nojit',
     False,
@@ -502,42 +548,6 @@ _MSA_SERVER_USER_AGENT = flags.DEFINE_string(
 )
 
 
-def _maybe_convert_of3_weights(of3_checkpoint: str, model_dir: str) -> str:
-  """Convert OF3 checkpoint to AF3 format if not already done.
-
-  Converts on first call; subsequent calls reuse the cached result.
-  Returns the model_dir to use (may differ from the input if weights are
-  written to a sub-directory of model_dir).
-  """
-  import time
-  from alphafold3.model.of3_weight_converter import (
-      load_of3_checkpoint,
-      map_of3_to_af3,
-      save_af3_params,
-  )
-
-  out_dir = pathlib.Path(model_dir)
-  marker = out_dir / 'of3_ported_weights.bin.zst'
-  if marker.exists():
-    print(f'OF3 weights already converted at {out_dir}, skipping conversion.')
-    return str(out_dir)
-
-  print(f'Converting OF3 checkpoint: {of3_checkpoint}')
-  t0 = time.perf_counter()
-  sd = load_of3_checkpoint(of3_checkpoint)
-  print(f'  Loaded {len(sd)} tensors ({time.perf_counter()-t0:.1f}s)')
-
-  t0 = time.perf_counter()
-  af3_params = map_of3_to_af3(sd)
-  n = sum(v.size for s in af3_params.values() for v in s.values())
-  print(f'  Converted {len(af3_params)} scopes, {n:,} elements ({time.perf_counter()-t0:.1f}s)')
-
-  t0 = time.perf_counter()
-  out = save_af3_params(af3_params, out_dir)
-  print(f'  Saved {out}  ({out.stat().st_size/1e6:.0f} MB, {time.perf_counter()-t0:.1f}s)')
-  return str(out_dir)
-
-
 def make_model_config(
     *,
     flash_attention_implementation: tokamax.DotProductAttentionImplementation = 'triton',
@@ -545,9 +555,14 @@ def make_model_config(
     num_recycles: int = 10,
     return_embeddings: bool = False,
     return_distogram: bool = False,
-    of3_weights: bool = False,
+    model_name: str = 'alphafold3',
 ) -> model.Model.Config:
-  """Returns a model config with some defaults overridden."""
+  """Returns a model config with some defaults overridden.
+
+  `model_name` selects the family: it lands in global_config.model, which every
+  ported-family forward branch keys on, and brings that family's config shapes
+  and sampler constants with it (model_registry.ModelSpec.configure).
+  """
   config = model.Model.Config()
   config.global_config.flash_attention_implementation = (
       flash_attention_implementation
@@ -556,7 +571,7 @@ def make_model_config(
   config.num_recycles = num_recycles
   config.return_embeddings = return_embeddings
   config.return_distogram = return_distogram
-  config.global_config.of3_weights = of3_weights
+  model_registry.get(model_name).configure(config)
   return config
 
 
@@ -575,6 +590,15 @@ class ModelRunner:
     self._autotune_result = self._load_autotune_cache()
 
   @property
+  def model_dir(self) -> epath.Path:
+    return self._model_dir
+
+  @property
+  def model_name(self) -> str:
+    """Which family this runner was built for (global_config.model)."""
+    return self._model_config.global_config.model
+
+  @property
   def _autotune_cache_path(self) -> str | None:
     return (
         os.path.join(_CACHE_DIR.value, 'tokamax_autotune.json')
@@ -591,8 +615,51 @@ class ModelRunner:
 
   @functools.cached_property
   def model_params(self) -> hk.Params:
-    """Loads model parameters from the model directory."""
-    return params.get_model_haiku_params(model_dir=self._model_dir)
+    """Loads model parameters from the model directory.
+
+    A converted model ships a shape manifest beside its blob (written by
+    converters/shapes.py). When one is present it is the graph's own statement of
+    the parameter tree, so any gap in the weights is reported and filled with
+    zeros here rather than surfacing as an opaque haiku error mid-forward -- or,
+    worse, not surfacing at all.
+    """
+    loaded = params.get_model_haiku_params(model_dir=self._model_dir)
+    manifest = params.read_shape_manifest(self._model_dir, self.model_name)
+    if manifest is not None:
+      loaded = params.fill_from_manifest(loaded, manifest)
+    return loaded
+
+  @staticmethod
+  def _preinit_tokamax_context() -> None:
+    """Create tokamax's JAX user context BEFORE the first trace.
+
+    tokamax builds its autotuning-cache overlay lazily, and the overlay carries
+    a `jax.make_user_context(())` (ops/op.py: get_autotuning_cache_overlay_state).
+    The first tokamax op to run creates it -- which happens INSIDE the first
+    trace of the model. JAX includes the user context in the jit cache key, so
+    the entry cached during that trace is keyed without the context while every
+    later call is keyed with it: a guaranteed miss, and a full RETRACE plus
+    recompile of the whole model on call 2.
+
+    Measured on an A100 (alphafold3, 64 tokens, identical arguments both calls):
+
+        without      call 0 62.5 s   call 1 45.3 s   call 2 2.5 s   2 traces
+        with         call 0 62.5 s   call 1  2.5 s   call 2 2.5 s   1 trace
+
+    So it costs a second cold compile on every fresh process. Invisible on
+    hardware where tokamax's Pallas/Triton kernels are unavailable (an A10
+    raises NotImplementedError for them and never creates the context), which is
+    why this only shows up on datacentre GPUs -- exactly the ones people rent.
+
+    Best-effort: the import path is tokamax-internal, so a version without it
+    must not break inference.
+    """
+    try:
+      from tokamax._src.ops import op as _tokamax_op
+
+      _tokamax_op.get_autotuning_cache_overlay_state()
+    except Exception:  # pylint: disable=broad-except
+      pass
 
   @functools.cached_property
   def _model(
@@ -607,6 +674,8 @@ class ModelRunner:
     apply_fn = forward_fn.apply
     if not _NOJIT.value:
       apply_fn = jax.jit(apply_fn, device=self._device)
+    # before anything is traced -- see _preinit_tokamax_context
+    self._preinit_tokamax_context()
     return functools.partial(apply_fn, self.model_params)
 
   def run_inference(
@@ -642,7 +711,11 @@ class ModelRunner:
         result,
     )
     result = dict(result)
-    identifier = self.model_params['__meta__']['__identifier__'].tobytes()
+    # A ported blob may carry no meta record; the identifier is provenance
+    # stamped into the output, so fall back to the model's own name.
+    meta = self.model_params.get('__meta__', {}).get('__identifier__')
+    identifier = (np.asarray(meta).tobytes() if meta is not None
+                  else self.model_name.encode())
     result['__identifier__'] = identifier
     return result
 
@@ -713,22 +786,60 @@ def predict_structure(
     conformer_max_iterations: int | None = None,
     resolve_msa_overlaps: bool = True,
     fix_standalone_glycans: bool = False,
+    esm_embeddings: np.ndarray | None = None,
+    featurise_off: Sequence[str] = (),
+    cyclic: bool | Sequence[str] = False,
 ) -> Sequence[ResultsForSeed]:
   """Runs the full inference pipeline to predict structures for each seed."""
 
   print(f'Featurising data with {len(fold_input.rng_seeds)} seed(s)...')
   featurisation_start_time = time.time()
-  ccd = chemical_components.Ccd(user_ccd=fold_input.user_ccd)
-  featurised_examples = featurisation.featurise_input(
+  # Decoded: the CCD stores every primed nucleic-acid atom name mmCIF-quoted
+  # ("O5'"), and five characters do not fit AF3's four-character atom-name
+  # field -- so DNA and RNA fail to featurise with an error that names
+  # neither the component nor the atom. A no-op where nothing is quoted.
+  ccd = decoded_ccd.get_ccd(user_ccd=fold_input.user_ccd)
+  # A model that keeps a modified residue as ONE token needs that decided at
+  # featurisation time, not after: it changes how many tokens there are.
+  spec = model_registry.get(model_runner.model_name)
+  if featurise_off:
+    spec = spec.without(featurise_off)
+  featurise = functools.partial(
+      featurisation.featurise_input,
       fold_input=fold_input,
       buckets=buckets,
       ccd=ccd,
-      verbose=True,
+      flatten_non_standard_residues=not spec.featurise.get(
+          'modified_as_one_token', False),
       ref_max_modified_date=ref_max_modified_date,
       conformer_max_iterations=conformer_max_iterations,
       resolve_msa_overlaps=resolve_msa_overlaps,
       fix_standalone_glycans=fix_standalone_glycans,
   )
+  featurised_examples = featurise(verbose=True)
+  # Some families need the INPUT built their way as well as the forward graph;
+  # spec.featurise says which, and this is where those conventions land. Stock
+  # AlphaFold 3, OpenFold3 and IntelliFold-2 declare none, so for them this runs
+  # only if something not tied to a model was asked for -- cyclic chains.
+  if featurise_off:
+    print(f'Featurisation conventions switched OFF: {", ".join(featurise_off)}')
+  if spec.featurise or cyclic:
+    has_msa = any(
+        getattr(chain, 'unpaired_msa', None) or getattr(chain, 'paired_msa', None)
+        for chain in fold_input.chains
+    )
+    featurised_examples = [
+        model_features.apply(
+            example, spec,
+            refeaturise=lambda: featurise(verbose=False),
+            model_dir=model_runner.model_dir,
+            esm=esm_embeddings,
+            has_msa=has_msa,
+            fold_input=fold_input,
+            cyclic=cyclic,
+        )
+        for example in featurised_examples
+    ]
   print(
       f'Featurising data with {len(fold_input.rng_seeds)} seed(s) took'
       f' {time.time() - featurisation_start_time:.2f} seconds.'
@@ -807,24 +918,7 @@ def write_outputs(
   max_ranking_score = None
   max_ranking_result = None
 
-  if _OF3_WEIGHTS.value:
-    output_terms = (
-        '# OUTPUT TERMS OF USE\n\n'
-        'These structure predictions were generated using OpenFold3 model weights,\n'
-        'which are licensed under the Apache License, Version 2.0.\n\n'
-        'The AlphaFold 3 Output Terms of Use (which restrict commercial use) do NOT\n'
-        'apply to outputs generated with OpenFold3 weights. You are free to use these\n'
-        'outputs for any purpose, including commercial applications, subject only to\n'
-        'the Apache 2.0 license.\n\n'
-        'OpenFold3 weights: https://github.com/aqlaboratory/openfold\n'
-        'Apache License 2.0: https://www.apache.org/licenses/LICENSE-2.0\n\n'
-        'AlphaFold 3 code is copyright Google DeepMind, also Apache 2.0:\n'
-        'https://github.com/google-deepmind/alphafold3\n'
-    )
-  else:
-    output_terms = (
-        epath.Path(alphafold3.cpp.__file__).parent / 'OUTPUT_TERMS_OF_USE.md'
-    ).read_text()
+  output_terms = model_registry.get(_MODEL.value).output_terms()
 
   output_dir = epath.Path(output_dir)
   output_dir.mkdir(parents=True, exist_ok=True)
@@ -911,6 +1005,9 @@ def process_fold_input(
     model_runner: None,
     output_dir: epath.PathLike,
     buckets: Sequence[int] | None = None,
+    esm_embeddings: np.ndarray | None = None,
+    featurise_off: Sequence[str] = (),
+    cyclic: bool | Sequence[str] = False,
     ref_max_modified_date: datetime.date | None = None,
     conformer_max_iterations: int | None = None,
     resolve_msa_overlaps: bool = True,
@@ -930,6 +1027,9 @@ def process_fold_input(
     model_runner: ModelRunner,
     output_dir: epath.PathLike,
     buckets: Sequence[int] | None = None,
+    esm_embeddings: np.ndarray | None = None,
+    featurise_off: Sequence[str] = (),
+    cyclic: bool | Sequence[str] = False,
     ref_max_modified_date: datetime.date | None = None,
     conformer_max_iterations: int | None = None,
     resolve_msa_overlaps: bool = True,
@@ -948,6 +1048,9 @@ def process_fold_input(
     model_runner: ModelRunner | None,
     output_dir: epath.PathLike,
     buckets: Sequence[int] | None = None,
+    esm_embeddings: np.ndarray | None = None,
+    featurise_off: Sequence[str] = (),
+    cyclic: bool | Sequence[str] = False,
     ref_max_modified_date: datetime.date | None = None,
     conformer_max_iterations: int | None = None,
     resolve_msa_overlaps: bool = True,
@@ -1042,6 +1145,9 @@ def process_fold_input(
         fold_input=fold_input,
         model_runner=model_runner,
         buckets=buckets,
+        esm_embeddings=esm_embeddings,
+        featurise_off=featurise_off,
+        cyclic=cyclic,
         ref_max_modified_date=ref_max_modified_date,
         conformer_max_iterations=conformer_max_iterations,
         resolve_msa_overlaps=resolve_msa_overlaps,
@@ -1205,14 +1311,29 @@ def main(_):
   else:
     data_pipeline_config = None
 
-  # Handle OF3 weight conversion before inference.
-  model_dir = MODEL_DIR.value
-  use_of3_weights = _OF3_WEIGHTS.value
-  if _OF3_CHECKPOINT.value:
-    model_dir = _maybe_convert_of3_weights(_OF3_CHECKPOINT.value, model_dir)
-    use_of3_weights = True
+  model_name = _MODEL.value
+  # chain ids -> asym_ids, which are 1-based and assigned in chain order.
+  cyclic = _CYCLIC.value or False
+  if cyclic and [c.lower() for c in cyclic] == ['all']:
+    cyclic = True
+  esm_embeddings = None
+  if _ESM_EMBEDDINGS.value:
+    esm_embeddings = np.load(_ESM_EMBEDDINGS.value, allow_pickle=True)['esm']
+    print(f'Loaded ESM embeddings {esm_embeddings.shape} from '
+          f'{_ESM_EMBEDDINGS.value}')
+  elif model_name == 'chai1':
+    print('WARNING: chai-1 is running WITHOUT ESM embeddings. Its token feature'
+          ' stream is mostly ESM2; see --esm_embeddings.')
+  if MODEL_DIR.value is not None:
+    model_dir = MODEL_DIR.value
+  elif model_name == 'alphafold3':
+    model_dir = _DEFAULT_MODEL_DIR
+  else:
+    model_dir = None  # resolved by ensure_weights below
 
-  if not use_of3_weights:
+  # The terms-of-use notice is DeepMind's, about DeepMind's parameters. It does
+  # not apply when running someone else's model through this graph.
+  if model_name == 'alphafold3':
     notice = textwrap.wrap(
         'Running AlphaFold 3. Please note that standard AlphaFold 3 model'
         ' parameters are only available under terms of use provided at'
@@ -1240,6 +1361,12 @@ def main(_):
     else:
       raise ValueError(f'Unsupported JAX backend: {jax_backend}')
 
+    # Idempotent after the first run: a directory that already holds a blob is
+    # left alone. AlphaFold 3's own parameters are never fetched.
+    model_dir = weights.ensure_weights(
+        model_name, model_dir, download=_DOWNLOAD_WEIGHTS.value,
+        precision=_WEIGHTS_PRECISION.value)
+
     print('Building model from scratch...')
     model_runner = ModelRunner(
         config=make_model_config(
@@ -1251,7 +1378,7 @@ def main(_):
             num_recycles=_NUM_RECYCLES.value,
             return_embeddings=_SAVE_EMBEDDINGS.value,
             return_distogram=_SAVE_DISTOGRAM.value,
-            of3_weights=use_of3_weights,
+            model_name=model_name,
         ),
         device=device,
         model_dir=model_dir,
@@ -1282,6 +1409,9 @@ def main(_):
         buckets=None
         if _NOJIT.value
         else tuple(int(bucket) for bucket in _BUCKETS.value),
+        esm_embeddings=esm_embeddings,
+        featurise_off=_FEATURISE_OFF.value,
+        cyclic=cyclic,
         ref_max_modified_date=max_template_date,
         conformer_max_iterations=_CONFORMER_MAX_ITERATIONS.value,
         resolve_msa_overlaps=_RESOLVE_MSA_OVERLAPS.value,

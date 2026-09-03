@@ -5,3 +5,11 @@
 # ~500 MB, well over GitHub's 100 MB per-file limit, so rebuild it locally
 # rather than committing it.
 src/alphafold3/constants/converters/*.pickle
+
+# dev-only: the compiled extension and generated data pickles, symlinked from an
+# installed build so `PYTHONPATH=src` imports work without reinstalling.
+src/alphafold3/cpp*.so
+src/alphafold3/constants/converters/*.pickle
+
+# Jupyter leaves these next to whatever it opens.
+.ipynb_checkpoints/

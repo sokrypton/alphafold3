@@ -20,6 +20,7 @@
 """Diffusion Head."""
 
 from collections.abc import Callable
+import os
 
 from alphafold3.common import base_config
 from alphafold3.constants import residue_names
@@ -27,10 +28,10 @@ from alphafold3.model import feat_batch
 from alphafold3.model import model_config
 from alphafold3.model.components import haiku_modules as hm
 from alphafold3.model.components import utils
-from alphafold3.model.network import atom_cross_attention
-from alphafold3.model.network import diffusion_transformer
-from alphafold3.model.network import featurization
-from alphafold3.model.network import noise_level_embeddings
+from . import atom_cross_attention
+from . import diffusion_transformer
+from . import featurization
+from . import noise_level_embeddings
 import haiku as hk
 import jax
 import jax.numpy as jnp
@@ -86,6 +87,21 @@ def random_augmentation(
   return augmented_positions * mask[..., None]
 
 
+# chai's DiffusionConfig, in sigma_data units (chai1.py:263)
+CHAI_S_CHURN = 80.0
+# NOT scaled by sigma_data, and that is not a typo on our side. chai's own loop
+# compares the SCALED sigmas (its schedule multiplies by sigma_data, so they run
+# 1262 -> 0.007) against the RAW DiffusionConfig thresholds S_tmin=4e-4 and
+# S_tmax=80.0. The mixed units look like a slip in chai, but the weights were
+# sampled with it, so it is the specification: churn is OFF above sigma=80 --
+# 121 of 200 steps, not all 200. Scaling these by sigma_data turns the window on
+# for the entire trajectory and injects 81-1236 A of extra noise across the first
+# 79 steps, which is what left the samples as partially-denoised blobs (N-CA
+# 0.70 A against an ideal 1.46).
+CHAI_S_TMIN = 4e-4
+CHAI_S_TMAX = 80.0
+
+
 def noise_schedule(t, smin=0.0004, smax=160.0, p=7):
   return (
       SIGMA_DATA
@@ -106,6 +122,13 @@ class SampleConfig(base_config.BaseConfig):
   noise_scale: float = 1.003
   step_scale: float = 1.5
   num_samples: int = 1
+  # EDM schedule shape. AF3 hardcoded these as noise_schedule()'s defaults, which
+  # silently applied AF3's sampler to every ported family; they are config fields
+  # so each model can carry the constants it was trained with (boltz2 wants rho 8,
+  # not 7). See runner._SAMPLER_CONSTANTS.
+  sigma_min: float = 0.0004
+  sigma_max: float = 160.0
+  rho: float = 7.0
 
 
 class DiffusionHead(hk.Module):
@@ -156,15 +179,51 @@ class DiffusionHead(hk.Module):
         max_relative_idx=32,
         max_relative_chain=2,
     ).astype(pair_embedding.dtype)
-    features_2d = jnp.concatenate([pair_embedding, rel_features], axis=-1)
+    pc = self.config.conditioning.pair_channel
+    if self.global_config.model == 'opendde':
+      # OpenDDE compresses the trunk pair and the rel-pos features SEPARATELY to
+      # pair_channel, concatenates (2*pc), then LN+projects -- rather than one joint
+      # projection over [pair_embedding, RAW rel_features]. The joint LN over the
+      # widened concat couples them, so this is a distinct forward path (new params:
+      # z_trunk_norm/projection + relpe_projection + the LN/projection at 2*pc).
+      z_trunk = hm.Linear(pc, precision='highest', name='z_trunk_projection')(
+          hm.LayerNorm(use_fast_variance=False, create_offset=self.global_config.model in ('boltz2', 'rosettafold3'),
+                       name='z_trunk_norm')(pair_embedding))
+      relpe = hm.Linear(pc, precision='highest', name='relpe_projection')(rel_features)
+      features_2d = jnp.concatenate([z_trunk, relpe], axis=-1)
+    elif self.global_config.model in ('boltz2', 'protenix2', 'rosettafold3'):
+      # Boltz's pairwise_conditioner concats [RAW z_trunk(128), PROJECTED relpos(128)] -> 256
+      # (vs AF3's [z_trunk, RAW rel_features(139)] -> 267). relpe_projection == the trunk's
+      # rel_pos.linear_layer (139->128), the same weight used for z-init position_activations.
+      # Protenix rides the SAME path at c_z=256 ([z_trunk(256), relpe(256)] -> 512), but with
+      # its OWN relpe weight (DiffusionConditioning.relpe, distinct from the trunk's) and
+      # create_offset=False on the norms (the boltz2-gated offsets below stay boltz2-only).
+      relpe = hm.Linear(pc, precision='highest', name='relpe_projection')(rel_features)
+      features_2d = jnp.concatenate([pair_embedding, relpe], axis=-1)
+    elif self.global_config.model == 'chai1':
+      # chai conditions on [z_trunk, z_init] -- the token embedder's pair output,
+      # not a relative-position encoding at all (its relative features are
+      # already inside z_init). Trunk first, matching AF3's order here; note the
+      # SINGLE track concatenates the other way round, which is why the
+      # converter swaps that weight's halves and not this one.
+      features_2d = jnp.concatenate(
+          [pair_embedding, embeddings['pair_init'].astype(pair_embedding.dtype)],
+          axis=-1)
+    else:
+      features_2d = jnp.concatenate([pair_embedding, rel_features], axis=-1)
     pair_cond = hm.Linear(
-        self.config.conditioning.pair_channel,
+        pc,
         precision='highest',
         name='pair_cond_initial_projection',
     )(
         hm.LayerNorm(
             use_fast_variance=False,
-            create_offset=False,
+            # chai is AFFINE here (token_pair_proj.0 / token_in_proj.0 /
+            # fourier_proj.0 all carry a bias). Found by enumerating every
+            # affine LayerNorm in the checkpoint and diffing against the
+            # converter's scale-only scopes: three showed up, all three real.
+            create_offset=self.global_config.model in (
+                'boltz2', 'rosettafold3', 'chai1'),
             name='pair_cond_initial_norm',
         )(features_2d)
     )
@@ -176,7 +235,7 @@ class DiffusionHead(hk.Module):
 
     target_feat = embeddings['target_feat']
     features_1d = jnp.concatenate([single_embedding, target_feat], axis=-1)
-    if self.global_config.of3_weights:
+    if self.global_config.model == 'openfold3':
       # OF3's restype and profile blocks carry 32 classes; AF3's carry 31 (AF3
       # folds unknown DNA into the shared unknown-nucleic class). Everywhere
       # else the extra class can simply be dropped from the weights, because a
@@ -202,20 +261,34 @@ class DiffusionHead(hk.Module):
       )
     single_cond = hm.LayerNorm(
         use_fast_variance=False,
-        create_offset=False,
+        # chai is AFFINE here (token_pair_proj.0 / token_in_proj.0 /
+        # fourier_proj.0 all carry a bias). Found by enumerating every
+        # affine LayerNorm in the checkpoint and diffing against the
+        # converter's scale-only scopes: three showed up, all three real.
+        create_offset=self.global_config.model in (
+            'boltz2', 'rosettafold3', 'chai1'),
         name='single_cond_initial_norm',
     )(features_1d)
     single_cond = hm.Linear(
         self.config.conditioning.seq_channel,
         precision='highest',
+        # boltz2's single_conditioner.single_embed is a plain `nn.Linear`, so it
+        # carries a bias where stock AF3's projection does not
+        # (encodersv2.py:142, `s = self.single_embed(self.norm_single(s))`).
+        # This one is NOT inert the way an attention-bias offset is: it is a
+        # constant added to the single conditioning of every token, and it
+        # reaches the whole diffusion module through adaLN.
+        use_bias=self.global_config.model == 'boltz2',
         name='single_cond_initial_projection',
     )(single_cond)
 
-    if self.global_config.of3_weights:
-      # When using ported OF3 weights the Fourier constants differ from AF3's
-      # hardcoded values (JAX vs PyTorch RNG produce different numbers for
-      # seed=42). Load them as proper Haiku parameters so they travel with the
-      # params file rather than being monkey-patched at runtime.
+    if getattr(self.global_config, 'trained_fourier', False):
+      # Models with an independently-trained Fourier embedding (OpenFold3,
+      # IntelliFold-v2) differ from AF3's hardcoded constants. Load them as proper
+      # Haiku parameters so they travel with the params file for BOTH such models
+      # -- the same mechanism, gated by trained_fourier (true for of3 and if2),
+      # rather than a per-model runtime monkey-patch. Stock AF3 leaves this off
+      # and uses the constants in noise_level_embeddings.
       _dim = len(noise_level_embeddings._WEIGHT)
       fourier_weight = hk.get_parameter(
           'fourier_embedding_weight',
@@ -229,6 +302,11 @@ class DiffusionHead(hk.Module):
           dtype=jnp.float32,
           init=hk.initializers.Constant(0.0),
       )
+      # Every model is fed the sigma_data-scaled noise level here. chai does not
+      # divide by sigma_data itself, but the difference is a constant shift of
+      # 0.25*log(16) inside the log, and the embedding is
+      # cos(2pi(0.25*log(s)*w + b)) -- so its converter folds w*0.25*log(16)
+      # into the BIAS and the two are the same function to float round-off.
       noise_embedding = noise_level_embeddings.noise_embeddings(
           sigma_scaled_noise_level=noise_level / SIGMA_DATA,
           weight=fourier_weight,
@@ -245,7 +323,12 @@ class DiffusionHead(hk.Module):
     )(
         hm.LayerNorm(
             use_fast_variance=False,
-            create_offset=False,
+            # chai is AFFINE here (token_pair_proj.0 / token_in_proj.0 /
+            # fourier_proj.0 all carry a bias). Found by enumerating every
+            # affine LayerNorm in the checkpoint and diffing against the
+            # converter's scale-only scopes: three showed up, all three real.
+            create_offset=self.global_config.model in (
+                'boltz2', 'rosettafold3', 'chai1'),
             name='noise_embedding_initial_norm',
         )(noise_embedding)
     )
@@ -254,6 +337,17 @@ class DiffusionHead(hk.Module):
       single_cond += diffusion_transformer.transition_block(
           single_cond, 2, self.global_config, name=f'single_transition_{idx}'
       )
+
+    if self.global_config.model == 'chai1':
+      # chai closes its conditioning with an AFFINE LayerNorm on each track --
+      # `single_ln` and `pair_ln` -- which AF3 does not have. Both feed every
+      # adaLN downstream, and those scale by (s + 1), so leaving them out let
+      # the 16-block token transformer run away: measured 9.2e7 against chai's
+      # 160 at its output. Same failure the atom conditioning had.
+      single_cond = hm.LayerNorm(use_fast_variance=False,
+                                 name='single_cond_final_norm')(single_cond)
+      pair_cond = hm.LayerNorm(use_fast_variance=False,
+                               name='pair_cond_final_norm')(pair_cond)
 
     return single_cond, pair_cond
 
@@ -298,18 +392,24 @@ class DiffusionHead(hk.Module):
       # Token-token attention
       act = jnp.asarray(act, dtype=jnp.float32)
 
+      # chai adds structure_cond_to_token_structure_proj(s_cond) with NO
+      # LayerNorm -- its s_cond has already been through `single_ln` at the end
+      # of the conditioning. AF3 normalises again here, and an unmapped
+      # LayerNorm is not a no-op even at scale=1: it still re-centres and
+      # re-scales.
+      _s_cond_in = trunk_single_cond
+      if self.global_config.model != 'chai1':
+        _s_cond_in = hm.LayerNorm(
+            use_fast_variance=False,
+            create_offset=self.global_config.model in ('boltz2', 'rosettafold3'),
+            name='single_cond_embedding_norm',
+        )(trunk_single_cond)
       act += hm.Linear(
           act.shape[-1],
           precision='highest',
           initializer=self.global_config.final_init,
           name='single_cond_embedding_projection',
-      )(
-          hm.LayerNorm(
-              use_fast_variance=False,
-              create_offset=False,
-              name='single_cond_embedding_norm',
-          )(trunk_single_cond)
-      )
+      )(_s_cond_in)
 
       act = jnp.asarray(act, dtype=jnp.float32)
       trunk_single_cond = jnp.asarray(trunk_single_cond, dtype=jnp.float32)
@@ -324,9 +424,14 @@ class DiffusionHead(hk.Module):
           single_cond=trunk_single_cond,
           mask=sequence_mask,
           pair_cond=trunk_pair_cond,
+          # OpenDDE threads the structural-token pair attention bias (from the
+          # token expander) into the diffusion transformer too; None otherwise.
+          extra_pair_bias=embeddings.get('structural_pair_attn_bias'),
       )
       act = hm.LayerNorm(
-          use_fast_variance=False, create_offset=False, name='output_norm'
+          use_fast_variance=False,
+          create_offset=self.global_config.model in ('boltz2', 'rosettafold3', 'chai1'),
+          name='output_norm'
       )(act)
       # (n_tokens, per_token_channels)
 
@@ -357,6 +462,7 @@ def sample(
     batch: feat_batch.Batch,
     key: jnp.ndarray,
     config: SampleConfig,
+    global_config: model_config.GlobalConfig | None = None,
 ) -> dict[str, jnp.ndarray]:
   """Sample using denoiser on batch.
 
@@ -378,6 +484,7 @@ def sample(
   """
 
   mask = batch.predicted_structure_info.atom_mask
+  chai = global_config is not None and global_config.model == 'chai1'
 
   def apply_denoising_step(carry, noise_level):
     key, positions, noise_level_prev = carry
@@ -387,14 +494,34 @@ def sample(
         rng_key=key_aug, positions=positions, mask=mask  # pyrefly: ignore[bad-argument-type]
     )
 
-    gamma = config.gamma_0 * (noise_level > config.gamma_min)
+    # chai's churn is EDM's own parameterisation, not AF3's: a constant
+    # min(S_churn / N, sqrt(2) - 1) applied wherever S_tmin <= sigma <= S_tmax,
+    # keyed on the CURRENT sigma. AF3 instead switches a fixed gamma_0 on above
+    # a threshold.
+    if chai and os.environ.get('CHAI_NOCHURN'):
+      # DIAGNOSTIC ONLY (env-gated, off by default): run the tail deterministically.
+      # The trajectory peaks at 3.67 A near sigma=2 and then degrades for ~55
+      # steps with churn on. Noise inflates distances, so churn cannot be
+      # shrinking bonds itself -- but it re-exposes the state to a possibly
+      # biased correction every step. If gamma=0 stops the decay, the fault is
+      # that interaction; if not, it is the denoised prediction alone.
+      gamma = jnp.zeros_like(noise_level_prev)
+    elif chai:
+      gamma = jnp.where(
+          (noise_level_prev >= CHAI_S_TMIN) & (noise_level_prev <= CHAI_S_TMAX),
+          min(CHAI_S_CHURN / config.steps, 2.0 ** 0.5 - 1.0), 0.0)
+    else:
+      gamma = config.gamma_0 * (noise_level > config.gamma_min)
     t_hat = noise_level_prev * (1 + gamma)
 
+    # Guard against -0.0 (IEEE negative zero) when gamma=0: t_hat ==
+    # noise_level_prev, so t_hat**2 - noise_level_prev**2 == -0.0 and
+    # XLA's sqrt(-0.0) returns NaN. chai clamps at 1e-6 rather than 0, so on a
+    # no-churn step it still adds 1e-3 A of noise; match that exactly now that
+    # no-churn steps are the majority of the trajectory rather than none of it.
+    floor = 1e-6 if chai else 0.0
     noise_scale = config.noise_scale * jnp.sqrt(
-        # Don't take sqrt of a tiny negative number or of -0.0 (happens when
-        # running on CPU, or when gamma=0 so t_hat == noise_level_prev and
-        # XLA's sqrt(-0.0) returns NaN).
-        jnp.maximum(t_hat**2 - noise_level_prev**2, 0.0)
+        jnp.maximum(floor, t_hat**2 - noise_level_prev**2)
     )
     noise = noise_scale * jax.random.normal(key_noise, positions.shape)
     positions_noisy = positions + noise
@@ -403,13 +530,36 @@ def sample(
     grad = (positions_noisy - positions_denoised) / t_hat
 
     d_t = noise_level - t_hat
-    positions_out = positions_noisy + config.step_scale * d_t * grad
+    if chai:
+      # chai's second-order step, copied verbatim rather than tidied. Note it
+      # ADDS the averaged correction to the already-Euler-updated position
+      # instead of replacing the Euler term, so the total move is
+      # d_t * grad + d_t * (grad + grad') / 2 -- NOT textbook Heun. The weights
+      # were sampled with this, so the deviation is the specification.
+      # No step_scale either: chai's is 1.0.
+      positions_out = positions_noisy + d_t * grad
+      grad2 = (positions_out - denoising_step(positions_out, noise_level)
+               ) / noise_level
+      positions_out = jnp.where(
+          noise_level > 0,
+          positions_out + d_t * (grad2 + grad) / 2.0,
+          positions_out)
+    else:
+      positions_out = positions_noisy + config.step_scale * d_t * grad
 
     return (key, positions_out, noise_level), positions_out
 
   num_samples = config.num_samples
 
-  noise_levels = noise_schedule(jnp.linspace(0, 1, config.steps + 1))
+  if chai:
+    # chai evaluates the schedule at MIDPOINTS -- linspace(0, 1, 2N+1)[1::2] --
+    # where AF3 uses the N+1 endpoints. So it never samples sigma=0 exactly, and
+    # every sigma sits half a step inside AF3's.
+    times = jnp.linspace(0.0, 1.0, 2 * config.steps + 1)[1::2]
+  else:
+    times = jnp.linspace(0, 1, config.steps + 1)
+  noise_levels = noise_schedule(
+      times, smin=config.sigma_min, smax=config.sigma_max, p=config.rho)
 
   key, noise_key = jax.random.split(key)
   positions = jax.random.normal(noise_key, (num_samples,) + mask.shape + (3,))
@@ -424,7 +574,16 @@ def sample(
   apply_denoising_step = hk.vmap(
       apply_denoising_step, in_axes=(0, None), split_rng=(not hk.running_init())
   )
-  result, _ = hk.scan(apply_denoising_step, init, noise_levels[1:], unroll=4)
+  # unroll=1, NOT AF3's 4. Measured on this graph (steps -> total compile):
+  #   unroll=4: 1->3.5s  2->4.0s  4->50.3s  8->53.4s  20->52.9s  50->64.1s
+  #   unroll=1: 20->40.6s  50->41.9s   (flat -- one body copy, compiled once)
+  # and the two are RUNTIME-identical (0.30s vs 0.31s per call at 20 steps), so the
+  # unrolling buys no speed and costs ~13s of compile plus ~7s per remainder copy.
+  # XLA sees `unroll + (steps % unroll)` copies of the denoiser body, which is why
+  # compile tracked the step count in a way that looked inexplicable.
+  # (Below `unroll` steps jax's _scan_impl emits no loop at all -- num_trips==1 and
+  # remainder==0 -- which is the 3.5s case, not something to design around.)
+  result, _ = hk.scan(apply_denoising_step, init, noise_levels[1:], unroll=1)
   _, positions_out, _ = result
 
   final_dense_atom_mask = jnp.tile(mask[None], (num_samples, 1, 1))

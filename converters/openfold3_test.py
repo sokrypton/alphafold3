@@ -46,7 +46,7 @@ from alphafold3.constants import mmcif_names
 from alphafold3.constants import residue_names
 from alphafold3.data import msa_features
 from alphafold3.model import data_constants
-from alphafold3.model import of3_weight_converter as converter
+from converters import openfold3 as converter
 import numpy as np
 
 

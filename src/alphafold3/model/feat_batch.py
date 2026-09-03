@@ -40,6 +40,10 @@ class Batch:
   atom_cross_att: features.AtomCrossAtt
   convert_model_output: features.ConvertModelOutput
   frames: features.Frames
+  # last + defaulted: every caller that builds a Batch positionally (the data
+  # pipeline) predates this field, and only RF3 populates it.
+  chirals: features.Chirals = dataclasses.field(
+      default_factory=features.Chirals.empty)
 
   @property
   def num_res(self) -> int:
@@ -66,6 +70,7 @@ class Batch:
         atom_cross_att=features.AtomCrossAtt.from_data_dict(batch),
         convert_model_output=features.ConvertModelOutput.from_data_dict(batch),
         frames=features.Frames.from_data_dict(batch),
+        chirals=features.Chirals.from_data_dict(batch),
     )
 
   def as_data_dict(self) -> features.BatchDict:

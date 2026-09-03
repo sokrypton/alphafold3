@@ -1,0 +1,79 @@
+{
+ "name": "5kx0",
+ "sequences": [
+  {
+   "protein": {
+    "id": "A",
+    "sequence": "NPELQRKCKELDTRPEAERKCREESD",
+    "modifications": [
+     {
+      "ptmType": "DAS",
+      "ptmPosition": 12
+     },
+     {
+      "ptmType": "DPR",
+      "ptmPosition": 15
+     },
+     {
+      "ptmType": "DGL",
+      "ptmPosition": 16
+     },
+     {
+      "ptmType": "DAL",
+      "ptmPosition": 17
+     },
+     {
+      "ptmType": "DGL",
+      "ptmPosition": 18
+     },
+     {
+      "ptmType": "DAR",
+      "ptmPosition": 19
+     },
+     {
+      "ptmType": "DLY",
+      "ptmPosition": 20
+     },
+     {
+      "ptmType": "DCY",
+      "ptmPosition": 21
+     },
+     {
+      "ptmType": "DAR",
+      "ptmPosition": 22
+     },
+     {
+      "ptmType": "DGL",
+      "ptmPosition": 23
+     },
+     {
+      "ptmType": "DGL",
+      "ptmPosition": 24
+     }
+    ],
+    "unpairedMsa": "",
+    "pairedMsa": "",
+    "templates": []
+   }
+  }
+ ],
+ "bondedAtomPairs": [
+  [
+   [
+    "A",
+    8,
+    "SG"
+   ],
+   [
+    "A",
+    21,
+    "SG"
+   ]
+  ]
+ ],
+ "modelSeeds": [
+  42
+ ],
+ "dialect": "alphafold3",
+ "version": 4
+}

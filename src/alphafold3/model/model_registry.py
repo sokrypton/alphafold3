@@ -1,0 +1,549 @@
+# Copyright 2024 DeepMind Technologies Limited
+#
+# AlphaFold 3 source code is licensed under CC BY-NC-SA 4.0. To view a copy of
+# this license, visit https://creativecommons.org/licenses/by-nc-sa/4.0/
+#
+# To request access to the AlphaFold 3 model parameters, follow the process set
+# out at https://github.com/google-deepmind/alphafold3. You may only use these
+# if received directly from Google. Use is subject to terms of use available at
+# https://github.com/google-deepmind/alphafold3/blob/main/WEIGHTS_TERMS_OF_USE.md
+
+"""Per-model settings: what each AF3-family model needs beyond the graph itself.
+
+`global_config.model` names which family's forward branches run; this module
+carries everything else that name implies -- the config-shape divergences (each
+family widened its own channels, head counts and bin counts), the trained
+Fourier noise embedding, the EDM sampler constants, and where the converted
+weights live.
+
+Runtime only. Conversion is offline tooling in `converters/` at the repo root;
+nothing here imports torch or knows what a checkpoint looks like.
+"""
+
+from __future__ import annotations
+
+# IntelliFold-v2's "full_fat" preset: the four channels it widens over stock AF3.
+# (scope, attribute) pairs resolved against model.Model.Config(); everything not
+# listed is byte-identical to public AF3. Values from IntelliFold's own
+# widen_config_full_fat (patches.py) / convert.py V2_HEADS (c_z=512, c_m=256,
+# c_t=256, diffusion-conditioning pair=512).
+FULL_FAT_CHANNELS = (
+    ('evoformer.pair_channel', 512),
+    ('evoformer.msa_channel', 256),
+    ('evoformer.template.num_channels', 256),
+    ('heads.diffusion.conditioning.pair_channel', 512),
+)
+
+
+# IntelliFold-v2 also raises the pair/template/msa attention head counts to 8
+# (its converter's V2_HEADS: pair=8, template=8, msa=8; stock AF3 GridSelfAttention
+# defaults to 4). Every GridSelfAttention in the fork is a pair- or template-axis
+# attention, and MSAAttention is the msa one -- so widening num_head on those two
+# config types everywhere (trunk pairformer, template embedder, evoformer msa
+# stack, AND the confidence head's pairformer) is exactly V2_HEADS, no path list
+# to drift. single (16) / token (16) / atom (4) attentions use other config types
+# and are unchanged. All four full_fat channels stay divisible by 8.
+# IntelliFold-v2 also raises the pair/template/msa attention head counts to 8
+# (its converter's V2_HEADS: pair=8, template=8, msa=8; stock AF3
+# GridSelfAttention defaults to 4). Every GridSelfAttention in this graph is a
+# pair- or template-axis attention and MSAAttention is the msa one, so widening
+# num_head on those two config types everywhere -- trunk pairformer, template
+# embedder, evoformer msa stack, AND the confidence head's pairformer -- is
+# exactly V2_HEADS, with no path list to drift. single (16) / token (16) / atom
+# (4) attentions use other config types and are unchanged. All four full_fat
+# channels stay divisible by 8.
+FULL_FAT_NUM_HEAD = 8
+
+
+def _widen_full_fat(cfg):
+  '''widen cfg in place to IntelliFold-v2 dims; raise if a channel path is missing
+  so a config-layout drift is caught loudly rather than silently loading zeros.'''
+  for dotted, value in FULL_FAT_CHANNELS:
+    node = cfg
+    parts = dotted.split('.')
+    for p in parts[:-1]:
+      if not hasattr(node, p):
+        raise AttributeError(
+            f'full_fat: config path {dotted!r} not found (missing {p!r}); '
+            'AF3 config layout drift -- re-check FULL_FAT_CHANNELS')
+      node = getattr(node, p)
+    setattr(node, parts[-1], value)
+
+  # raise every pair/template/msa attention to 8 heads by walking the config tree
+  from alphafold3.model.network import modules as _modules
+  head_types = (_modules.GridSelfAttention.Config, _modules.MSAAttention.Config)
+  seen = set()
+  def _walk(node):
+    if id(node) in seen:
+      return
+    seen.add(id(node))
+    if isinstance(node, head_types):
+      node.num_head = FULL_FAT_NUM_HEAD
+      return
+    for v in list(getattr(node, '__dict__', {}).values()):
+      if isinstance(v, (list, tuple)):
+        for x in v:
+          _walk(x)
+      else:
+        _walk(v)
+  _walk(cfg)
+
+
+# OpenDDE's width/head/bin profile (its production config, model_base.py). Unlike
+# full_fat's uniform widening, OpenDDE's heads are NON-uniform (trunk triangle
+# attention 12, template 2), so these are set by explicit config path. Each entry
+# (dotted-path, value); attention head dims stay 32 (c / num_head).
+OPENDDE_SETTINGS = (
+    ('evoformer.pair_channel', 384),                              # c_z
+    ('evoformer.msa_channel', 128),                               # c_m
+    ('evoformer.pairformer.pair_attention.num_head', 12),         # trunk tri-att, 384/32
+    ('evoformer.msa_stack.pair_attention.num_head', 12),          # MSA-module pair stack tri-att
+    ('evoformer.msa_stack.msa_attention.num_head', 8),            # MSA pair-weighted-averaging
+    ('evoformer.msa_stack.msa_attention.value_dim', 8),           # decoupled per-head width (blocker)
+    ('evoformer.template.template_stack.pair_attention.num_head', 2),  # template tri-att, 64/32
+    ('heads.confidence.pairformer.pair_attention.num_head', 12),  # confidence pairformer (c_z=384)
+    ('heads.distogram.num_bins', 96),                             # OpenDDE no_bins=96 (vs AF3 64)
+)
+
+
+def _widen_opendde(cfg):
+  '''set cfg in place to OpenDDE's production dims/heads/bins; raise on a missing
+  path so a config-layout drift is caught loudly rather than silently mis-shaping.'''
+  for dotted, value in OPENDDE_SETTINGS:
+    node = cfg
+    parts = dotted.split('.')
+    for p in parts[:-1]:
+      if not hasattr(node, p):
+        raise AttributeError(
+            f'opendde: config path {dotted!r} not found (missing {p!r}); '
+            'AF3 config layout drift -- re-check OPENDDE_SETTINGS')
+      node = getattr(node, p)
+    setattr(node, parts[-1], value)
+
+
+# Boltz-2's config divergence from stock AF3 is tiny: same channels (c_z=128, c_s=384),
+# same diffusion nesting (24 blocks / super_block_size 4 = 6 super) and atom/template/msa
+# counts -- only the pairformer (64 vs 48) and confidence pairformer (8 vs 4) are deeper.
+# The rest of Boltz's differences are FORWARD branches (a_to_b conditioned transition, the
+# summed input embedder, the concat single_conditioner, MSA update-then-OPM order) gated
+# on instance flags, not config shape. (WIP: only boltz2_cond_transition is wired so far.)
+BOLTZ2_SETTINGS = (
+    ('evoformer.pairformer.num_layer', 64),
+    ('heads.confidence.pairformer.num_layer', 8),
+    # Boltz's diffusion single conditioning s = 2*token_s = 768 (AF3's is seq_channel=384).
+    # The token transformer adaln takes this full 768-d s, so widen the diffusion single
+    # conditioning channel. per_token_channels (the token act) is already 768.
+    ('heads.diffusion.conditioning.seq_channel', 768),
+    # Boltz's MSA pair-weighted-averaging hidden = 8 heads x 32 = 256 (proj_m/proj_g are
+    # (256,64), proj_o (64,256)). msa_attention.value_dim is PER-HEAD here (default None ->
+    # 8), so 32 gives 8x32 = 256 total, not 256.
+    ('evoformer.msa_stack.msa_attention.value_dim', 32),
+    # Boltz template pairformer: pairwise_head_width=32 (AF3 would derive 64//4=16) and a
+    # 4x transition (template_stack defaults to 2x). Only used on the boltz2 template path.
+    ('evoformer.template.template_stack.pair_attention.qkv_dim', 32),
+    ('evoformer.template.template_stack.pair_transition.num_intermediate_factor', 4),
+)
+
+
+def _widen_boltz2(cfg):
+  '''set cfg in place to Boltz-2's block counts; raise on a missing path.'''
+  for dotted, value in BOLTZ2_SETTINGS:
+    node = cfg
+    parts = dotted.split('.')
+    for p in parts[:-1]:
+      if not hasattr(node, p):
+        raise AttributeError(f'boltz2: config path {dotted!r} not found (missing {p!r})')
+      node = getattr(node, p)
+    setattr(node, parts[-1], value)
+
+
+# Protenix-v2 (ByteDance, Apache-2.0): AF3-lineage, OpenFold-derived like OF3. Its ONLY
+# architectural divergence from stock AF3 is the "hidden_scale_up" widening of the trunk
+# pair channel to c_z=256 (stock is 128). Everything derived from c_z follows: triangle
+# multiplication hidden = c_z = 256, and triangle attention heads = c_z//32 = 8 (stock 4).
+# The diffusion stack is UNWIDENED (token 768, single cond 384, same as stock/of3) -- only
+# the trunk carries the wider pair rep. Block counts match AF3 defaults (pairformer 48,
+# msa 4, template 2, confidence 4, distogram 64 bins). c_m stays 128. So the config delta
+# is just the pair channel + the derived per-stack head counts (set explicitly so a config
+# layout drift is caught loudly). Protenix-v2 is in OPENFOLD3_LINEAGE (it rides the OF3
+# forward branches) + trained Fourier; its Protenix-specific bits are the CONVERTER's
+# naming/feature conventions, not forward-graph shape. See converters/protenix2.py +
+# memory protenix-v2-port.md.
+PROTENIX2_SETTINGS = (
+    ('evoformer.pair_channel', 256),                              # c_z (hidden_scale_up)
+    ('evoformer.msa_channel', 128),                               # c_m (unchanged)
+    ('evoformer.pairformer.pair_attention.num_head', 8),          # trunk tri-att, 256/32
+    ('evoformer.msa_stack.pair_attention.num_head', 8),           # MSA-module pair stack tri-att
+    ('evoformer.msa_stack.msa_attention.num_head', 8),            # MSA pair-weighted-averaging
+    ('evoformer.msa_stack.msa_attention.value_dim', 8),           # per-head width (8*8=64 = proj_m/g)
+    ('evoformer.template.template_stack.pair_attention.num_head', 2),  # template tri-att, 64/32
+    ('heads.confidence.pairformer.pair_attention.num_head', 8),   # confidence pairformer (c_z=256)
+    # Protenix's DiffusionConditioning pair path is also widened to c_z=256 (its relpe
+    # projects to 256, cat([z_trunk(256), relpe(256)])->layernorm_z(512)->256). The
+    # diffusion conditioning pair_channel defaults to 128, so widen it too or the
+    # diffusion pair_cond/transition params mis-shape (structural gate caught this).
+    ('heads.diffusion.conditioning.pair_channel', 256),
+)
+
+
+def _widen_protenix2(cfg):
+  '''set cfg in place to Protenix-v2's c_z=256 trunk widening; raise on a missing path.'''
+  for dotted, value in PROTENIX2_SETTINGS:
+    node = cfg
+    parts = dotted.split('.')
+    for p in parts[:-1]:
+      if not hasattr(node, p):
+        raise AttributeError(f'protenix: config path {dotted!r} not found (missing {p!r})')
+      node = getattr(node, p)
+    setattr(node, parts[-1], value)
+
+
+# RoseTTAFold3 (Baker lab / RosettaCommons foundry): AF3-family, adopted the AF3 architecture
+# (pairformer + af3 diffusion + af3 losses). STOCK AF3 dims (c_z=128, tri-att 4 heads, tri-mul
+# hidden 128 -- all AF3 defaults), so unlike protenix there is NO trunk widening. The only
+# config-shape divergences are the distogram bin count (65 vs 64) and the MSA depth (a single
+# weight-tied module, not a 4-block stack). Everything else is a FORWARD divergence gated on the
+# rf3 flag: kq_norm (q/k LayerNorm in diffusion attention), no_residual (diffusion block wiring),
+# single/tied MSA, fused template (=protenix branch). See converters/rosettafold3.py + memory
+# rosettafold3-port.md. (WIP: converter trunk+heads+diffusion(cond+token) done; atom path + branches next.)
+ROSETTAFOLD3_SETTINGS = (
+    ('heads.distogram.num_bins', 65),          # RF3 distogram = 65 bins (vs AF3 64)
+    # RF3's MSAModule holds ONE set of weights and runs them n_block=4 times
+    # (rf3_net.yaml msa_module.n_block; pairformer_layers.MSAModule.forward loops
+    # `for i in range(self.n_block)` over the same submodules). The single copy in
+    # the state dict is weight TYING, not a single iteration -- running it once
+    # leaves the trunk three MSA/pair updates short, which no structural gate can
+    # see. The converter replicates the one block across all four layers.
+    ('evoformer.msa_stack.num_layer', 4),
+    ('evoformer.msa_stack.msa_attention.value_dim', 32),  # RF3 msa pwa hidden 8x32=256 (AF3 default 8)
+    # RF3 template pairformer: per-head qkv=64 (4 heads x 64 = 256 hidden; AF3 derives
+    # 64//4=16) and a 4x transition (template_stack defaults to 2x).
+    ('evoformer.template.template_stack.pair_attention.qkv_dim', 64),
+    ('evoformer.template.template_stack.pair_transition.num_intermediate_factor', 4),
+)
+
+
+# chai-1 (chaidiscovery). Read off the JIT state_dict shapes, not a config file --
+# chai ships no model source, only frozen TorchScript, so every number here was
+# derived from a weight shape (see memory chai1-port.md for the dump). The trunk is
+# c_z=256 like protenix, but chai widens/narrows far more than the pair channel:
+#   - transitions are 2x in the pairformer and confidence stacks (AF3 is 4x), while
+#     the MSA module keeps 4x. Read off linear_out: pairformer pair (256,512) = 2x256,
+#     MSA pair (256,1024) = 4x256.
+#   - the MSA pair-weighted-averaging head is 8 heads x 32 (AF3 derives 64//8 = 8):
+#     linear_msa2vg (512,64) = v(256) | g(256).
+#   - the template pairformer runs 4 heads x 32 = 128 hidden at c=64 (AF3 derives
+#     64//4 = 16): pair2qkvg1 (512,64) = 4 x 128.
+#   - the diffusion transformer is 16 blocks, not AF3's 24, and its conditioning pair
+#     path carries the full c_z=256.
+# num_outer_channel is chai's OPM GROUP size: its outer product mean is a grouped
+# rank-8 einsum (weight_ab (2,8,8,64) -> 8*8*8 = 512 channels -> 256), not AF3's
+# left/right projection to 32, so the knob means something different under the chai
+# branch and 8 is the group width it reads.
+CHAI1_SETTINGS = (
+    ('evoformer.pair_channel', 256),                                    # c_z
+    ('evoformer.msa_channel', 64),                                      # c_m (unchanged)
+    ('evoformer.pairformer.pair_transition.num_intermediate_factor', 2),
+    ('evoformer.pairformer.single_transition.num_intermediate_factor', 2),
+    ('evoformer.msa_stack.msa_attention.value_dim', 32),                # 8 heads x 32
+    ('evoformer.msa_stack.outer_product_mean.num_outer_channel', 8),    # grouped OPM width
+    ('evoformer.template.template_stack.pair_attention.qkv_dim', 32),   # 4 heads x 32 at c=64
+    ('heads.diffusion.transformer.num_blocks', 16),                     # AF3 has 24
+    ('heads.diffusion.conditioning.pair_channel', 256),
+    ('heads.confidence.pairformer.pair_transition.num_intermediate_factor', 2),
+    ('heads.confidence.pairformer.single_transition.num_intermediate_factor', 2),
+    # CONFIDENCE only, not the trunk: chai's confidence triangle attention has a
+    # (2*c_z, 2*c_z) output projection whose two halves are combined as
+    # `kept + transpose(other)`, so each direction needs two output projections.
+    # The trunk's is (c_z, 2*c_z), which is AF3's per-direction pair summed, and
+    # must stay on the ordinary path.
+    ('heads.confidence.pairformer.pair_attention.dual_output', True),
+    # chai's EDM schedule. Its InferenceNoiseSchedule multiplies by sigma_data
+    # exactly as ours does, but with S_tmax = 80 where AF3 uses 160 -- so AF3
+    # starts sampling at 16 * 160 = 2560 and chai at 16 * 80 = 1280. The seam
+    # confirms it: chai's step-0 noise_sigma is 1261.6. Starting at twice the
+    # noise the denoiser was trained for is not a small error.
+    ('heads.diffusion.eval.sigma_max', 80.0),
+)
+
+
+def _widen_chai1(cfg):
+  '''set cfg in place to chai-1's dims; raise on a missing path.'''
+  for dotted, value in CHAI1_SETTINGS:
+    node = cfg
+    parts = dotted.split('.')
+    for p in parts[:-1]:
+      if not hasattr(node, p):
+        raise AttributeError(f'chai1: config path {dotted!r} not found (missing {p!r})')
+      node = getattr(node, p)
+    setattr(node, parts[-1], value)
+
+
+def _widen_rosettafold3(cfg):
+  '''set cfg in place to RF3's (minimal) config divergences; raise on a missing path.'''
+  for dotted, value in ROSETTAFOLD3_SETTINGS:
+    node = cfg
+    parts = dotted.split('.')
+    for p in parts[:-1]:
+      if not hasattr(node, p):
+        raise AttributeError(
+            f'rosettafold3: config path {dotted!r} not found (missing {p!r})')
+      node = getattr(node, p)
+    setattr(node, parts[-1], value)
+
+
+# EDM sampler constants per model family. AF3's values are NOT universal -- each
+# family trained its own, and running boltz2's network under AF3's constants was a
+# silent mismatch (nothing errors; the sampler just anneals on the wrong schedule).
+# Only entries verified against the native implementation belong here; a model
+# absent from this table keeps AF3's defaults, which is the honest state for one
+# nobody has checked.
+#   boltz2: boltz.main.Boltz2DiffusionParams (BoltzDesign1/boltz2/src/boltz/main.py)
+_SAMPLER_CONSTANTS = {
+    'boltz2': dict(gamma_0=0.605, gamma_min=1.107, noise_scale=0.901,
+                   step_scale=1.638, rho=8.0, sigma_min=0.0004, sigma_max=160.0),
+}
+
+
+
+# Config-shape divergences, one widener per family that has any. A family absent
+# here runs at stock AF3 dimensions.
+_WIDENERS = {
+    'opendde': _widen_opendde,
+    'boltz2': _widen_boltz2,
+    'protenix2': _widen_protenix2,
+    'rosettafold3': _widen_rosettafold3,
+    'chai1': _widen_chai1,
+}
+
+
+# Featurisation knobs each family REQUIRES: conventions its weights were trained
+# under that the input pipeline has to reproduce. Not preferences -- getting one
+# wrong is silent, and shows up as a fold that is merely mediocre.
+_FEATURISE = {
+    # boltz2 keeps a modified residue as ONE token holding all its atoms
+    # (data/tokenize/boltz2.py: standard -> per residue, NONPOLYMER -> per atom,
+    # else -> one token, all atoms). AF3 atomises instead, and handing boltz2 ten
+    # single-atom tokens where it wants one ten-atom token inflates the residue
+    # ~2.4x. Inert when nothing is modified, and ligands atomise either way.
+    'boltz2': dict(modified_as_one_token=True),
+    # opendde runs its diffusion on an expanded structural-token set, and pads
+    # the atom key window rather than sliding it in bounds.
+    # struct_num_tokens is deliberately absent: the structural-token count
+    # depends on the input, so a fixed bucket only works for inputs small enough
+    # to fit it ("Can't pad to a smaller shape" for anything larger). Left unset,
+    # attach_structural_batch rounds the true count up to a multiple of 32, which
+    # keeps shapes stable across similar inputs without capping them.
+    'opendde': dict(opendde=True, padded_keys=True),
+    'protenix2': dict(padded_keys=True),
+    # rf3 (atomworks) renames atomised atoms to their ELEMENT symbol, carries
+    # chirality features, aligns restypes to its own alphabet, and calls an
+    # atomised polymer token UNKNOWN where AlphaFold 3 keeps the parent residue
+    # type (which is what asserted the L enantiomer over 11 D-amino acids).
+    'rosettafold3': dict(chirals=True, atomized_element_names=True,
+                         restype_alignment=True,
+                         atomized_unknown_restype=True,
+                         atomized_backbone_bonds=True),
+    # chai-1's four input conventions, every one of them silent when forgotten:
+    # it takes the atom key window MODULO the atom count where AF3 slides it back
+    # in bounds; it numbers its atoms without the C-terminal OXT; it carries its
+    # own standard-residue conformers (ligands fall through to the CCD, as chai
+    # does too); and with no alignment it feeds an all-gap MSA rather than a
+    # depth-1 self-MSA. It also takes ESM2 embeddings, which are optional but not
+    # minor -- without them a natural protein folds to 5.70 A where chai reaches
+    # 0.642.
+    # std_conformers is deliberately absent: see converters/publish.py. chai's
+    # own standard-residue conformers are worth 0.08 A on 6MRR (1.698 vs 1.776)
+    # and we do not have the licence to redistribute them, so the CCD ideal
+    # values every other model uses are the default. Pass
+    # std_conformers='std_conformers.npz' here, with the file beside the blob,
+    # to restore them.
+    'chai1': dict(circular_keys=True, drop_atoms=('OXT',),
+                  zero_msa_without_alignment=True, esm=True),
+}
+
+
+# Where a converted model's weights are published. The file name is what
+# `converters/convert.py` writes; the repo is where we upload it. AlphaFold3
+# itself is absent: DeepMind's blob is not ours to redistribute, and its terms
+# require you to request it (--model_dir points at your own copy).
+_WEIGHTS_REPO = 'sokrypton/af3-any-model'
+
+
+class ModelSpec:
+  """Everything `global_config.model = name` implies, in one place."""
+
+  __slots__ = ('name', 'full_fat', 'trained_fourier', 'featurise',
+               'weights_repo', 'weights_file', 'weights_licence',
+               'weights_source')
+
+  def __init__(self, name, full_fat=False, trained_fourier=None,
+               weights_repo=_WEIGHTS_REPO, weights_file=None,
+               weights_licence=None, weights_source=None):
+    from alphafold3.model import model_config
+
+    if name not in model_config.MODELS:
+      raise ValueError(
+          f'unknown model {name!r}; known: {list(model_config.MODELS)}')
+    self.name = name
+    self.full_fat = full_fat
+    # chai-1 also carries a trained Fourier embedding but is deliberately not in
+    # OPENFOLD3_LINEAGE (it is not OpenFold-derived), so it has to be named.
+    if trained_fourier is None:
+      trained_fourier = (name in model_config.OPENFOLD3_LINEAGE
+                         or name == 'chai1')
+    self.trained_fourier = trained_fourier
+    self.featurise = dict(_FEATURISE.get(name, {}))
+    self.weights_repo = weights_repo
+    self.weights_file = weights_file or f'{name}.bin.zst'
+    # What the OUTPUT of a run may be used for is the weights' licence, not this
+    # code's. None means we have not established it -- say so and point at the
+    # source rather than guess, because guessing here would be an assurance we
+    # cannot give.
+    self.weights_licence = weights_licence
+    self.weights_source = weights_source
+
+  # Storage precisions published beside the float32 blob. float32 stays the
+  # default and keeps its original filename, so every link already handed out
+  # resolves to the same bytes; the smaller forms are additions, not
+  # replacements. See converters/quantise.py for what each costs.
+  PRECISIONS = ('fp32', 'fp16', 'int8')
+
+  def weights_file_for(self, precision='fp32'):
+    """The published filename of this model's weights at `precision`."""
+    if precision not in self.PRECISIONS:
+      raise ValueError(f'unknown precision {precision!r}, want one of '
+                       f'{self.PRECISIONS}')
+    if precision == 'fp32':
+      return self.weights_file
+    stem = self.weights_file.split('.', 1)[0]
+    return f'{stem}.{precision}.bin.zst'
+
+  def output_terms(self):
+    """The terms-of-use text to write beside a prediction made with this model."""
+    if self.name == 'alphafold3':
+      import os
+      import alphafold3.cpp
+
+      # Packaged, the terms sit beside the built extension; in a source checkout
+      # they are at the repo root, three levels above this file.
+      here = os.path.dirname(os.path.abspath(__file__))
+      for path in (
+          os.path.join(os.path.dirname(alphafold3.cpp.__file__),
+                       'OUTPUT_TERMS_OF_USE.md'),
+          os.path.join(here, '..', '..', '..', 'OUTPUT_TERMS_OF_USE.md'),
+      ):
+        if os.path.isfile(path):
+          with open(path) as fh:
+            return fh.read()
+      raise FileNotFoundError('OUTPUT_TERMS_OF_USE.md not found')
+    where = self.weights_source or 'the model\'s own distribution'
+    if self.weights_licence is None:
+      return (
+          '# OUTPUT TERMS OF USE\n\n'
+          f'These structure predictions were generated using {self.name} model\n'
+          'weights, run through AlphaFold 3 code (copyright Google DeepMind,\n'
+          'Apache 2.0: https://github.com/google-deepmind/alphafold3).\n\n'
+          'The AlphaFold 3 Output Terms of Use do NOT apply to these outputs --\n'
+          'they were not produced with AlphaFold 3 parameters. What DOES apply is\n'
+          f'the licence those weights are distributed under, which we have not\n'
+          f'established here. Check it before you rely on these outputs:\n'
+          f'  {where}\n')
+    return (
+        '# OUTPUT TERMS OF USE\n\n'
+        f'These structure predictions were generated using {self.name} model\n'
+        f'weights, which are licensed under {self.weights_licence}.\n\n'
+        'The AlphaFold 3 Output Terms of Use (which restrict commercial use) do\n'
+        'NOT apply to these outputs -- they were not produced with AlphaFold 3\n'
+        f'parameters. Use is subject to {self.weights_licence} alone.\n\n'
+        f'Weights: {where}\n\n'
+        'AlphaFold 3 code is copyright Google DeepMind, also Apache 2.0:\n'
+        'https://github.com/google-deepmind/alphafold3\n')
+
+  def without(self, knobs):
+    """A copy of this spec with the named featurisation conventions removed.
+
+    For ablation: every convention here is silent when wrong, so the only honest
+    way to say what one buys is to run without it and measure.
+    """
+    import copy
+
+    unknown = set(knobs) - set(self.featurise)
+    if unknown:
+      raise ValueError(f'{self.name} has no featurisation conventions named '
+                       f'{sorted(unknown)}; it has {sorted(self.featurise)}')
+    clone = copy.copy(self)
+    clone.featurise = {k: v for k, v in self.featurise.items()
+                       if k not in set(knobs)}
+    return clone
+
+  @property
+  def sampler(self):
+    """EDM constants for this family, or {} to keep AF3's."""
+    return dict(_SAMPLER_CONSTANTS.get(self.name, {}))
+
+  def configure(self, config):
+    """Apply this model's shape and sampler settings to a Model.Config, in place."""
+    config.global_config.model = self.name
+    # trained_fourier is not a declared GlobalConfig field (unlike `model`); the
+    # dataclass is unfrozen, so set it on the instance -- diffusion_head reads it
+    # back defensively with getattr.
+    config.global_config.trained_fourier = self.trained_fourier
+    if self.full_fat:
+      _widen_full_fat(config)
+    widen = _WIDENERS.get(self.name)
+    if widen is not None:
+      widen(config)
+    for field, value in self.sampler.items():
+      for sample_config in (config.heads.diffusion.eval,):
+        if hasattr(sample_config, field):
+          setattr(sample_config, field, value)
+    return config
+
+
+MODEL_SPECS = {
+    'alphafold3': ModelSpec('alphafold3', trained_fourier=False,
+                            weights_repo=None, weights_file='af3.bin.zst'),
+    'openfold3': ModelSpec('openfold3', weights_licence='the Apache License, Version 2.0',
+                           weights_source='https://github.com/aqlaboratory/openfold'),
+    # IntelliFold-v2: stock-AF3 module tree (deliberately NOT in
+    # OPENFOLD3_LINEAGE -- its converter emits stock-AF3 haiku names) at the
+    # "full_fat" widened channels.
+    # trained_fourier has to be named here: IF2 carries one, but it is not in
+    # OPENFOLD3_LINEAGE (stock-AF3 module tree), which is what the default reads.
+    'intellifold2': ModelSpec('intellifold2', full_fat=True,
+                              trained_fourier=True,
+                              weights_licence='the Apache License, Version 2.0',
+                              weights_source='https://huggingface.co/intelligenAI/intellifold'),
+    'opendde': ModelSpec('opendde', weights_licence='the Apache License, Version 2.0',
+                         weights_source='https://huggingface.co/aurekaresearch/OpenDDE'),
+    'boltz2': ModelSpec('boltz2', weights_licence='the MIT License',
+                        weights_source='https://github.com/jwohlwend/boltz'),
+    'protenix2': ModelSpec('protenix2', weights_licence='the Apache License, Version 2.0',
+                           weights_source='https://github.com/bytedance/Protenix'),
+    'rosettafold3': ModelSpec('rosettafold3',
+                              weights_licence='the BSD 3-Clause License',
+                              weights_source='https://github.com/RosettaCommons/foundry'),
+    'chai1': ModelSpec('chai1', weights_licence='the Apache License, Version 2.0',
+                       weights_source='https://github.com/chaidiscovery/chai-lab'),
+}
+
+# Historical / abbreviated spellings, kept working.
+ALIASES = {
+    'af3': 'alphafold3',
+    'of3': 'openfold3',
+    'if2': 'intellifold2', 'intellifold': 'intellifold2',
+    'protenix': 'protenix2',
+    'rf3': 'rosettafold3',
+    'chai': 'chai1',
+}
+
+
+def get(name):
+  """-> the ModelSpec for a model name or historical alias."""
+  key = ALIASES.get(name, name)
+  spec = MODEL_SPECS.get(key)
+  if spec is None:
+    raise ValueError(f'unknown model {name!r}; known: {sorted(MODEL_SPECS)} '
+                     f'(aliases {sorted(ALIASES)})')
+  return spec

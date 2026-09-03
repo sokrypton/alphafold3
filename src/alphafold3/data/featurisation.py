@@ -52,6 +52,7 @@ def featurise_input(
     conformer_max_iterations: int | None = None,
     resolve_msa_overlaps: bool = True,
     fix_standalone_glycans: bool = False,
+    flatten_non_standard_residues: bool = True,
     verbose: bool = False,
 ) -> Sequence[features.BatchDict]:
   """Featurise the folding input.
@@ -82,6 +83,10 @@ def featurise_input(
       undesirable behavior, but moves away from the regime where AlphaFold 3 was
       trained and evaluated. This has only an effect if filter_leaving_atoms is
       True in the WholePdbPipeline.Config.
+    flatten_non_standard_residues: Whether a modified polymer residue becomes one
+      token per atom (AlphaFold 3's convention) or a single token holding all of
+      them. Boltz-2 is trained on the latter; handing it ten single-atom tokens
+      where it wants one ten-atom token inflates the residue about 2.4x.
     verbose: Whether to print progress messages.
 
   Returns:
@@ -97,6 +102,7 @@ def featurise_input(
           conformer_max_iterations=conformer_max_iterations,
           resolve_msa_overlaps=resolve_msa_overlaps,
           fix_standalone_glycans=fix_standalone_glycans,
+          flatten_non_standard_residues=flatten_non_standard_residues,
       ),
   )
 

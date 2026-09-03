@@ -17,6 +17,25 @@ from pathlib import Path
 
 import numpy as np
 
+from . import common as C
+
+# OF3 dialect for the shared primitives: separate a/b tri-mul, swiglu transitions,
+# 'linear_z' pair-bias leaf, MSA leaves without an 'mha.' prefix, OPM output built by
+# reshaping linear_out, adaLN named 'layer_norm' with linear_g/linear_s.
+DIALECT_OPENFOLD3 = C.Dialect(
+    tr_mode='swiglu', tr_ln='layer_norm',
+    tr_a='swiglu.linear_a', tr_b='swiglu.linear_b', tr_out='linear_out',
+    tm_fused=False, ga_bias='linear_z',
+    sa_ln_a='layer_norm_a', sa_ln_z='layer_norm_z', sa_z='linear_z', sa_mha='mha',
+    msa_v='linear_v', msa_g='linear_g', msa_o='linear_o',
+    opm_out_direct=False,
+    ada_mod='layer_norm', ada_gamma='linear_g', ada_beta='linear_s',
+    d_mha='mha', d_ada_out='linear_ada_out',
+    d_ct='conditioned_transition', d_ct_mode='swiglu',
+    d_ct_swa='swiglu.linear_a', d_ct_swb='swiglu.linear_b', d_ct_out='linear_out',
+    d_ct_ada_out='linear_g',
+)
+
 
 # ─── OF3→AF3 aatype remap ─────────────────────────────────────────────────────
 # OF3 uses 32 residue types; AF3 uses 31.  For each AF3 type index a (0-30),
@@ -29,17 +48,33 @@ _AF3_TO_OF3_AATYPE = np.array(
 )
 
 
-# AF3's MSA one-hot has 32 classes: the same 31 aatype classes plus one spare
-# (trailing) class that AF3's featurizer never emits (see msa_features.py, where
-# '-'→21, RNA A/G/C/U→22-25, DNA A/G/C/T→26-29, unknown nucleic→30).  OF3 encodes
-# the MSA over its own 32-residue alphabet, so the rows must be permuted just
-# like aatype.  The unused AF3 class 31 is pointed at OF3's DN row (also never
-# activated under AF3 featurization).
+# The MSA one-hot carries 32 classes in both codebases, and AF3's extra class (the
+# one past its 31 aatype classes) is OF3's DN=30. Same permutation, one row longer.
 _AF3_TO_OF3_MSA = np.concatenate([_AF3_TO_OF3_AATYPE, [30]]).astype(np.int32)
 
-# OF3's unknown-DNA class ('DN'), the one class AF3's 31-way alphabet has no slot
-# for (AF3 folds unknown DNA into the shared unknown-nucleic class 'N').
+# The source alphabet's unknown-DNA class ('DN'), the one class AF3's 31-way
+# alphabet has no slot for (AF3 folds unknown DNA into unknown-nucleic 'N').
 _OF3_UNK_DNA_AATYPE = 30
+
+
+def _reorder_msa_weights(w: np.ndarray) -> np.ndarray:
+    """Reorder msa_activations input rows: [restype one-hot(32), has_del, del_value].
+
+    Missing this permutation is SILENT -- the block is 32 rows on both sides, so the
+    shapes match and nothing errors. It is the bug OF3's own porting notes call out:
+    MSA gaps (AF3 class 21) get embedded as OF3 RNA adenine, and RNA A/G/C/U are read
+    one slot high (A->G, G->C, C->U, U->N). Protein and DNA indices coincide, so every
+    protein test passes while RNA folds to nothing -- which is exactly how it was
+    found here (1EHZ tRNA at 18.7 A while boltz2 and if2 reach ~2 A on the same batch).
+
+    The trailing columns after the 32-class block are passed through unchanged, so
+    this serves OF3/protenix (34 rows: has_deletion, deletion_value) and RF3 (35:
+    the same two plus is_paired) alike. protenix2 and rosettafold3 use the SAME
+    residue ordering as OF3 -- protenix's STD_RESIDUES_WITH_GAP is
+    `21-25 A/G/C/U/N, 26-30 DA..DN, 31 GAP`, and rf3 already reuses of3's
+    target_feat remap -- so one permutation covers all three.
+    """
+    return np.concatenate([w[_AF3_TO_OF3_MSA], w[32:]], axis=0)
 
 
 def _pad_element_weights(w: np.ndarray) -> np.ndarray:
@@ -77,46 +112,43 @@ def _reorder_aatype_weights(w: np.ndarray) -> np.ndarray:
     return w[_AF3_TO_OF3_AATYPE]
 
 
-def _reorder_msa_feat_weights(w: np.ndarray) -> np.ndarray:
-    """Reorder msa_feat input weights from OF3 to AF3 residue ordering.
+def _reorder_features_1d(arr: np.ndarray, c_single: int = 384,
+                         pad_unk_dna: bool = True) -> np.ndarray:
+    """Reorder features_1d (single_emb + target_feat) along axis 0 to AF3 layout.
 
-    Both layouts are [restype one-hot(32), has_deletion(1), deletion_value(1)],
-    so the shape is unchanged (34 rows) — only the 32 restype rows are permuted.
+    source layout: [single(c_single), atom_cross_att(384), aatype(32), profile(32), del_mean(1)]
+    AF3 layout:    [single(c_single), AF3_aatype(31), AF3_profile(31), del_mean(1), atom_cross_att(384)]
 
-    w shape: (34, c_out) indexed by OF3 MSA class → (34, c_out) in AF3 order.
-    """
-    return np.concatenate([w[_AF3_TO_OF3_MSA], w[32:34]], axis=0)
-
-
-def _reorder_features_1d(arr: np.ndarray, c_single: int = 384) -> np.ndarray:
-    """Reorder OF3 features_1d (single_emb + target_feat) along axis 0 to AF3 layout.
-
-    OF3 layout: [single(c_single), atom_cross_att(384), OF3_aatype(32), OF3_profile(32), del_mean(1)]
-    AF3 layout: [single(c_single), AF3_aatype(31), UNK_DNA(1), AF3_profile(31), UNK_DNA(1),
-                 del_mean(1), atom_cross_att(384)]
-
-    Unlike every other residue-indexed matrix, the two aatype classes AF3 lacks
-    (OF3's unknown-DNA slot in restype and in profile) may NOT be dropped here:
-    this block feeds `single_cond_initial_norm`, a LayerNorm, which turns a zero
-    input into -mean/std. OF3 therefore always contributes those two columns
-    through their trained weights, and the normalisation statistics run over 833
-    channels rather than 831. Both effects are reproduced by keeping the columns
-    (diffusion_head inserts matching zero columns when of3_weights is set);
+    With pad_unk_dna the two classes AF3 lacks (the source's unknown-DNA slot in
+    restype and in profile) are KEPT rather than dropped, giving
+        [single, aatype(31), UNK_DNA, profile(31), UNK_DNA, del_mean, atom_cross_att]
+    Unlike every other residue-indexed matrix they may not be dropped, because
+    this block feeds `single_cond_initial_norm` -- a LayerNorm, which turns a zero
+    input into -mean/std. The source model therefore always contributes those two
+    columns through their trained weights AND normalises over 833 channels rather
+    than 831. `diffusion_head` re-inserts matching zero columns for the models
+    whose converter sets this (see the model == 'openfold3' branch there);
     dropping them costs ~1.6e-3 relative error in the single conditioning.
 
     Works for 1-D (LayerNorm scale, shape c_single+449) and 2-D (Linear weights,
     shape (c_single+449, c_out)) arrays — reorders along axis 0.
     """
     remap = _AF3_TO_OF3_AATYPE
-    unk_dna = _OF3_UNK_DNA_AATYPE
+    unk = _OF3_UNK_DNA_AATYPE
+    # Default True: this is openfold3's own layout. Families that reuse this
+    # helper but whose graph runs the 831-wide block (protenix2, rosettafold3)
+    # pass False.
+    aatype = [arr[c_single + 384 + remap]]
+    profile = [arr[c_single + 416 + remap]]
+    if pad_unk_dna:
+        aatype.append(arr[c_single + 384 + unk: c_single + 385 + unk])
+        profile.append(arr[c_single + 416 + unk: c_single + 417 + unk])
     return np.concatenate([
         arr[0:c_single],
-        arr[c_single + 384 + remap],                        # aatype rows
-        arr[c_single + 384 + unk_dna: c_single + 385 + unk_dna],  # aatype UNK_DNA
-        arr[c_single + 416 + remap],                        # profile rows
-        arr[c_single + 416 + unk_dna: c_single + 417 + unk_dna],  # profile UNK_DNA
-        arr[c_single + 448: c_single + 449],                # del_mean
-        arr[c_single: c_single + 384],                       # atom_cross_att
+        *aatype,
+        *profile,
+        arr[c_single + 448: c_single + 449], # del_mean
+        arr[c_single: c_single + 384],       # atom_cross_att
     ], axis=0)
 
 
@@ -199,108 +231,46 @@ def _populate_scope(params: dict, scope: str, local_dict: dict[str, np.ndarray])
 
 # ─── Module-level converters ───────────────────────────────────────────────────
 
+# These module converters now delegate to the shared primitives in common.py (via
+# the OF3 dialect); the reshape/transpose math is identical across families, only
+# the torch leaf names and fusion mode differ. Kept as thin named wrappers so the
+# block composers below (and any callers) read unchanged.
+
 def convert_layernorm(sd: dict, prefix: str) -> dict[str, np.ndarray]:
-    return {
-        'scale': _get(sd, _pfx(prefix, 'weight')),
-        'offset': _get(sd, _pfx(prefix, 'bias')),
-    }
+    return C.ln(sd, prefix)
 
 
 def convert_swiglu_transition(sd: dict, prefix: str) -> dict[str, np.ndarray]:
-    d = {}
-    d['input_layer_norm/scale'] = _get(sd, _pfx(prefix, 'layer_norm.weight'))
-    d['input_layer_norm/offset'] = _get(sd, _pfx(prefix, 'layer_norm.bias'))
-    wa = _get(sd, _pfx(prefix, 'swiglu.linear_a.weight'))
-    wb = _get(sd, _pfx(prefix, 'swiglu.linear_b.weight'))
-    d['transition1/weights'] = np.concatenate([wa.T, wb.T], axis=-1)
-    d['transition2/weights'] = _t(_get(sd, _pfx(prefix, 'linear_out.weight')))
-    return d
+    return C.transition(sd, prefix, DIALECT_OPENFOLD3)
 
 
 def convert_triangle_mul(sd: dict, prefix: str, outgoing: bool = True) -> dict[str, np.ndarray]:
-    d = {}
-    d['left_norm_input/scale'] = _get(sd, _pfx(prefix, 'layer_norm_in.weight'))
-    d['left_norm_input/offset'] = _get(sd, _pfx(prefix, 'layer_norm_in.bias'))
-    d['center_norm/scale'] = _get(sd, _pfx(prefix, 'layer_norm_out.weight'))
-    d['center_norm/offset'] = _get(sd, _pfx(prefix, 'layer_norm_out.bias'))
-    ap = _get(sd, _pfx(prefix, 'linear_a_p.weight'))
-    bp = _get(sd, _pfx(prefix, 'linear_b_p.weight'))
-    ag = _get(sd, _pfx(prefix, 'linear_a_g.weight'))
-    bg = _get(sd, _pfx(prefix, 'linear_b_g.weight'))
-    if not outgoing:
-        ap, bp = bp, ap
-        ag, bg = bg, ag
-    d['projection/weights'] = np.stack([ap.T, bp.T], axis=-1).reshape(ap.shape[1], -1)
-    d['gate/weights'] = np.stack([ag.T, bg.T], axis=-1).reshape(ag.shape[1], -1)
-    d['gating_linear/weights'] = _t(_get(sd, _pfx(prefix, 'linear_g.weight')))
-    d['output_projection/weights'] = _t(_get(sd, _pfx(prefix, 'linear_z.weight')))
-    return d
+    return C.triangle_mul(sd, prefix, DIALECT_OPENFOLD3, outgoing=outgoing)
 
 
 def convert_grid_attention(sd: dict, prefix: str, H: int, D: int) -> dict[str, np.ndarray]:
-    d = {}
-    d['act_norm/scale'] = _get(sd, _pfx(prefix, 'layer_norm.weight'))
-    d['act_norm/offset'] = _get(sd, _pfx(prefix, 'layer_norm.bias'))
-    d['pair_bias_projection/weights'] = _t(_get(sd, _pfx(prefix, 'linear_z.weight')))
-    d['q_projection/weights'] = _q_k_trunk(_get(sd, _pfx(prefix, 'mha.linear_q.weight')), H, D)
-    d['k_projection/weights'] = _q_k_trunk(_get(sd, _pfx(prefix, 'mha.linear_k.weight')), H, D)
-    d['v_projection/weights'] = _v_standard(_get(sd, _pfx(prefix, 'mha.linear_v.weight')), H, D)
-    d['gating_query/weights'] = _gating_trunk(_get(sd, _pfx(prefix, 'mha.linear_g.weight')))
-    d['output_projection/weights'] = _t(_get(sd, _pfx(prefix, 'mha.linear_o.weight')))
-    return d
+    return C.grid_attention(sd, prefix, DIALECT_OPENFOLD3, H, D)
 
 
 def convert_msa_attention(sd: dict, prefix: str, H: int, D: int) -> dict[str, np.ndarray]:
-    d = {}
-    d['act_norm/scale'] = _get(sd, _pfx(prefix, 'layer_norm_m.weight'))
-    d['act_norm/offset'] = _get(sd, _pfx(prefix, 'layer_norm_m.bias'))
-    d['pair_norm/scale'] = _get(sd, _pfx(prefix, 'layer_norm_z.weight'))
-    d['pair_norm/offset'] = _get(sd, _pfx(prefix, 'layer_norm_z.bias'))
-    d['pair_logits/weights'] = _t(_get(sd, _pfx(prefix, 'linear_z.weight')))
-    d['v_projection/weights'] = _v_standard(_get(sd, _pfx(prefix, 'linear_v.weight')), H, D)
-    d['gating_query/weights'] = _t(_get(sd, _pfx(prefix, 'linear_g.weight')))
-    d['output_projection/weights'] = _t(_get(sd, _pfx(prefix, 'linear_o.weight')))
-    return d
+    return C.msa_attention(sd, prefix, DIALECT_OPENFOLD3, H, D)
 
 
 def convert_outer_product_mean(sd: dict, prefix: str, c_hidden: int, c_z: int) -> dict[str, np.ndarray]:
-    d = {}
-    d['layer_norm_input/scale'] = _get(sd, _pfx(prefix, 'layer_norm.weight'))
-    d['layer_norm_input/offset'] = _get(sd, _pfx(prefix, 'layer_norm.bias'))
-    d['left_projection/weights'] = _t(_get(sd, _pfx(prefix, 'linear_1.weight')))
-    d['right_projection/weights'] = _t(_get(sd, _pfx(prefix, 'linear_2.weight')))
-    lo_w = _get(sd, _pfx(prefix, 'linear_out.weight'))
-    d['__top__/output_w'] = lo_w.T.reshape(c_hidden, c_hidden, c_z)
-    d['__top__/output_b'] = _get(sd, _pfx(prefix, 'linear_out.bias'))
-    return d
+    d = C.outer_product_mean(sd, prefix, DIALECT_OPENFOLD3, c_hidden=c_hidden, c_z=c_z)
+    # this module's callers expect the module-scope params under a '__top__/' key
+    return {('__top__/' + k[2:] if k.startswith('::') else k): v for k, v in d.items()}
 
 
 def convert_single_attention(sd: dict, prefix: str, H: int, D: int) -> dict[str, np.ndarray]:
-    d = {}
-    d['single_pair_logits_norm/scale'] = _get(sd, _pfx(prefix, 'layer_norm_z.weight'))
-    d['single_pair_logits_norm/offset'] = _get(sd, _pfx(prefix, 'layer_norm_z.bias'))
-    d['single_pair_logits_projection/weights'] = _t(_get(sd, _pfx(prefix, 'linear_z.weight')))
-    d['single_attention_layer_norm/scale'] = _get(sd, _pfx(prefix, 'layer_norm_a.weight'))
-    d['single_attention_layer_norm/offset'] = _get(sd, _pfx(prefix, 'layer_norm_a.bias'))
-    d['single_attention_q_projection/weights'] = _q_k_standard(
-        _get(sd, _pfx(prefix, 'mha.linear_q.weight')), H, D)
-    if _has(sd, _pfx(prefix, 'mha.linear_q.bias')):
-        d['single_attention_q_projection/bias'] = (
-            _get(sd, _pfx(prefix, 'mha.linear_q.bias')).reshape(H, D))
-    d['single_attention_k_projection/weights'] = _q_k_standard(
-        _get(sd, _pfx(prefix, 'mha.linear_k.weight')), H, D)
-    d['single_attention_v_projection/weights'] = _q_k_standard(
-        _get(sd, _pfx(prefix, 'mha.linear_v.weight')), H, D)
-    d['single_attention_gating_query/weights'] = _gating_standard(
-        _get(sd, _pfx(prefix, 'mha.linear_g.weight')))
-    d['single_attention_transition2/weights'] = _t(_get(sd, _pfx(prefix, 'mha.linear_o.weight')))
-    return d
+    return C.single_attention(sd, prefix, DIALECT_OPENFOLD3, H, D)
 
 
 # ─── Block composers ──────────────────────────────────────────────────────────
 
 def _pairblock_params(sd: dict, prefix: str,
-                      pair_H: int, pair_D: int) -> dict[str, np.ndarray]:
+                      pair_H: int, pair_D: int,
+                      tri_mul_hidden: int) -> dict[str, np.ndarray]:
     d = {}
     for tag, of3_name, outgoing in [
         ('triangle_multiplication_outgoing', 'tri_mul_out', True),
@@ -319,10 +289,11 @@ def _pairblock_params(sd: dict, prefix: str,
 
 def pairformer_block_params(sd: dict, block_idx: int,
                              pair_H: int = 4, pair_D: int = 32,
-                             single_H: int = 16, single_D: int = 24) -> dict[str, np.ndarray]:
+                             single_H: int = 16, single_D: int = 24,
+                             tri_mul_hidden: int = 128) -> dict[str, np.ndarray]:
     prefix = f'pairformer_stack.blocks.{block_idx}'
     d = {}
-    for k, v in _pairblock_params(sd, f'{prefix}.pair_stack', pair_H, pair_D).items():
+    for k, v in _pairblock_params(sd, f'{prefix}.pair_stack', pair_H, pair_D, tri_mul_hidden).items():
         d[k] = v
     for k, v in convert_single_attention(sd, f'{prefix}.attn_pair_bias', single_H, single_D).items():
         d[k] = v
@@ -348,7 +319,7 @@ def msa_block_params(sd: dict, block_idx: int,
             d[f'outer_product_mean:{k[len("__top__/"):]}'] = v
         else:
             d[f'outer_product_mean/{k}'] = v
-    for k, v in _pairblock_params(sd, f'{prefix}.pair_stack', pair_H, pair_D).items():
+    for k, v in _pairblock_params(sd, f'{prefix}.pair_stack', pair_H, pair_D, 128).items():
         d[k] = v
     return d
 
@@ -420,8 +391,8 @@ def map_evoformer_input_embeddings(sd: dict, params: dict) -> None:
         params.setdefault(f'{scope}/bond_embedding', {})['weights'] = _t(
             _get(sd, 'input_embedder.linear_token_bonds.weight'))
     if _has(sd, 'msa_module_embedder.linear_m.weight'):
-        params.setdefault(f'{scope}/msa_activations', {})['weights'] = _reorder_msa_feat_weights(
-            _t(_get(sd, 'msa_module_embedder.linear_m.weight')))
+        params.setdefault(f'{scope}/msa_activations', {})['weights'] = (
+            _reorder_msa_weights(_t(_get(sd, 'msa_module_embedder.linear_m.weight'))))
     if _has(sd, 'msa_module_embedder.linear_s_input.weight'):
         params.setdefault(f'{scope}/extra_msa_target_feat', {})['weights'] = _reorder_target_feat_weights(
             _t(_get(sd, 'msa_module_embedder.linear_s_input.weight')))
@@ -446,7 +417,7 @@ def map_confidence_head(sd: dict, params: dict,
         def _block_fn(block_idx):
             prefix = f'aux_heads.pairformer_embedding.pairformer_stack.blocks.{block_idx}'
             d = {}
-            for k, v in _pairblock_params(sd, f'{prefix}.pair_stack', pair_H, pair_D).items():
+            for k, v in _pairblock_params(sd, f'{prefix}.pair_stack', pair_H, pair_D, c_z).items():
                 d[k] = v
             for k, v in convert_single_attention(sd, f'{prefix}.attn_pair_bias', single_H, single_D).items():
                 d[k] = v
@@ -456,15 +427,19 @@ def map_confidence_head(sd: dict, params: dict,
         _populate_scope(params, stack_scope, _stack_blocks(_block_fn, n_layers))
     pe = 'aux_heads.pairformer_embedding'
     embed_scope = f'{scope_base}/~_embed_features'
-    # NOTE: AF3's left/right naming is TRANSPOSED between its two pair-embedding
-    # sites, so linear_i/linear_j cannot be mapped by name alone:
+    # AF3's left/right naming is TRANSPOSED between its two pair-embedding sites,
+    # so linear_i/linear_j cannot be mapped by name alone:
     #   evoformer._seq_pair_embedding: left_single[:, None] + right_single[None]
-    #       -> left  indexes row i, right indexes column j
+    #       -> left indexes row i, right indexes column j
     #   confidence_head._embed_features: left(tf) + right(tf)[:, None]
-    #       -> left  indexes column j, right indexes row i
-    # OF3 uses the evoformer convention in both places
-    # (z = emb_i[..., None, :] + emb_j[..., None, :, :], so linear_i is row i),
-    # hence linear_i -> right and linear_j -> left in the confidence head.
+    #       -> left indexes column j, right indexes row i
+    # OF3 uses the evoformer convention in both places (z = emb_i[..., None, :] +
+    # emb_j[..., None, :, :], so linear_i is row i), hence linear_i -> right and
+    # linear_j -> left HERE and nowhere else. Getting it backwards transposes the
+    # pair embedding the confidence pairformer starts from; PAE is where it shows,
+    # being the only asymmetric confidence output (PDE is explicitly symmetrised,
+    # pLDDT and experimentally-resolved come from the single representation), and
+    # pTM/ipTM ride on pae_probs.
     if _has(sd, f'{pe}.linear_i.weight'):
         _set(params, f'{embed_scope}/right_target_feat_project', 'weights',
              _reorder_target_feat_weights(_t(_get(sd, f'{pe}.linear_i.weight'))))
@@ -615,7 +590,8 @@ def map_evoformer_conditioning(sd: dict, params: dict, *,
 
     _set(params, f'{scope}/{pfx}embed_ref_pos',       'weights', _t(_get(sd, f'{rfe}.linear_ref_pos.weight')))
     _set(params, f'{scope}/{pfx}embed_ref_mask',      'weights', _t(_get(sd, f'{rfe}.linear_ref_mask.weight')))
-    _set(params, f'{scope}/{pfx}embed_ref_element',   'weights', _pad_element_weights(_t(_get(sd, f'{rfe}.linear_ref_element.weight'))))
+    _set(params, f'{scope}/{pfx}embed_ref_element',   'weights',
+         C.fold_element_index_shift(_pad_element_weights(_t(_get(sd, f'{rfe}.linear_ref_element.weight')))))
     _set(params, f'{scope}/{pfx}embed_ref_charge',    'weights', _t(_get(sd, f'{rfe}.linear_ref_charge.weight')))
     _set(params, f'{scope}/{pfx}embed_ref_atom_name', 'weights', _t(_get(sd, f'{rfe}.linear_ref_atom_chars.weight')))
     for suf, attr in [('embed_pair_offsets', 'linear_ref_offset'),
@@ -674,7 +650,7 @@ def map_template_embedder(sd: dict, params: dict, *,
     _set(params, f'{scope_ste}/output_layer_norm', 'scale',  _get(sd, f'{tps}.layer_norm.weight'))
     _set(params, f'{scope_ste}/output_layer_norm', 'offset', _get(sd, f'{tps}.layer_norm.bias'))
     stacked = _stack_blocks(
-        lambda block_idx: _pairblock_params(sd, f'{tps}.blocks.{block_idx}', templ_H, templ_D),
+        lambda block_idx: _pairblock_params(sd, f'{tps}.blocks.{block_idx}', templ_H, templ_D, 0),
         n_templ_blocks)
     _populate_scope(params, f'{scope_ste}/__layer_stack_no_per_layer/template_embedding_iteration', stacked)
     _set(params, f'{scope_te}/output_linear', 'weights', _t(_get(sd, f'{te}.linear_t.weight')))
@@ -722,7 +698,8 @@ def map_diffusion_head(sd: dict, params: dict, *,
     _enc('ref_atom_feature_embedder.linear_ref_pos.weight',        'diffusion_embed_ref_pos')
     _enc('ref_atom_feature_embedder.linear_ref_mask.weight',       'diffusion_embed_ref_mask')
     _set(params, f'{scope}/diffusion_embed_ref_element', 'weights',
-         _pad_element_weights(_t(_get(sd, f'{ae}.ref_atom_feature_embedder.linear_ref_element.weight'))))
+         C.fold_element_index_shift(_pad_element_weights(
+             _t(_get(sd, f'{ae}.ref_atom_feature_embedder.linear_ref_element.weight')))))
     _enc('ref_atom_feature_embedder.linear_ref_charge.weight',     'diffusion_embed_ref_charge')
     _enc('ref_atom_feature_embedder.linear_ref_atom_chars.weight', 'diffusion_embed_ref_atom_name')
     for suf, attr in [('diffusion_embed_pair_offsets',   'linear_ref_offset'),
@@ -785,7 +762,7 @@ def map_diffusion_head(sd: dict, params: dict, *,
 
 # ─── Top-level conversion entry point ────────────────────────────────────────
 
-def map_of3_to_af3(
+def map_openfold3_to_af3(
     state_dict: dict,
     *,
     n_pairformer_blocks: int = 48,
@@ -802,7 +779,7 @@ def map_of3_to_af3(
     """Convert an OF3 state dict to AF3 Haiku params dict.
 
     Returns nested dict {scope: {param_name: np.ndarray}} compatible with
-    alphafold3.model.params for saving and loading.
+    colabdesign2.af3.alphafold3.model.params for saving and loading.
     """
     params: dict[str, dict[str, np.ndarray]] = {}
     map_evoformer_input_embeddings(state_dict, params)
@@ -869,20 +846,21 @@ def load_of3_checkpoint(ckpt_path: Path | str, use_ema: bool = True) -> dict:
 def save_af3_params(params: dict[str, dict[str, np.ndarray]], output_dir: Path | str) -> Path:
     """Save converted params in AF3 binary format (.bin.zst).
 
-    Returns the output file path.
+    Thin wrapper over the shared blob writer; the __meta__ record and scope/name sort
+    are the OF3 blob's layout. Returns the output path.
     """
-    import zstandard
-    from alphafold3.model.params import encode_record
+    return Path(C.write_params_blob(output_dir, 'openfold3.bin.zst',
+                                    params, add_meta=True))
 
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / 'of3_ported_weights.bin.zst'
 
-    with zstandard.open(output_path, 'wb') as f:
-        meta_arr = np.zeros(64, dtype=np.uint8)
-        f.write(encode_record('__meta__', '__identifier__', meta_arr))
-        for scope, scope_params in sorted(params.items()):
-            for name, arr in sorted(scope_params.items()):
-                f.write(encode_record(scope, name, np.asarray(arr, dtype=np.float32)))
+def convert_openfold3_weights(checkpoint, output_dir, use_ema=True):
+    """Convert an OpenFold3 checkpoint to a loadable AF3-haiku blob.
 
-    return output_path
+    The mapping is not mechanical -- see OF3_AF3_PORTING_NOTES.md for the
+    residue-alphabet permutation, the i/j transposes in the confidence head and
+    template embedder, and the two feature columns that must be kept.
+    """
+    import os
+    sd = load_of3_checkpoint(os.path.expanduser(str(checkpoint)), use_ema=use_ema)
+    save_af3_params(map_openfold3_to_af3(sd), output_dir)
+    return output_dir
