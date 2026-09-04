@@ -38,7 +38,38 @@ run. `openbind` needs openfold3>=0.5, which the `~/of3_extra` install predates.
 
 ## Results
 
-`runtime_all_A10.png` -- all nine ports, linear and log-log.
+`runtime_all_A10.png` -- all nine ports, linear and log-log, 64 to 1024 tokens.
+
+`memory_all_A10.png` / `memory_vs_runtime.png` -- PEAK DEVICE MEMORY, from
+`memory_stats()['peak_bytes_in_use']` (the allocator's high-water mark; nvidia-smi
+reports what JAX pre-allocated, which is a constant and says nothing). Produced by
+`plot_memory.py` from `mem_a10.tsv`, a separate one-call-per-cell pass -- peak is
+reached on the first call, so the TIMINGS IN THAT FILE ARE NOT USABLE, only
+column 8.
+
+Peak GiB, A10:
+
+    model               64     128     192     256     384     512     768    1024
+    opendde           2.82    3.78    5.31    7.43   13.57     OOM     OOM     OOM
+    intellifold2      2.58    3.03    3.49    3.91    5.06    7.36   13.39     OOM
+    boltz2            2.10    2.26    2.68    3.27    4.71    6.88   13.06     OOM
+    protenix2         2.01    2.24    2.47    2.70    3.66    4.86    8.69       -
+    chai1             1.39    1.53    1.83    2.04    3.00    4.25    7.93       -
+    openfold3         1.55    1.64    1.76    1.88    2.35    3.01    4.82    7.20
+    rosettafold3      1.56    1.64    1.76    1.88    2.34    2.97    4.83       -
+    openbind          1.56    1.64    1.76    1.88    2.35    3.01    4.82       -
+    alphafold3        1.23    1.31    1.43    1.55    2.02    2.68    4.50    6.89
+
+**Runtime does not predict footprint**, which is the reason to measure both.
+boltz2 is 2.3x FASTER than protenix2 at 512 tokens (41.2 s against 60.5 s) and
+uses 42% MORE memory (6.88 GiB against 4.86) -- so boltz2 OOMs at 1024 while
+protenix2, the slower model, keeps running. A runtime plot cannot tell you which
+model will fit on your card.
+
+openfold3, openbind and rosettafold3 agree to ~0.02 GiB at every length, which
+is what three pair_channel=128 graphs with the same block counts should do; they
+are drawn with different dashes because otherwise two of the three vanish under
+the third.
 `runtime_per_model.png` -- one panel per port, per GPU, native where available.
 `boltz2_vs_native.png` -- ours vs native boltz-2, and the ratio by size.
 
