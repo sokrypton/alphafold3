@@ -15,9 +15,30 @@ Sequence length is swept with a random sequence; only the shape matters for
 timing, and the native harnesses are fed the SAME sequences (same seed, same
 alphabet) so both sides fold the same input.
 
+## Provenance of these numbers (2026-09-04)
+
+The A10 sweep (`sweep_a10.tsv`) was re-measured after the parameter fixes of
+2026-09-04 and now includes `openbind`. Every model landed within +/-0.025 s of
+its previous 64-token figure, so those fixes cost no measurable speed.
+
+**The A100 curves are OLDER.** `sweep_a100.tsv` predates that re-measurement and
+has no `openbind` row, so `runtime_all_A100.png` shows eight ports where the A10
+plot shows nine. It is a different day's data on a different machine; do not
+read an A10-vs-A100 difference off these two plots as if it were controlled.
+
+`opendde` has no 512 point on the A10: it OOMs, asking for 19.53 GiB on a 23 GB
+card. That is a result, not a gap -- it is the widest trunk here (pair_channel
+384) and runs its diffusion on an expanded structural-token set. The previous
+sweep recorded the same failure at the same length.
+
+Three models have no native torch ratio. `alphafold3` has no torch native at all
+-- it IS the JAX one, so that comparison is port fidelity, not speed.
+`intellifold2`'s two harnesses (torch and jax) are written but have never been
+run. `openbind` needs openfold3>=0.5, which the `~/of3_extra` install predates.
+
 ## Results
 
-`runtime_all_A10.png` -- all eight ports, linear and log-log.
+`runtime_all_A10.png` -- all nine ports, linear and log-log.
 `runtime_per_model.png` -- one panel per port, per GPU, native where available.
 `boltz2_vs_native.png` -- ours vs native boltz-2, and the ratio by size.
 
