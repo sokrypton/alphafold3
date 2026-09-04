@@ -222,6 +222,11 @@ def transition(sd, prefix, d: Dialect):
   if d.tr_mode == 'prefused':
     out['transition1/weights'] = t(g(f'{d.tr_lin}.weight'))
     out['transition2/weights'] = t(g(f'{d.tr_lin_o}.weight'))
+  elif d.tr_mode == 'fused':
+    # one Linear(d, 2*hidden) split by torch .split(hidden) -> a=[:h], b=[h:],
+    # consumed as silu(a)*b.  Same halves as 'block', already concatenated.
+    out['transition1/weights'] = t(g(f'{d.tr_lin}.weight'))
+    out['transition2/weights'] = t(g(f'{d.tr_out}.weight'))
   else:  # swiglu / block: two halves concatenated
     out['transition1/weights'] = block_concat(g(f'{d.tr_a}.weight'), g(f'{d.tr_b}.weight'))
     out['transition2/weights'] = t(g(f'{d.tr_out}.weight'))
@@ -237,7 +242,20 @@ def triangle_mul(sd, prefix, d: Dialect, outgoing=True):
          'center_norm/offset': _arr(g(f'{d.tm_ln_out}.bias')),
          'gating_linear/weights': t(g(f'{d.tm_g}.weight')),
          'output_projection/weights': t(g(f'{d.tm_z}.weight'))}
-  if d.tm_fused == 'block':
+  if d.tm_fused == 'bundle':
+    # ESMFold2: a single proj_bundle Linear(c, 4*h).  The forward splits it
+    #   signal, gate_logits = bundle.split(2*h)      -> p = rows[:2h], g = rows[2h:]
+    # then chunks each half into (left, right).  Our haiku reads the projection
+    # axis as an interleave, so split to a/b and re-fuse.
+    w = _arr(g(f'{d.tm_ab_p}.weight'))               # (4*h, c)
+    q = w.shape[0] // 4
+    a_p, b_p, a_g, b_g = w[:q], w[q:2*q], w[2*q:3*q], w[3*q:]
+    if not outgoing:                                 # incoming swaps the a/b roles
+      a_p, b_p = b_p, a_p
+      a_g, b_g = b_g, a_g
+    out['projection/weights'] = interleave(a_p, b_p)
+    out['gate/weights'] = interleave(a_g, b_g)
+  elif d.tm_fused == 'block':
     # one fused Linear(dim, 2*dim) per gate, split by torch.chunk into block halves
     # a=[:dim], b=[dim:] (Boltz); our haiku reads the axis as an interleave, so split
     # then re-fuse with interleave. Incoming swaps the a/b roles.
