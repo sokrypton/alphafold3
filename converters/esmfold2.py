@@ -85,6 +85,8 @@ def derive_dims(sd):
       c_atom=sd['inputs_embedder.atom_attention_encoder.atom_linear.weight'].shape[0],
       atom_in=sd['inputs_embedder.atom_attention_encoder.atom_linear.weight'].shape[1],
       c_diff=sd['structure_head.diffusion_module.s_to_token.weight'].shape[0],
+      n_diff_atom=len({k[len('structure_head.diffusion_module.atom_encoder.atom_transformer.blocks.'):].split('.')[0]
+                       for k in sd if k.startswith('structure_head.diffusion_module.atom_encoder.atom_transformer.blocks.')}),
   )
   # tri-mul latent width: proj_bundle is (4*h, c)
   d['tri_hidden'] = sd['folding_trunk.blocks.0.tri_mul_out._engine.proj_bundle.weight'].shape[0] // 4
@@ -307,3 +309,126 @@ def atom_encoder(sd, prefix, n_blocks, structure_prediction=False):
 def rope_inv_freq(n_pairs, base):
   """1 / base**(arange(n_pairs)/n_pairs) -- the ESMFold2 spacing."""
   return (1.0 / (base ** (np.arange(n_pairs, dtype=np.float32) / n_pairs))).astype(np.float32)
+
+
+# ---------------------------------------------------------------------------
+# the diffusion module
+# ---------------------------------------------------------------------------
+#
+# Conditioning (note there is NO s_trunk anywhere -- the head is handed None):
+#   z = z_proj(z_input_norm([z_trunk | rel_pos]))  then 2 unconditioned transitions
+#   s = s_proj(s_input_norm(s_inputs))             then + noise, then 2 transitions
+#   t_noise = 0.25 * log(t / sigma_data)           (== AF3's log(sigma/sigma_data)/4)
+#   n = noise_proj(noise_norm(fourier(t_noise))),  fourier = cos(2*pi*(t*w + b))
+#
+# The z/s transitions use SEPARATE a_proj/b_proj SwiGLU halves (unlike the trunk's
+# fused ffn.w12), so they take the 'block' dialect rather than 'fused'.
+
+DIALECT_ESMFOLD2_DIFF = Dialect(
+    tr_ln='norm',
+    tr_mode='block',
+    tr_a='a_proj',
+    tr_b='b_proj',
+    tr_out='out_proj',
+)
+
+
+def adaptive_layer_norm(sd, prefix):
+  """sigmoid(s_gate(LN(s; scale=s_scale, no offset))) * LN(a) + s_shift(LN(s)).
+
+  Note s_norm has a learned SCALE but NO offset, and s_gate carries a bias
+  (initialised to -2, i.e. the adaLN-Zero gate starts near-closed).
+  """
+  g = lambda leaf: sd['%s.%s' % (prefix, leaf)]
+  return {'s_norm/scale': _arr(g('s_scale')),
+          'gate/weights': t(g('s_gate.weight')),
+          'gate/bias': _arr(g('s_gate.bias')),
+          'shift/weights': t(g('s_shift.weight'))}
+
+
+def diffusion_attn_block(sd, prefix):
+  g = lambda leaf: sd['%s.%s' % (prefix, leaf)]
+  out = nest('adaln', adaptive_layer_norm(sd, prefix + '.adaln'))
+  out.update({
+      'q/weights': t(g('q_proj.weight')),
+      'q/bias': _arr(g('q_proj.bias')),
+      'kv/weights': t(g('kv_proj.weight')),        # fused [k | v]
+      'g/weights': t(g('g_proj.weight')),
+      'out/weights': t(g('out_proj.weight')),
+      'out_gate/weights': t(g('out_gate.weight')),
+      'out_gate/bias': _arr(g('out_gate.bias')),
+      'pair_norm/scale': _arr(g('pair_norm.weight')),
+      'pair_norm/offset': _arr(g('pair_norm.bias')),
+      'pair_bias/weights': t(g('pair_bias_proj.weight')),
+  })
+  return out
+
+
+def diffusion_transition_block(sd, prefix):
+  g = lambda leaf: sd['%s.%s' % (prefix, leaf)]
+  out = nest('adaln', adaptive_layer_norm(sd, prefix + '.adaln'))
+  out.update({
+      'swish/weights': t(g('lin_swish.weight')),   # fused [a | b], silu(a)*b
+      'out/weights': t(g('lin_out.weight')),
+      'out_gate/weights': t(g('output_gate.weight')),
+      'out_gate/bias': _arr(g('output_gate.bias')),
+  })
+  return out
+
+
+def diffusion_conditioning(sd, prefix):
+  g = lambda leaf: sd['%s.%s' % (prefix, leaf)]
+  d = DIALECT_ESMFOLD2_DIFF
+  out = {
+      'z_input_norm/scale': _arr(g('z_input_norm.weight')),
+      'z_input_norm/offset': _arr(g('z_input_norm.bias')),
+      'z_projection/weights': t(g('z_proj.weight')),
+      's_input_norm/scale': _arr(g('s_input_norm.weight')),
+      's_input_norm/offset': _arr(g('s_input_norm.bias')),
+      's_projection/weights': t(g('s_proj.weight')),
+      'fourier_w': _arr(g('fourier.w')),
+      'fourier_b': _arr(g('fourier.b')),
+      'noise_norm/scale': _arr(g('noise_norm.weight')),
+      'noise_norm/offset': _arr(g('noise_norm.bias')),
+      'noise_projection/weights': t(g('noise_proj.weight')),
+  }
+  n_z = len({k.split('.')[len(prefix.split('.')) + 1] for k in sd
+             if k.startswith(prefix + '.z_transitions.')})
+  n_s = len({k.split('.')[len(prefix.split('.')) + 1] for k in sd
+             if k.startswith(prefix + '.s_transitions.')})
+  out.update(nest('z_transitions', stack_blocks(
+      lambda i: common.transition(sd, '%s.z_transitions.%d' % (prefix, i), d), n_z)))
+  out.update(nest('s_transitions', stack_blocks(
+      lambda i: common.transition(sd, '%s.s_transitions.%d' % (prefix, i), d), n_s)))
+  return out
+
+
+def map_diffusion(sd, dims=None):
+  dims = dims or derive_dims(sd)
+  P = 'structure_head.diffusion_module'
+  n_tok = len({k[len(P + '.token_transformer.attn_blocks.'):].split('.')[0]
+               for k in sd if k.startswith(P + '.token_transformer.attn_blocks.')})
+  out = nest('conditioning', diffusion_conditioning(sd, P + '.conditioning'))
+  out.update({
+      's_step_norm/scale': _arr(sd[P + '.s_step_norm.weight']),
+      's_step_norm/offset': _arr(sd[P + '.s_step_norm.bias']),
+      's_to_token/weights': t(sd[P + '.s_to_token.weight']),
+      'token_norm/scale': _arr(sd[P + '.token_norm.weight']),
+      'token_norm/offset': _arr(sd[P + '.token_norm.bias']),
+  })
+  out.update(nest('token_attn', stack_blocks(
+      lambda i: diffusion_attn_block(sd, '%s.token_transformer.attn_blocks.%d' % (P, i)), n_tok)))
+  out.update(nest('token_transition', stack_blocks(
+      lambda i: diffusion_transition_block(sd, '%s.token_transformer.transition_blocks.%d' % (P, i)), n_tok)))
+  out.update(nest('atom_encoder', atom_encoder(sd, P + '.atom_encoder',
+                                               dims['n_diff_atom'], structure_prediction=True)))
+  out.update(nest('atom_decoder', {
+      'token_to_atom/weights': t(sd[P + '.atom_decoder.token_to_atom_linear.weight']),
+      'norm/scale': _arr(sd[P + '.atom_decoder.norm.weight']),
+      'norm/offset': _arr(sd[P + '.atom_decoder.norm.bias']),
+      'output/weights': t(sd[P + '.atom_decoder.output_linear.weight']),
+      **nest('blocks', stack_blocks(
+          lambda i: swa_atom_block(sd, '%s.atom_decoder.atom_transformer.blocks.%d' % (P, i)),
+          dims['n_diff_atom'])),
+  }))
+  return out
