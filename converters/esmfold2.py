@@ -256,3 +256,54 @@ def map_trunk(sd, dims=None):
   p.update(nest('parcae_coda', pair_only_stack(sd, 'parcae_coda', dims['n_coda'])))
   p.update(nest('msa_encoder', msa_encoder(sd, dims)))
   return p
+
+
+# ---------------------------------------------------------------------------
+# the SWA / 3D-RoPE atom transformer  (the one primitive with no AF3 analogue)
+# ---------------------------------------------------------------------------
+#
+# ESMFold2 does NOT use AF3's 32-query/128-key windowed atom attention with a
+# pair bias.  Instead it runs a plain sliding-window self-attention over atoms
+# (half_window = swa_window_size // 2) whose positional signal is a 3D rotary
+# embedding built from the reference conformer:
+#
+#   spatial: ref_pos (3 axes) x n_spatial_rope_pairs_per_axis, base freq 20
+#   uid:     ref_space_uid    x n_uid_rope_pairs,              base freq 10000
+#   -> 3*2 + 10 = 16 = head_dim/2, which fills the rotary half exactly.
+#
+# The window is over the RANK among *valid* atoms, not raw index, and the
+# diagonal is always allowed.  Blocks are adaLN-Zero with NON-affine RMSNorm,
+# and q/k get an extra affine-free RMSNorm before the rotation.
+
+def swa_atom_block(sd, prefix):
+  g = lambda leaf: sd['%s.%s' % (prefix, leaf)]
+  return {
+      # Sequential(SiLU, Linear(d, 6d)) -> shift_a, scale_a, gate_a, shift_f, scale_f, gate_f
+      'adaln/weights': t(g('adaln_modulation.1.weight')),
+      'qkv/weights': t(g('attn.Wqkv.weight')),
+      'attn_gate/weights': t(g('attn.gate_proj.weight')),
+      'attn_out/weights': t(g('attn.out_proj.weight')),
+      'ffn_up/weights': t(g('ffn.w_up.weight')),
+      'ffn_down/weights': t(g('ffn.w_down.weight')),
+  }
+
+
+def atom_encoder(sd, prefix, n_blocks, structure_prediction=False):
+  g = lambda leaf: sd['%s.%s' % (prefix, leaf)]
+  out = {
+      'atom_linear/weights': t(g('atom_linear.weight')),
+      'atom_norm/scale': _arr(g('atom_norm.weight')),
+      'atom_norm/offset': _arr(g('atom_norm.bias')),
+      'atom_to_token/weights': t(g('atom_to_token_linear.weight')),
+  }
+  if structure_prediction:
+    out['coords_linear/weights'] = t(g('coords_linear.weight'))
+  out.update(nest('blocks', stack_blocks(
+      lambda i: swa_atom_block(sd, '%s.atom_transformer.blocks.%d' % (prefix, i)),
+      n_blocks)))
+  return out
+
+
+def rope_inv_freq(n_pairs, base):
+  """1 / base**(arange(n_pairs)/n_pairs) -- the ESMFold2 spacing."""
+  return (1.0 / (base ** (np.arange(n_pairs, dtype=np.float32) / n_pairs))).astype(np.float32)
