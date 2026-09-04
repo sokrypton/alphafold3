@@ -49,11 +49,80 @@ shapes, sampler constants and input conventions are used.
 | `rosettafold3` | [RoseTTAFold3](https://files.ipd.uw.edu/pub/rf3/) (RosettaCommons) | see upstream |
 | `chai1` | [chai-1](https://github.com/chaidiscovery/chai-lab) (Chai Discovery) | Apache 2.0 |
 
-Weights are converted **once, offline** — a run never needs PyTorch or the
-original checkpoint:
+### Getting the weights
+
+You do not have to do anything. The first run of a model downloads its converted
+weights from
+[huggingface.co/sokrypton/af3-any-model](https://huggingface.co/sokrypton/af3-any-model)
+and caches them; every run after that is offline.
 
 ```bash
-# downloads the published checkpoint, converts it, writes the shape manifest
+python run_alphafold.py \
+  --model=openfold3 \
+  --json_path=fold_input.json \
+  --output_dir=./output/
+```
+
+They land in `~/.cache/alphafold3/weights/<model>/`, or under `$AF3_WEIGHTS_DIR`
+if you set it. `--model_dir` overrides both and skips the download entirely, which
+is what you want for weights you converted or staged yourself. AlphaFold 3's own
+parameters are the exception: they are not ours to redistribute, so `--model
+alphafold3` needs `--model_dir` pointing at your own copy.
+
+**Smaller downloads.** `--weights_precision int8` fetches the same weights stored
+as 8-bit with a per-channel scale, expanded back when the model loads. This is a
+storage format, not a compute one — inference is unchanged. Measured cost on
+rosettafold3: within sampling noise on protein, ligand, RNA and a D/L peptide,
+with stereochemistry unchanged.
+
+| `--model` | fp32 | int8 |
+|---|---|---|
+| `chai1` | 1.20 GB | 0.27 GB |
+| `protenix2` | 1.33 GB | 0.19 GB |
+| `rosettafold3` | 1.36 GB | 0.27 GB |
+| `openfold3` | 1.37 GB | 0.26 GB |
+| `intellifold2` | 1.77 GB | 0.63 GB |
+| `boltz2` | 1.88 GB | 0.38 GB |
+| `opendde` | 2.47 GB | 0.35 GB |
+
+Each precision caches to its own directory (`<model>-int8/`), so asking for one
+never silently gets you the other, and switching back to a form you already have
+is instant.
+
+### Downloading the weights yourself
+
+The repo is flat and served over plain HTTPS, so nothing more than `wget` is
+needed — useful for pre-staging a shared filesystem or an air-gapped machine:
+
+```bash
+BASE=https://huggingface.co/sokrypton/af3-any-model/resolve/main
+mkdir -p params/openfold3
+wget -P params/openfold3 $BASE/openfold3.bin.zst        # or openfold3.int8.bin.zst
+wget -P params/openfold3 $BASE/openfold3.shapes.json
+
+python run_alphafold.py --model=openfold3 --model_dir=params/openfold3 ...
+```
+
+Or with the Hugging Face CLI:
+
+```bash
+pip install huggingface_hub
+hf download sokrypton/af3-any-model openfold3.bin.zst openfold3.shapes.json \
+  --local-dir params/openfold3
+```
+
+Take the `.shapes.json` too. It is small, and it is what reports a gap in the
+conversion at load time instead of letting it surface as an opaque failure
+mid-forward.
+
+### Converting the weights yourself
+
+The published blobs are produced by `converters/`, and you can run it yourself
+against a checkpoint you already trust. Conversion needs PyTorch; a run never
+does.
+
+```bash
+# fetches the published checkpoint, converts it, writes the shape manifest
 python -m converters.convert --model openfold3 --out ./params/openfold3
 ```
 
@@ -67,10 +136,12 @@ python run_alphafold.py \
   --output_dir=./output/
 ```
 
-chai-1 additionally folds with ESM2 token embeddings, which are most of its
-token feature stream — without them it is a different model (a natural protein
-folds to 5.70 Å where chai reaches 0.642). Precompute them once, in whatever
-environment has chai's traced ESM archive, and pass them in:
+### chai-1 needs ESM2 embeddings
+
+chai-1 folds with ESM2 token embeddings, which are most of its token feature
+stream — without them it is a different model (a natural protein folds to 5.70 Å
+where chai reaches 0.642). Precompute them once, in whatever environment has
+chai's traced ESM archive, and pass them in:
 
 ```bash
 python converters/esm_embed.py --sequence MQIFVKT... --out esm.npz
@@ -210,6 +281,46 @@ AlphaFold 3 uses the following separate libraries and packages:
 *   [tqdm](https://github.com/tqdm/tqdm)
 
 We thank all their contributors and maintainers!
+
+### Running other models through this code
+
+Everything under [Other AF3-family models](#other-af3-family-models) rests on work
+by other people. First and most obviously the model authors, who trained and
+released the weights — each is linked in that table, and each should be cited
+alongside AlphaFold 3 if you use their model.
+
+Beyond them, three whose code this borrows from directly:
+
+*   **[Marielle Russo](https://github.com/maraxen)** —
+    [plegadx](https://github.com/maraxen/plegadx), an Equinox/JAX
+    re-implementation of RoseTTAFold3, Boltz, chai-1, IntelliFold and AlphaFold 3
+    on a shared substrate, each validated against its vendor implementation. Its
+    chai-1 diffusion modules were the op-level reference while ours was being
+    debugged, and its sampler — replayed to 0.00015 Å under identical noise —
+    independently confirmed two details we had derived separately: that the
+    vendor loop runs `len(sigmas) - 1` iterations, and that it augments with a
+    rotation *and* a translation each step. Its chai-1 trunk diverged in the same
+    place ours did, which is its own kind of signpost.
+
+*   **[ChoongHwanLee](https://github.com/chlee19990109-cloud)** — an independent
+    Protenix → AlphaFold 3 port
+    ([ColabFold, `colabfold2-protenix-proof`](https://github.com/chlee19990109-cloud/ColabFold/tree/colabfold2-protenix-proof)),
+    built on this same Haiku graph. Two things here come straight from it. One is
+    the padded-key attention mask, which protenix2 and opendde were missing. The
+    other is the discipline of asserting that **every** checkpoint tensor is
+    consumed exactly once — `converters/audit_coverage.py` is that check, and it
+    found four dropped distogram biases, three LayerNorm offsets and a
+    single-conditioner bias that eight ports' worth of correlation gates had all
+    scored as passing. Independent agreement on the rest of the Protenix config
+    is the strongest evidence either port has.
+
+*   **[Milot Mirdita](https://github.com/milot-mirdita)** —
+    [ColabFold](https://github.com/sokrypton/ColabFold) and the public MMseqs2
+    API. `src/alphafold3/data/msa_server.py` is adapted from ColabFold's
+    `run_mmseqs2`, which is what lets this run with no local sequence database at
+    all. The device-portability matrix in `run_alphafold.py` — which attention
+    implementation and which XLA flags each GPU generation needs — also comes
+    from ColabFold, where every row of it was paid for by a real failure.
 
 ## Get in Touch
 

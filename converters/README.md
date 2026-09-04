@@ -135,7 +135,8 @@ theirs enters once and the converter halves it. Name-matching alone would have g
 two of the four wrong by a factor of two.
 
 Run both directions on every new converter. The idea is borrowed: an independent
-Protenix port (`chlee19990109-cloud/ColabFold`, branch `colabfold2-protenix-proof`)
+Protenix port by ChoongHwanLee (`chlee19990109-cloud/ColabFold`, branch
+`colabfold2-protenix-proof`)
 asserts all 4174 of its source tensors are consumed exactly once, and that
 discipline is what surfaced this whole table.
 

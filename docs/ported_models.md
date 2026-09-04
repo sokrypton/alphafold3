@@ -169,7 +169,8 @@ that reduces over more than the feature axis has to be masked.
 
 Two classes of divergence that every gate we had was structurally blind to. Both
 were found by reading an independent Protenix port
-(`chlee19990109-cloud/ColabFold`, branch `colabfold2-protenix-proof`) that runs
+(ChoongHwanLee, `chlee19990109-cloud/ColabFold`, branch
+`colabfold2-protenix-proof`) that runs
 the same AF3 graph and had already handled them.
 
 **1. Padded atom windows with AF3's product mask.** AF3's cross-attention biases

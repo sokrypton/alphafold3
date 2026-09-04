@@ -20,7 +20,7 @@ missing: `hm.Linear` defaults to `use_bias=False`, the converter never asked for
 the key, and no gate could see it (the distogram feeds no structure).
 
 Run BOTH directions on every new converter. An independent Protenix port
-(chlee19990109-cloud/ColabFold, `colabfold2-protenix-proof`) asserts every one of
+(ChoongHwanLee, chlee19990109-cloud/ColabFold, `colabfold2-protenix-proof`) asserts every one of
 its 4174 source tensors is consumed exactly once; this is that check.
 
 HOW IT WORKS, and its one caveat. The state dict is wrapped so `__getitem__` and
