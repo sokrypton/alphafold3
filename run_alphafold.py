@@ -1195,6 +1195,17 @@ def main(_):
     _jax_cache = os.path.join(_CACHE_DIR.value, 'jax')
     os.makedirs(_jax_cache, exist_ok=True)
     jax.config.update('jax_compilation_cache_dir', _jax_cache)
+    # Deliberately NOT lowering jax_persistent_cache_min_{entry_size_bytes,
+    # compile_time_secs}. Tried on 6MRR/openbind: it grows the cache 3.5 -> 4.1 MB
+    # and changes a warm start by 0.04 s (16.35 -> 16.31), because what the
+    # defaults exclude is not where the time is.
+    #
+    # Where it IS, measured cold vs warm across two processes with this cache:
+    #   first inference   69.09 s  ->  16.35 s     (the cache is worth ~53 s)
+    #   later inference    5.45 s  ->   5.44 s
+    # The 10.8 s that survives is TRACING AND LOWERING, which the persistent
+    # cache cannot skip -- it stores the compiled executable, but JAX still has
+    # to trace and lower the graph to know which entry to fetch.
 
   if _JSON_PATH.value is None == _INPUT_DIR.value is None:
     raise ValueError(
