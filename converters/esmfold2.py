@@ -432,3 +432,18 @@ def map_diffusion(sd, dims=None):
           dims['n_diff_atom'])),
   }))
   return out
+
+
+def map_esmfold2_to_af3(sd, **overrides):
+  """Everything converted so far: trunk + inputs embedder + diffusion module.
+
+  The confidence head and the ESM-C tower are not yet included.
+  """
+  dims = derive_dims(sd)
+  dims.update(overrides)
+  p = map_trunk(sd, dims)
+  p.update(nest('inputs_embedder',
+                atom_encoder(sd, 'inputs_embedder.atom_attention_encoder',
+                             dims.get('n_input_atom', 3))))
+  p.update(nest('diffusion', map_diffusion(sd, dims)))
+  return p
