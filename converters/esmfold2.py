@@ -132,3 +132,127 @@ def parcae_dynamics(sd):
   a = np.exp(-delta * np.exp(log_a))
   b = delta[:, None] * b_cont
   return a.astype(np.float32), b.T.astype(np.float32).copy()
+
+
+# ---------------------------------------------------------------------------
+# the LM shim: 81 ESM-C layers -> a pair representation
+# ---------------------------------------------------------------------------
+
+def language_model_shim(sd, prefix='language_model'):
+  """base_z_linear (LN + Linear) -> softmax-weighted layer mix -> SingleToPair.
+
+  The layer mix `softmax(base_z_combine)` is a constant, so it folds into a
+  plain (n_layers,) array.  Note it peaks on the LAST ESM-C layers (79/80/78
+  hold 58% of the mass), so the tower cannot be truncated -- but only ~31 of
+  81 hidden states carry 99%, which bounds what has to be materialised.
+  """
+  g = lambda leaf: sd['%s.%s' % (prefix, leaf)]
+  w = _arr(g('base_z_combine')).astype(np.float64)
+  mix = np.exp(w - w.max()); mix /= mix.sum()
+  return {
+      'combine': mix.astype(np.float32),
+      'lm_norm/scale': _arr(g('base_z_linear.0.weight')),
+      'lm_norm/offset': _arr(g('base_z_linear.0.bias')),
+      'lm_projection/weights': t(g('base_z_linear.1.weight')),
+      # SingleToPair: downproject, then output_mlp = Linear -> GELU -> Linear
+      'downproject/weights': t(g('base_z_mlp.0.downproject.weight')),
+      'downproject/bias': _arr(g('base_z_mlp.0.downproject.bias')),
+      'pair_mlp_1/weights': t(g('base_z_mlp.0.output_mlp.0.weight')),
+      'pair_mlp_1/bias': _arr(g('base_z_mlp.0.output_mlp.0.bias')),
+      'pair_mlp_2/weights': t(g('base_z_mlp.0.output_mlp.2.weight')),
+      'pair_mlp_2/bias': _arr(g('base_z_mlp.0.output_mlp.2.bias')),
+      'pair_norm/scale': _arr(g('base_z_mlp.1.weight')),
+      'pair_norm/offset': _arr(g('base_z_mlp.1.bias')),
+  }
+
+
+# ---------------------------------------------------------------------------
+# the MSA encoder  (token-major [B, L, M, c], unlike AF3's [B, M, L, c])
+# ---------------------------------------------------------------------------
+
+def outer_product_mean(sd, prefix):
+  """W is one Linear(d_msa, 2*d_hidden) chunked into (a, b).
+
+  NOTE the divide order: ESMFold2's default is `Wout(outer) / n_valid`, so the
+  output BIAS is scaled by 1/n_valid too.  (`divide_outer_before_proj=True`
+  would put the divide inside; some checkpoints were trained that way.)
+  """
+  g = lambda leaf: sd['%s.%s' % (prefix, leaf)]
+  w = _arr(g('W.weight'))
+  h = w.shape[0] // 2
+  return {'layer_norm/scale': _arr(g('norm.weight')),
+          'layer_norm/offset': _arr(g('norm.bias')),
+          'left_projection/weights': t(w[:h]),
+          'right_projection/weights': t(w[h:]),
+          'output/weights': t(g('Wout.weight')),
+          'output/bias': _arr(g('Wout.bias'))}
+
+
+def msa_pair_weighted_averaging(sd, prefix):
+  g = lambda leaf: sd['%s.%s' % (prefix, leaf)]
+  return {'msa_norm/scale': _arr(g('norm_single.weight')),
+          'msa_norm/offset': _arr(g('norm_single.bias')),
+          'pair_norm/scale': _arr(g('compute_bias.0.weight')),
+          'pair_norm/offset': _arr(g('compute_bias.0.bias')),
+          'bias/weights': t(g('compute_bias.1.weight')),
+          'value/weights': t(g('Wv.weight')),
+          'gate/weights': t(g('Wgate.weight')),
+          'output/weights': t(g('Wout.weight'))}
+
+
+def msa_block(sd, prefix, is_final):
+  """OPM into pair, then (unless final) the MSA update, then the pair block.
+
+  The last block drops the MSA update entirely -- its pair output is all that
+  is consumed, so msa_pair_weighted_averaging / msa_transition are absent from
+  the checkpoint (the same 'dead final block' shape intellifold2 has).
+  """
+  d = DIALECT_ESMFOLD2
+  out = nest('outer_product_mean', outer_product_mean(sd, prefix + '.outer_product_mean'))
+  if not is_final:
+    out.update(nest('msa_pair_weighted_averaging',
+                    msa_pair_weighted_averaging(sd, prefix + '.msa_pair_weighted_averaging')))
+    out.update(nest('msa_transition', common.transition(sd, prefix + '.msa_transition', d)))
+  out.update(pair_only_block(sd, prefix))
+  return out
+
+
+def msa_encoder(sd, dims, prefix='msa_encoder'):
+  n = dims['n_msa']
+  out = {'embed/weights': t(sd['%s.embed.weight' % prefix]),
+         'project_inputs/weights': t(sd['%s.project_inputs.weight' % prefix])}
+  # the final block has a different param set, so stack the common part only
+  out.update(nest('blocks', stack_blocks(
+      lambda i: msa_block(sd, '%s.blocks.%d' % (prefix, i), is_final=False),
+      n - 1)))
+  out.update(nest('final_block', msa_block(sd, '%s.blocks.%d' % (prefix, n - 1), is_final=True)))
+  return out
+
+
+# ---------------------------------------------------------------------------
+# the whole trunk
+# ---------------------------------------------------------------------------
+
+def map_trunk(sd, dims=None):
+  """Every parameter from features to the final pair representation."""
+  dims = dims or derive_dims(sd)
+  a_vec, b_T = parcae_dynamics(sd)
+  p = {
+      'z_init_1/weights': t(sd['z_init_1.weight']),
+      'z_init_2/weights': t(sd['z_init_2.weight']),
+      'rel_pos/weights': t(sd['rel_pos.embed.weight']),
+      'token_bonds/weights': t(sd['token_bonds.weight']),
+      'parcae_a': a_vec,
+      'parcae_b/weights': b_T,
+      'parcae_input_norm/scale': _arr(sd['parcae_input_norm.weight']),
+      'parcae_input_norm/offset': _arr(sd['parcae_input_norm.bias']),
+      'parcae_readout/weights': t(sd['parcae_readout.weight']),
+      'distogram/weights': t(sd['distogram_head.weight']),
+      'distogram/bias': _arr(sd['distogram_head.bias']),
+  }
+  p.update(nest('language_model', language_model_shim(sd)))
+  p.update(nest('lm_encoder', pair_only_stack(sd, 'lm_encoder', dims['n_lm_encoder'])))
+  p.update(nest('folding_trunk', pair_only_stack(sd, 'folding_trunk', dims['n_trunk'])))
+  p.update(nest('parcae_coda', pair_only_stack(sd, 'parcae_coda', dims['n_coda'])))
+  p.update(nest('msa_encoder', msa_encoder(sd, dims)))
+  return p
