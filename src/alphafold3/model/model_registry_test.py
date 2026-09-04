@@ -85,6 +85,34 @@ class RegistryTest(parameterized.TestCase):
                         default.heads.diffusion.eval.gamma_0)
     self.assertAlmostEqual(config.heads.diffusion.eval.gamma_0, 0.605)
 
+  def test_protenix_variants_appear_wherever_protenix2_does(self):
+    """A Protenix model type takes every forward branch protenix2 takes.
+
+    They differ only in counts and widths -- block counts and c_z, both read off
+    the checkpoint by converters/protenix2.derive_dims -- so any branch keyed on
+    'protenix2' is keyed on the wrong thing unless mini and tiny are beside it.
+
+    This is a test rather than a convention because the failure mode is bad:
+    while porting mini, three separate lists were missed, and each surfaced only
+    as a shape error at load or a count of uncovered parameters. Nothing said
+    "you forgot a model in a tuple". Every membership list lives in model_config
+    precisely so this test can see all of them.
+    """
+    lists = {name: value for name, value in vars(model_config).items()
+             if name.isupper() and isinstance(value, tuple)
+             and all(isinstance(v, str) for v in value)}
+    checked = 0
+    for name, members in lists.items():
+      if 'protenix2' not in members:
+        continue
+      checked += 1
+      for variant in ('protenix_mini', 'protenix_tiny'):
+        self.assertIn(
+            variant, members,
+            f'{name} contains protenix2 but not {variant}; a Protenix variant '
+            'takes the same forward branches as protenix2')
+    self.assertGreater(checked, 0, 'no protenix2 membership lists found')
+
   def test_padded_key_windows_imply_the_or_mask(self):
     """A model that PADS its atom key window must mask keys from real queries.
 

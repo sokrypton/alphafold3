@@ -637,7 +637,7 @@ class CrossAttTransformer(hk.Module):
     # block) rather than once shared. Gated on global_config.model so AF3/OF3/IF2
     # (shared LN, below) are byte-unchanged. pair_input_layer_norm + pair_logits_
     # projection are created inside the block -> stacked along the layer_stack axis.
-    if self.global_config.model in ('opendde', 'protenix2', 'rosettafold3'):
+    if self.global_config.model in model_config.PER_BLOCK_ATOM_PAIR_LAYER_NORM:
       # OpenDDE/Protenix/RF3 apply the atom-pair LayerNorm PER BLOCK (their
       # per-block layernorm_z weights genuinely differ). Same forward path.
       rosettafold3 = self.global_config.model == 'rosettafold3'

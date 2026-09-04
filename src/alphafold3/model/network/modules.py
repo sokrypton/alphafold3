@@ -328,7 +328,7 @@ class GridSelfAttention(hk.Module):
     # running openbind -- the trunk pair bias, before it is averaged away by a
     # diffusion sample. Until then this is the documented default, not a result.
     if (self.transpose
-        and self.global_config.model in ('openfold3', 'opendde', 'boltz2', 'protenix2')):
+        and self.global_config.model in model_config.TRANSPOSED_COLUMN_PAIR_BIAS):
       nonbatched_bias = jnp.swapaxes(nonbatched_bias, -1, -2)
 
     num_residues = act.shape[0]

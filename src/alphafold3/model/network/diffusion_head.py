@@ -191,7 +191,7 @@ class DiffusionHead(hk.Module):
                        name='z_trunk_norm')(pair_embedding))
       relpe = hm.Linear(pc, precision='highest', name='relpe_projection')(rel_features)
       features_2d = jnp.concatenate([z_trunk, relpe], axis=-1)
-    elif self.global_config.model in ('boltz2', 'protenix2', 'rosettafold3'):
+    elif self.global_config.model in model_config.DIFFUSION_PROJECTED_RELPOS:
       # Boltz's pairwise_conditioner concats [RAW z_trunk(128), PROJECTED relpos(128)] -> 256
       # (vs AF3's [z_trunk, RAW rel_features(139)] -> 267). relpe_projection == the trunk's
       # rel_pos.linear_layer (139->128), the same weight used for z-init position_activations.

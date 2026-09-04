@@ -186,6 +186,55 @@ PROTENIX2_SETTINGS = (
 )
 
 
+# Protenix's SMALL model types (mini, tiny). Everything they change from the
+# v0.5.0 base is a COUNT: 16 / 8 pairformer blocks against 48, one MSA block
+# against 4, an 8-block diffusion transformer against 24, and a single-block
+# diffusion atom encoder/decoder against 3. They keep stock AF3 widths (c_z=128,
+# 4 tri-attention heads), unlike protenix2, so there is no widening here at all.
+#
+# Two things worth stating because they are easy to get wrong:
+#   * the INPUT-EMBEDDER atom encoder stays at 3 blocks while the DIFFUSION one
+#     drops to 1, so the two need separate knobs -- one `n_atom` would be wrong
+#     for one of them.
+#   * these are v0.5.0-lineage and TEMPLATELESS (the checkpoints carry zero
+#     template_embedder blocks), so the template stack is set to 0.
+# All of it is verified against the checkpoints by converters/protenix2.derive_dims,
+# which reads the same numbers off the artefact rather than trusting this table.
+_PROTENIX_SMALL_COMMON = (
+    ('evoformer.msa_stack.num_layer', 1),
+    ('evoformer.template.template_stack.num_layer', 0),
+    ('heads.diffusion.transformer.num_blocks', 8),
+    ('heads.diffusion.transformer.super_block_size', 4),
+    ('heads.diffusion.atom_transformer.num_blocks', 1),
+    ('evoformer.per_atom_conditioning.atom_transformer.num_blocks', 3),
+)
+PROTENIX_MINI_SETTINGS = _PROTENIX_SMALL_COMMON + (
+    ('evoformer.pairformer.num_layer', 16),
+)
+PROTENIX_TINY_SETTINGS = _PROTENIX_SMALL_COMMON + (
+    ('evoformer.pairformer.num_layer', 8),
+)
+
+
+def _apply_settings(cfg, settings, who):
+  for dotted, value in settings:
+    node = cfg
+    parts = dotted.split('.')
+    for part in parts[:-1]:
+      if not hasattr(node, part):
+        raise AttributeError(f'{who}: config path {dotted!r} not found (missing {part!r})')
+      node = getattr(node, part)
+    setattr(node, parts[-1], value)
+
+
+def _widen_protenix_mini(cfg):
+  _apply_settings(cfg, PROTENIX_MINI_SETTINGS, 'protenix_mini')
+
+
+def _widen_protenix_tiny(cfg):
+  _apply_settings(cfg, PROTENIX_TINY_SETTINGS, 'protenix_tiny')
+
+
 def _widen_protenix2(cfg):
   '''set cfg in place to Protenix-v2's c_z=256 trunk widening; raise on a missing path.'''
   for dotted, value in PROTENIX2_SETTINGS:
@@ -300,6 +349,13 @@ def _widen_rosettafold3(cfg):
 # nobody has checked.
 #   boltz2: boltz.main.Boltz2DiffusionParams (BoltzDesign1/boltz2/src/boltz/main.py)
 _SAMPLER_CONSTANTS = {
+    # Protenix's small models ship their OWN sampler settings and they are not
+    # small differences: 5 steps against 200, no churn (gamma0 0 against 0.8) and
+    # step_scale 1.0 against 1.5 (configs_model_type.py, "the default setting for
+    # mini model"). Running them on AF3's constants would anneal on the wrong
+    # schedule 40x too slowly -- silent, as ever; nothing errors.
+    'protenix_mini': dict(gamma_0=0.0, step_scale=1.0, steps=5),
+    'protenix_tiny': dict(gamma_0=0.0, step_scale=1.0, steps=5),
     'boltz2': dict(gamma_0=0.605, gamma_min=1.107, noise_scale=0.901,
                    step_scale=1.638, rho=8.0, sigma_min=0.0004, sigma_max=160.0),
 }
@@ -312,6 +368,8 @@ _WIDENERS = {
     'opendde': _widen_opendde,
     'boltz2': _widen_boltz2,
     'protenix2': _widen_protenix2,
+    'protenix_mini': _widen_protenix_mini,
+    'protenix_tiny': _widen_protenix_tiny,
     'rosettafold3': _widen_rosettafold3,
     'chai1': _widen_chai1,
 }
@@ -514,6 +572,12 @@ MODEL_SPECS = {
     # named by model, so a boolean here would be the one thing you had to
     # remember. The two share a converter, which picks the mapping off the
     # checkpoint (converters/openfold3.py `is_openbind_checkpoint`).
+    'protenix_mini': ModelSpec('protenix_mini',
+                               weights_licence='the Apache License, Version 2.0',
+                               weights_source='https://github.com/bytedance/Protenix'),
+    'protenix_tiny': ModelSpec('protenix_tiny',
+                               weights_licence='the Apache License, Version 2.0',
+                               weights_source='https://github.com/bytedance/Protenix'),
     'openbind': ModelSpec('openbind', weights_licence='the Apache License, Version 2.0',
                           weights_source='https://github.com/aqlaboratory/openfold-3'),
     # IntelliFold-v2: stock-AF3 module tree (deliberately NOT in

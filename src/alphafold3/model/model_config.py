@@ -36,6 +36,12 @@ MODELS = (
     # OpenFold3's v0.5.0 release. Its own name because it diverges from
     # `openfold3` in a forward convention, not just in weights.
     'openbind',
+    # Protenix ships nine model types that differ only in counts and widths.
+    # protenix2 is its flagship; these two are the small ones, and they are
+    # genuinely small -- 16 and 8 pairformer blocks against 48, an 8-block
+    # diffusion transformer against 24, and 5 sampling steps against 200.
+    'protenix_mini',
+    'protenix_tiny',
     'intellifold2',
     'opendde',
     'boltz2',
@@ -60,6 +66,8 @@ OPENFOLD3_LINEAGE = (
     'opendde',
     'boltz2',
     'protenix2',
+    'protenix_mini',
+    'protenix_tiny',
     'rosettafold3',
 )
 
@@ -85,6 +93,8 @@ PER_BLOCK_PAIR_LAYER_NORM = (
     'opendde',
     'boltz2',
     'protenix2',
+    'protenix_mini',
+    'protenix_tiny',
     'rosettafold3',
 )
 # chai-1 is deliberately absent: it is not OpenFold-derived at all. Its primitives
@@ -116,8 +126,51 @@ PER_BLOCK_PAIR_LAYER_NORM = (
 KEY_MASKED_ATOM_ATTENTION = (
     'rosettafold3',
     'protenix2',
+    'protenix_mini',
+    'protenix_tiny',
     'opendde',
 )
+
+
+# The Protenix family. Its model types differ from one another ONLY in counts
+# and widths (converters/protenix2.derive_dims reads both off the checkpoint), so
+# every FORWARD branch that protenix2 takes, mini and tiny take too. Keeping the
+# membership in one place is what stops the next variant from being added to four
+# lists and missed in a fifth -- which happened three times while mini was being
+# ported, each time surfacing only as a shape error or an uncovered-parameter
+# count, never as anything that named the cause.
+PROTENIX_FAMILY = ('protenix2', 'protenix_mini', 'protenix_tiny')
+
+
+# Models whose diffusion conditioning concatenates a PROJECTED relative-position
+# encoding with the trunk pair, rather than AF3's raw 139-channel features.
+# Widths: AF3 folds [z_trunk(c_z), rel_features(139)] -> c_z, these fold
+# [z_trunk(c_z), relpe(c_z)] -> 2*c_z, so getting the membership wrong is a shape
+# error at load (267 vs 256) rather than a silent one -- which is why this list
+# was the third and last of the protenix_mini omissions to surface.
+DIFFUSION_PROJECTED_RELPOS = ('boltz2', 'rosettafold3') + PROTENIX_FAMILY
+
+
+# Models that compute the column-attention pair bias from the TRANSPOSED pair
+# representation, as OpenFold3 preview-2 does. openbind is deliberately absent;
+# see the note at modules.py, where the open question about its direction lives.
+TRANSPOSED_COLUMN_PAIR_BIAS = ('openfold3', 'opendde', 'boltz2') + PROTENIX_FAMILY
+
+
+# Models whose ATOM cross-attention transformer LayerNorms the atom-pair
+# conditioning per block, rather than once for the stack.
+#
+# A SEPARATE question from PER_BLOCK_PAIR_LAYER_NORM, which is about the TOKEN
+# transformer, and the two memberships genuinely differ: openfold3 and boltz2 are
+# per-block on the token transformer and shared on the atom one. Deriving either
+# list from the other would be wrong for four of nine models.
+#
+# The cost of getting it wrong is not a crash: the block parameters land under
+# `__layer_stack_no_per_layer` while the graph reads
+# `__layer_stack_with_per_layer`, so the conversion "succeeds" and every atom
+# block is left at its init value. The shape manifest is what catches it, which
+# is how protenix_mini was caught (104 uncovered parameters).
+PER_BLOCK_ATOM_PAIR_LAYER_NORM = ('opendde', 'rosettafold3') + PROTENIX_FAMILY
 
 
 # Models whose distogram head carries a trained BIAS. Stock AF3's `half_logits`
@@ -142,6 +195,8 @@ KEY_MASKED_ATOM_ATTENTION = (
 # lives in the converters, as a weight transform, so there is no forward branch.
 DISTOGRAM_BIAS = (
     'protenix2',
+    'protenix_mini',
+    'protenix_tiny',
     'opendde',
     'rosettafold3',
     'boltz2',

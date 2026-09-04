@@ -316,21 +316,83 @@ def map_template_embedder(sd, params, n_blocks=2, templ_H=2, templ_D=32):
 
 
 # ─── top-level map ───────────────────────────────────────────────────────────
-def map_protenix2_to_af3(sd, *, n_pairformer=48, n_msa=4, n_template=2, n_confidence=4):
-  """Convert a Protenix-v2 state dict (module.* stripped) to AF3 haiku params.
+def derive_dims(sd):
+  """Read a Protenix checkpoint's own shape -- block counts and widths -- from it.
 
-  Covers trunk + heads + template + top-level embeddings. The diffusion module
-  (conditioning + atom enc/dec + token transformer) is not yet mapped.
+  Protenix publishes nine model types (configs_model_type.py) and they differ from
+  one another ONLY in counts and widths: mini is 16 pairformer blocks where v2 has
+  48, tiny 8, v0.5.0 is templateless (0 template blocks), v2 alone widens c_z to
+  256. Nothing about the module tree changes, so one converter serves all of them
+  as long as it stops assuming v2's numbers.
+
+  Derived, never passed, for the reason D36 records in ChoongHwanLee's port (see
+  README): a literal that is right for one release is wrong the moment another
+  ships, and the failure is silent -- shapes agree, the model loads, every number
+  is wrong. The artefact survives a release; a default argument does not.
+
+  Note the two atom encoders are counted SEPARATELY. mini drops the diffusion
+  atom encoder to 1 block while leaving the input embedder's at 3, so a single
+  `n_atom` would be wrong for one of them.
   """
+  import re
+
+  def n_blocks(prefix):
+    idx = {int(m.group(1)) for k in sd
+           if (m := re.match(rf'{re.escape(prefix)}\.(\d+)\.', k))}
+    return (max(idx) + 1) if idx else 0
+
+  dims = dict(
+      n_msa=n_blocks('msa_module.blocks'),
+      n_pairformer=n_blocks('pairformer_stack.blocks'),
+      n_template=n_blocks('template_embedder.pairformer_stack.blocks'),
+      n_confidence=n_blocks('confidence_head.pairformer_stack.blocks'),
+      n_diff_token=n_blocks('diffusion_module.diffusion_transformer.blocks'),
+      n_diff_atom_enc=n_blocks('diffusion_module.atom_attention_encoder'
+                               '.atom_transformer.diffusion_transformer.blocks'),
+      n_diff_atom_dec=n_blocks('diffusion_module.atom_attention_decoder'
+                               '.atom_transformer.diffusion_transformer.blocks'),
+      n_input_atom_enc=n_blocks('input_embedder.atom_attention_encoder'
+                                '.atom_transformer.diffusion_transformer.blocks'),
+  )
+  # widths, off a tensor that every release carries
+  dims['c_z'] = int(_get(sd, 'pairformer_stack.blocks.0.tri_mul_out.linear_a_p.weight').shape[0])
+  dims['c_s'] = int(_get(sd, 'linear_no_bias_sinit.weight').shape[0])
+  dims['num_bins'] = int(_get(sd, 'distogram_head.linear.weight').shape[0])
+  # head count stated by the pair-bias projection, not computed from c_z // 32
+  dims['pair_H'] = int(_get(sd, 'pairformer_stack.blocks.0.tri_att_start.linear.weight').shape[0])
+  return dims
+
+
+def map_protenix2_to_af3(sd, **overrides):
+  """Convert ANY Protenix state dict (module.* stripped) to AF3 haiku params.
+
+  Named for protenix2 because that is the first release it served, but the shape
+  is read from the checkpoint (`derive_dims`), so the same function converts the
+  mini and tiny model types -- and any future one that changes only counts and
+  widths, which is every Protenix release so far.
+
+  Pass an override only to test a deliberate mismatch; the derived value is
+  right for the checkpoint in hand by construction.
+  """
+  d = derive_dims(sd)
+  d.update(overrides)
   params = {}
   map_input_embeddings(sd, params)
-  map_msa_stack(sd, params, n_blocks=n_msa)
-  map_pairformer_stack(sd, params, n_blocks=n_pairformer)
-  map_confidence_head(sd, params, n_layers=n_confidence)
+  map_msa_stack(sd, params, n_blocks=d['n_msa'], pair_H=d['pair_H'])
+  map_pairformer_stack(sd, params, n_blocks=d['n_pairformer'], pair_H=d['pair_H'])
+  map_confidence_head(sd, params, n_layers=d['n_confidence'], pair_H=d['pair_H'])
   map_distogram_head(sd, params)
-  map_template_embedder(sd, params, n_blocks=n_template)
-  map_evoformer_conditioning(sd, params)
-  map_diffusion(sd, params)
+  if d['n_template']:
+    # v0.5.0-lineage checkpoints (mini, tiny) are TEMPLATELESS and carry no
+    # template_embedder tensors at all; asking for them raises rather than
+    # silently emitting zeros.
+    map_template_embedder(sd, params, n_blocks=d['n_template'])
+  map_evoformer_conditioning(sd, params, n_atom=d['n_input_atom_enc'])
+  # super_block_size is 4 in the graph, so the token transformer nests as
+  # (num_blocks // 4, 4); 24 -> 6 supers for protenix2, 8 -> 2 for mini/tiny.
+  map_diffusion(sd, params, n_token=d['n_diff_token'],
+                n_super=max(1, d['n_diff_token'] // 4),
+                n_atom=d['n_diff_atom_enc'])
   return params
 
 
@@ -343,12 +405,53 @@ def load_protenix_checkpoint(ckpt_path):
   return {(k[len('module.'):] if k.startswith('module.') else k): v for k, v in sd.items()}
 
 
-def convert_protenix2_weights(checkpoint, output_dir):
-  """Convert protenix-v2.pt to a loadable AF3-haiku blob dir.
+def _convert_protenix(checkpoint, output_dir, model_name):
+  """Shared body for every Protenix model type.
 
-  WIP: trunk + heads + template only (no diffusion module yet), so the produced blob
-  is not yet a complete model. Kept behind the WIP gate in converters/__init__.
+  Refuses a checkpoint whose derived shape does not match the name asked for.
+  The graph is built from the registry's static settings while the blob is built
+  from the checkpoint, so a mismatch between the two is exactly the silent kind:
+  the blob would load and every block count would be wrong.
   """
+  from alphafold3.model import model_registry
+  sd = load_protenix_checkpoint(checkpoint)
+  d = derive_dims(sd)
+  cfg = model_registry.get(model_name).configure(_af3_config())
+  want = {
+      'n_pairformer': cfg.evoformer.pairformer.num_layer,
+      'n_msa': cfg.evoformer.msa_stack.num_layer,
+      'n_diff_token': cfg.heads.diffusion.transformer.num_blocks,
+      'c_z': cfg.evoformer.pair_channel,
+  }
+  bad = {k: (d[k], v) for k, v in want.items() if d[k] != v}
+  if bad:
+    raise ValueError(
+        f'--model {model_name} does not match this checkpoint: '
+        + ', '.join(f'{k} is {got} but the graph wants {exp}'
+                    for k, (got, exp) in bad.items())
+        + '. Protenix model types differ only in counts and widths, so the wrong'
+          ' pairing loads silently and is wrong everywhere.')
+  return Path(C.write_params_blob(output_dir, f'{model_name}.bin.zst',
+                                  map_protenix2_to_af3(sd), add_meta=True))
+
+
+def _af3_config():
+  from alphafold3.model import model
+  return model.Model.Config()
+
+
+def convert_protenix_mini_weights(checkpoint, output_dir):
+  """Convert Protenix's `protenix_mini_default_v0.5.0` checkpoint."""
+  return _convert_protenix(checkpoint, output_dir, 'protenix_mini')
+
+
+def convert_protenix_tiny_weights(checkpoint, output_dir):
+  """Convert Protenix's `protenix_tiny_default_v0.5.0` checkpoint."""
+  return _convert_protenix(checkpoint, output_dir, 'protenix_tiny')
+
+
+def convert_protenix2_weights(checkpoint, output_dir):
+  """Convert protenix-v2.pt to a loadable AF3-haiku blob dir."""
   sd = load_protenix_checkpoint(checkpoint)
   params = map_protenix2_to_af3(sd)
   return Path(C.write_params_blob(output_dir, 'protenix2.bin.zst',
