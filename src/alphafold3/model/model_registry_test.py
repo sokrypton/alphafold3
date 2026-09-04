@@ -106,11 +106,11 @@ class RegistryTest(parameterized.TestCase):
       if 'protenix2' not in members:
         continue
       checked += 1
-      for variant in ('protenix_mini', 'protenix_tiny'):
+      for variant in model_config.PROTENIX_FAMILY:
         self.assertIn(
             variant, members,
-            f'{name} contains protenix2 but not {variant}; a Protenix variant '
-            'takes the same forward branches as protenix2')
+            f'{name} contains protenix2 but not {variant}; every member of '
+            'model_config.PROTENIX_FAMILY takes the same forward branches')
     self.assertGreater(checked, 0, 'no protenix2 membership lists found')
 
   def test_padded_key_windows_imply_the_or_mask(self):

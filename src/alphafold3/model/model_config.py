@@ -36,6 +36,9 @@ MODELS = (
     # OpenFold3's v0.5.0 release. Its own name because it diverges from
     # `openfold3` in a forward convention, not just in weights.
     'openbind',
+    # Protenix's v1 release (368 M). Stock AlphaFold 3 everywhere except one
+    # width -- see PROTENIX1_SETTINGS.
+    'protenix1',
     # Protenix ships nine model types that differ only in counts and widths.
     # protenix2 is its flagship; these two are the small ones, and they are
     # genuinely small -- 16 and 8 pairformer blocks against 48, an 8-block
@@ -50,6 +53,16 @@ MODELS = (
     'chai1',
 )
 
+# The Protenix family. Its model types differ from one another ONLY in counts
+# and widths (converters/protenix2.derive_dims reads both off the checkpoint), so
+# every FORWARD branch that protenix2 takes, mini and tiny take too. Keeping the
+# membership in one place is what stops the next variant from being added to four
+# lists and missed in a fifth -- which happened three times while mini was being
+# ported, each time surfacing only as a shape error or an uncovered-parameter
+# count, never as anything that named the cause.
+PROTENIX_FAMILY = ('protenix1', 'protenix2', 'protenix_mini', 'protenix_tiny')
+
+
 # Models whose forward graph follows OpenFold3's conventions rather than stock
 # AlphaFold3's: the 1-indexed element shift, the symmetrised bond matrix, and
 # Fourier noise weights read from the checkpoint.
@@ -61,15 +74,8 @@ MODELS = (
 # swapped column-attention pair bias (an explicit list at modules.py, where the
 # open question about openbind's direction is recorded).
 OPENFOLD3_LINEAGE = (
-    'openfold3',
-    'openbind',
-    'opendde',
-    'boltz2',
-    'protenix2',
-    'protenix_mini',
-    'protenix_tiny',
-    'rosettafold3',
-)
+    'openfold3', 'openbind', 'opendde', 'boltz2', 'rosettafold3',
+) + PROTENIX_FAMILY
 
 
 # Models whose diffusion transformer LayerNorms the pair conditioning ONCE PER
@@ -89,14 +95,8 @@ OPENFOLD3_LINEAGE = (
 # a single `diffusion_transformer.layer_norm_z.weight` (converters/openfold3.py
 # `is_openbind_checkpoint`).
 PER_BLOCK_PAIR_LAYER_NORM = (
-    'openfold3',
-    'opendde',
-    'boltz2',
-    'protenix2',
-    'protenix_mini',
-    'protenix_tiny',
-    'rosettafold3',
-)
+    'openfold3', 'opendde', 'boltz2', 'rosettafold3',
+) + PROTENIX_FAMILY
 # chai-1 is deliberately absent: it is not OpenFold-derived at all. Its primitives
 # (merged bidirectional triangle multiplication, fused two-direction triangle
 # attention, grouped outer product mean) are its own, so it shares none of the OF3
@@ -123,23 +123,7 @@ PER_BLOCK_PAIR_LAYER_NORM = (
 # featurisation knob. It is a superset of that knob, and `model_registry_test`
 # asserts the containment, so a future padded-window port cannot land here
 # masking the wrong way.
-KEY_MASKED_ATOM_ATTENTION = (
-    'rosettafold3',
-    'protenix2',
-    'protenix_mini',
-    'protenix_tiny',
-    'opendde',
-)
-
-
-# The Protenix family. Its model types differ from one another ONLY in counts
-# and widths (converters/protenix2.derive_dims reads both off the checkpoint), so
-# every FORWARD branch that protenix2 takes, mini and tiny take too. Keeping the
-# membership in one place is what stops the next variant from being added to four
-# lists and missed in a fifth -- which happened three times while mini was being
-# ported, each time surfacing only as a shape error or an uncovered-parameter
-# count, never as anything that named the cause.
-PROTENIX_FAMILY = ('protenix2', 'protenix_mini', 'protenix_tiny')
+KEY_MASKED_ATOM_ATTENTION = ('rosettafold3', 'opendde') + PROTENIX_FAMILY
 
 
 # Models whose diffusion conditioning concatenates a PROJECTED relative-position
@@ -193,14 +177,7 @@ PER_BLOCK_ATOM_PAIR_LAYER_NORM = ('opendde', 'rosettafold3') + PROTENIX_FAMILY
 #
 # Reading the tensor name alone would have got two of the four wrong. The halving
 # lives in the converters, as a weight transform, so there is no forward branch.
-DISTOGRAM_BIAS = (
-    'protenix2',
-    'protenix_mini',
-    'protenix_tiny',
-    'opendde',
-    'rosettafold3',
-    'boltz2',
-)
+DISTOGRAM_BIAS = ('opendde', 'rosettafold3', 'boltz2') + PROTENIX_FAMILY
 
 
 class GlobalConfig(base_config.BaseConfig):

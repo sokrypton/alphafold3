@@ -278,7 +278,7 @@ class ConfidenceHead(hk.Module):
     out += hm.Linear(pair_act.shape[-1], name='distogram_feat_project')(
         dgram.astype(pair_act.dtype)
     )
-    if self.global_config.model == 'protenix2':
+    if self.global_config.model in model_config.PROTENIX_FAMILY:
       # Protenix adds a SECOND distance term alongside the binned one: a linear on the
       # raw distance (`linear_no_bias_d_wo_onehot`, in_features=1). Unbinned, so it
       # carries the sub-bin resolution the one-hot throws away. Its binning is otherwise
@@ -324,7 +324,7 @@ class ConfidenceHead(hk.Module):
       single_act = embeddings['single'].astype(dtype)
       target_feat = embeddings['target_feat'].astype(dtype)
 
-      if self.global_config.model == 'protenix2':
+      if self.global_config.model in model_config.PROTENIX_FAMILY:
         # Protenix LayerNorms (and clamps) the trunk single before ANY use -- the
         # confidence pairformer and every head see the normalised one
         # (`input_strunk_ln(clamp(s_trunk, -512, 512))`). AF3 uses it raw, and our

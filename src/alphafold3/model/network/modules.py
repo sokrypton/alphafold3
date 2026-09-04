@@ -372,6 +372,12 @@ class TriangleMultiplication(hk.Module):
   class Config(base_config.BaseConfig):
     equation: Literal['ikc,jkc->ijc', 'kjc,kic->ijc']
     use_glu_kernel: bool = True
+    # Width of the a/b projections and the einsum, when it is NOT the input
+    # channel count. AF3 always ties the two, and every model here agrees except
+    # Protenix-v1's TEMPLATE stack, which runs a 128-wide triangle multiplication
+    # on a 64-channel template pair (the two projections are (128, 64) where AF3
+    # would build (64, 64)). None keeps AF3's behaviour exactly.
+    hidden_dim: int | None = None
 
   def __init__(
       self, config: Config, global_config: model_config.GlobalConfig, *, name
@@ -392,6 +398,10 @@ class TriangleMultiplication(hk.Module):
     """
     mask = mask[None, ...]
     num_channels = act.shape[-1]
+    # the a/b projections, the einsum and center_norm all run at hidden_dim;
+    # only output_projection and the gate come back to num_channels
+    hidden_dim = (num_channels if self.config.hidden_dim is None
+                  else self.config.hidden_dim)
     equation = {
         'ikc,jkc->ijc': 'cik,cjk->cij',
         'kjc,kic->ijc': 'ckj,cki->cij',
@@ -402,11 +412,11 @@ class TriangleMultiplication(hk.Module):
 
     if self.config.use_glu_kernel:
       weights_projection, _ = hm.haiku_linear_get_params(
-          act, num_output=num_channels * 2, name='projection'
+          act, num_output=hidden_dim * 2, name='projection'
       )
       weights_gate, _ = hm.haiku_linear_get_params(
           act,
-          num_output=num_channels * 2,
+          num_output=hidden_dim * 2,
           initializer=self.global_config.final_init,
           name='gate',
       )
@@ -418,12 +428,12 @@ class TriangleMultiplication(hk.Module):
       projection = jnp.transpose(projection, (2, 0, 1))
       projection *= mask
     else:
-      projection = hm.Linear(num_channels * 2, name='projection')(act)
+      projection = hm.Linear(hidden_dim * 2, name='projection')(act)
       projection = jnp.transpose(projection, (2, 0, 1))
       projection *= mask
 
       gate = hm.Linear(
-          num_channels * 2,
+          hidden_dim * 2,
           name='gate',
           bias_init=1.0,
           initializer=self.global_config.final_init,
@@ -431,7 +441,7 @@ class TriangleMultiplication(hk.Module):
       gate = jnp.transpose(gate, (2, 0, 1))
       projection *= jax.nn.sigmoid(gate)
 
-    projection = projection.reshape(num_channels, 2, *projection.shape[1:])
+    projection = projection.reshape(hidden_dim, 2, *projection.shape[1:])
     a, b = jnp.split(projection, 2, axis=1)
     a, b = jnp.squeeze(a, axis=1), jnp.squeeze(b, axis=1)
     act = jnp.einsum(equation, a, b)

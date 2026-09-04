@@ -227,6 +227,32 @@ def _apply_settings(cfg, settings, who):
     setattr(node, parts[-1], value)
 
 
+# Protenix-v1 (368 M). Its counts are IDENTICAL to protenix2's -- same 4174
+# tensors, same 48/4/2/24/3 blocks -- and it sits at stock AlphaFold 3 widths
+# throughout (c_z 128, c_m 64, 4 tri-attention heads, msa value_dim 8), so almost
+# nothing needs setting.
+#
+# The one exception is real and is what stalled an earlier attempt at this port:
+# v1's TEMPLATE stack runs a 128-wide triangle multiplication on a 64-channel
+# template pair. AF3 ties the two, so its projections would be (64, 64) where the
+# checkpoint carries (128, 64). That needed a hidden_dim knob on
+# TriangleMultiplication, which defaults to None and leaves every other model
+# byte-identical.
+PROTENIX1_SETTINGS = (
+    ('evoformer.template.template_stack.triangle_multiplication_outgoing.hidden_dim', 128),
+    ('evoformer.template.template_stack.triangle_multiplication_incoming.hidden_dim', 128),
+    # and its template attention is 4 heads x 32 = 128 hidden on the same
+    # 64-channel pair, where AF3 derives max(64 // 4, 16) = 16. Same story as the
+    # tri-mul above: v1's template stack is uniformly twice as wide as its
+    # channel count would imply.
+    ('evoformer.template.template_stack.pair_attention.qkv_dim', 32),
+)
+
+
+def _widen_protenix1(cfg):
+  _apply_settings(cfg, PROTENIX1_SETTINGS, 'protenix1')
+
+
 def _widen_protenix_mini(cfg):
   _apply_settings(cfg, PROTENIX_MINI_SETTINGS, 'protenix_mini')
 
@@ -368,6 +394,7 @@ _WIDENERS = {
     'opendde': _widen_opendde,
     'boltz2': _widen_boltz2,
     'protenix2': _widen_protenix2,
+    'protenix1': _widen_protenix1,
     'protenix_mini': _widen_protenix_mini,
     'protenix_tiny': _widen_protenix_tiny,
     'rosettafold3': _widen_rosettafold3,
@@ -572,6 +599,9 @@ MODEL_SPECS = {
     # named by model, so a boolean here would be the one thing you had to
     # remember. The two share a converter, which picks the mapping off the
     # checkpoint (converters/openfold3.py `is_openbind_checkpoint`).
+    'protenix1': ModelSpec('protenix1',
+                           weights_licence='the Apache License, Version 2.0',
+                           weights_source='https://github.com/bytedance/Protenix'),
     'protenix_mini': ModelSpec('protenix_mini',
                                weights_licence='the Apache License, Version 2.0',
                                weights_source='https://github.com/bytedance/Protenix'),

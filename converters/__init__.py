@@ -21,6 +21,7 @@ _ENTRY_POINTS = {
     # counts and widths, which converters/protenix2.derive_dims reads off the
     # checkpoint. The entry points exist to pin the NAME, and each refuses a
     # checkpoint whose shape does not match it.
+    'protenix1': ('protenix2', 'convert_protenix1_weights'),
     'protenix_mini': ('protenix2', 'convert_protenix_mini_weights'),
     'protenix_tiny': ('protenix2', 'convert_protenix_tiny_weights'),
     'rosettafold3': ('rosettafold3', 'convert_rosettafold3_weights'),

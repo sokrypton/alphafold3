@@ -360,6 +360,13 @@ def derive_dims(sd):
   dims['num_bins'] = int(_get(sd, 'distogram_head.linear.weight').shape[0])
   # head count stated by the pair-bias projection, not computed from c_z // 32
   dims['pair_H'] = int(_get(sd, 'pairformer_stack.blocks.0.tri_att_start.linear.weight').shape[0])
+  # the template stack has its OWN head count and its own triangle-multiplication
+  # width, and v1 differs from v2 in both: 4 heads against 2, and a 128-wide
+  # tri-mul on a 64-channel pair against 64. Absent on the templateless releases.
+  tb = 'template_embedder.pairformer_stack.blocks.0'
+  if _has(sd, f'{tb}.tri_att_start.linear.weight'):
+    dims['templ_H'] = int(_get(sd, f'{tb}.tri_att_start.linear.weight').shape[0])
+    dims['templ_hidden'] = int(_get(sd, f'{tb}.tri_mul_out.linear_a_p.weight').shape[0])
   return dims
 
 
@@ -386,7 +393,8 @@ def map_protenix2_to_af3(sd, **overrides):
     # v0.5.0-lineage checkpoints (mini, tiny) are TEMPLATELESS and carry no
     # template_embedder tensors at all; asking for them raises rather than
     # silently emitting zeros.
-    map_template_embedder(sd, params, n_blocks=d['n_template'])
+    map_template_embedder(sd, params, n_blocks=d['n_template'],
+                          templ_H=d['templ_H'])
   map_evoformer_conditioning(sd, params, n_atom=d['n_input_atom_enc'])
   # super_block_size is 4 in the graph, so the token transformer nests as
   # (num_blocks // 4, 4); 24 -> 6 supers for protenix2, 8 -> 2 for mini/tiny.
@@ -438,6 +446,11 @@ def _convert_protenix(checkpoint, output_dir, model_name):
 def _af3_config():
   from alphafold3.model import model
   return model.Model.Config()
+
+
+def convert_protenix1_weights(checkpoint, output_dir):
+  """Convert Protenix's `protenix_base_default_v1.0.0` checkpoint (368 M)."""
+  return _convert_protenix(checkpoint, output_dir, 'protenix1')
 
 
 def convert_protenix_mini_weights(checkpoint, output_dir):

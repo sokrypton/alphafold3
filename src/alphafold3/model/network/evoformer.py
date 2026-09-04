@@ -396,7 +396,7 @@ class Evoformer(hk.Module):
       # RoseTTAFold3TemplateEmbedding.
       template_module = template_modules.RoseTTAFold3TemplateEmbedding(
           self.config.template, self.global_config)
-    elif self.global_config.model == 'protenix2':
+    elif self.global_config.model in model_config.PROTENIX_FAMILY:
       # Protenix rides the Boltz2 fused-template forward (same converter scopes) with
       # its own 108-d feature builder (39-bin dgram, normalized frame-at-i unit vector,
       # 32-restype); see Protenix2TemplateEmbedding.
