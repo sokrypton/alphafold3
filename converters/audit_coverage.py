@@ -144,6 +144,8 @@ _LOADERS = {
                   '/home/ubuntu/protenix_weights/protenix-v2.pt'),
     'openfold3': ('openfold3', 'load_of3_checkpoint',
                   '/home/ubuntu/of3-p2-155k.pt'),
+    'openbind': ('openfold3', 'load_of3_checkpoint',
+                 '/home/ubuntu/of3-ob-174k.pt'),
     'rosettafold3': ('rosettafold3', 'load_rf3_checkpoint',
                      '/home/ubuntu/rf3_weights/'
                      'rf3_foundry_01_24_latest_remapped.ckpt'),
@@ -157,6 +159,7 @@ _LOADERS = {
 _MAPPERS = {
     'protenix2': 'map_protenix2_to_af3',
     'openfold3': 'map_openfold3_to_af3',
+    'openbind': 'map_openfold3_to_af3',
     'rosettafold3': 'map_rosettafold3_to_af3',
     'intellifold2': 'map_intellifold2_to_af3',
     'boltz2': 'map_boltz2_to_af3',

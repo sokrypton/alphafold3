@@ -10,6 +10,9 @@ are re-exported here.
 
 _ENTRY_POINTS = {
     'openfold3': ('openfold3', 'convert_openfold3_weights'),
+    # same module: the two OpenFold3 releases share a converter, which
+    # refuses a checkpoint that does not match the name asked for.
+    'openbind': ('openfold3', 'convert_openbind_weights'),
     'intellifold2': ('intellifold2', 'convert_intellifold2_weights'),
     'opendde': ('opendde', 'convert_opendde_weights'),
     'boltz2': ('boltz2', 'convert_boltz2_weights'),

@@ -33,6 +33,9 @@ _Shape2DType: TypeAlias = tuple[int | None, int | None]
 MODELS = (
     'alphafold3',
     'openfold3',
+    # OpenFold3's v0.5.0 release. Its own name because it diverges from
+    # `openfold3` in a forward convention, not just in weights.
+    'openbind',
     'intellifold2',
     'opendde',
     'boltz2',
@@ -42,11 +45,42 @@ MODELS = (
 )
 
 # Models whose forward graph follows OpenFold3's conventions rather than stock
-# AlphaFold3's: the per-block pair LayerNorm in the diffusion transformer, the
-# 1-indexed element shift, the symmetrised bond matrix, the swapped
-# column-attention pair bias, and Fourier noise weights read from the checkpoint.
+# AlphaFold3's: the 1-indexed element shift, the symmetrised bond matrix, and
+# Fourier noise weights read from the checkpoint.
 # IntelliFold-2 is deliberately absent -- its converter emits stock-AF3 names.
+#
+# Two conventions that USED to be described here have moved out, because
+# openbind keeps this lineage while reverting them to AlphaFold 3's:
+# the per-block pair LayerNorm (PER_BLOCK_PAIR_LAYER_NORM, below) and the
+# swapped column-attention pair bias (an explicit list at modules.py, where the
+# open question about openbind's direction is recorded).
 OPENFOLD3_LINEAGE = (
+    'openfold3',
+    'openbind',
+    'opendde',
+    'boltz2',
+    'protenix2',
+    'rosettafold3',
+)
+
+
+# Models whose diffusion transformer LayerNorms the pair conditioning ONCE PER
+# BLOCK, rather than once for the whole stack as AlphaFold 3 does.
+#
+# This is NOT the same question as OPENFOLD3_LINEAGE, and openbind is why. Lineage
+# is provenance -- who derived their model from whom, which decides the bond
+# symmetrisation, the element index shift and where the Fourier weights come from.
+# This is a CONVENTION, and OpenFold3 changed it between releases: their v0.5.0
+# notes say "Moved the pair layer norm in the diffusion transformer out of
+# attention pair bias. The pair layer norm is run once to match the AlphaFold3
+# SI." So openbind is OpenFold3 by lineage and AlphaFold 3 here, and deriving one
+# list from the other would make that impossible to express.
+#
+# The checkpoint states which it is, so nothing has to be remembered: preview-2
+# carries 24 `blocks.N.attention_pair_bias.layer_norm_z.weight`, openbind carries
+# a single `diffusion_transformer.layer_norm_z.weight` (converters/openfold3.py
+# `is_openbind_checkpoint`).
+PER_BLOCK_PAIR_LAYER_NORM = (
     'openfold3',
     'opendde',
     'boltz2',

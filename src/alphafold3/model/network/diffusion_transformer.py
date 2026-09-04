@@ -310,8 +310,12 @@ class Transformer(hk.Module):
     # though it is deliberately not in OPENFOLD3_LINEAGE -- it is not
     # OpenFold-derived, it just happens to share this one shape.
     chai = self.global_config.model == 'chai1'
-    per_block_pair = (self.global_config.model in model_config.OPENFOLD3_LINEAGE
-                      or chai)
+    # Keyed on the CONVENTION, not the lineage: openbind is OpenFold3 by descent
+    # but runs the pair LayerNorm once, the way AlphaFold 3 does, so it takes the
+    # stock path below. See model_config.PER_BLOCK_PAIR_LAYER_NORM.
+    per_block_pair = (
+        self.global_config.model in model_config.PER_BLOCK_PAIR_LAYER_NORM
+        or chai)
     if per_block_pair and pair_cond is not None:
       # OF3 mode: per-block pair LayerNorm + projection. pair_cond is shared
       # across all blocks; each block in the layer_stack gets its own LN/Linear

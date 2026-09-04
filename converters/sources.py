@@ -17,6 +17,13 @@ SOURCES = {
     'openfold3': dict(
         url='https://openfold.s3.amazonaws.com/staging/of3-p2-155k.pt',
         file='of3-p2-155k.pt'),
+    # OpenBind, OpenFold3 v0.5.0. A different bucket from preview-2 -- the one
+    # their own setup_openfold.py uses (S3_BUCKET = "openfold3-data").
+    # Upstream deprecates preview-2 as of this release.
+    'openbind': dict(
+        url='https://openfold3-data.s3.amazonaws.com/openfold3-parameters/'
+            'of3-ob-2025-06-30-174k.pt',
+        file='of3-ob-2025-06-30-174k.pt'),
     # IntelliFold-v2 (IntelligenAI). Stock-AF3 module tree at widened channels.
     'intellifold2': dict(
         url='https://huggingface.co/intelligenAI/intellifold/resolve/main/intellifold_v2.pt',

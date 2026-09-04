@@ -235,7 +235,13 @@ class DiffusionHead(hk.Module):
 
     target_feat = embeddings['target_feat']
     features_1d = jnp.concatenate([single_embedding, target_feat], axis=-1)
-    if self.global_config.model == 'openfold3':
+    if self.global_config.model in ('openfold3', 'openbind'):
+      # BOTH OpenFold3 releases: openbind changed the diffusion transformer's
+      # pair LayerNorm, not the feature layout, so it keeps this 833-channel
+      # convention. A new model in this lineage has to be added here explicitly;
+      # the shape manifest is what catches the omission (833 vs 831), which is
+      # exactly how openbind was caught.
+      #
       # OF3's restype and profile blocks carry 32 classes; AF3's carry 31 (AF3
       # folds unknown DNA into the shared unknown-nucleic class). Everywhere
       # else the extra class can simply be dropped from the weights, because a

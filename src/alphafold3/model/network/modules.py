@@ -308,6 +308,25 @@ class GridSelfAttention(hk.Module):
     # TriangleAttention (end-node) computes to_b from the NON-transposed pair and does
     # NOT transpose the bias (it transposes only the pair before attention), so it is
     # excluded from the list below.
+    # 'openbind' (OpenFold3 >= 0.5.0) is deliberately ABSENT, following AF3's own
+    # Algorithm 15 -- and this is the one openbind convention still taken on
+    # reading rather than measurement. Upstream made the end-node transposition
+    # explicit in v0.5.0 (TriangularAttention gained `transpose_bias`, passed True
+    # from tri_att_start_end), but their release notes do not mention it and
+    # NEITHER SETTING CHANGES ANY WEIGHT -- linear_z is still per block and
+    # identically shaped -- so no shape gate and no coverage audit can see it.
+    #
+    # FOLDING CANNOT DISCRIMINATE IT EITHER, measured rather than assumed:
+    #
+    #   6MRR, single sequence     1.702 A (absent)  vs 1.712 A (present)
+    #   1STP + MSA, seed 1        0.548 A           vs 0.763 A
+    #   1STP + MSA, seed 7        0.532 A           vs 0.460 A
+    #
+    # The two seeds disagree about which is better, so the gap is inside the
+    # sampling spread and one seed would have "confirmed" either answer. What
+    # would settle it is an activation-level comparison against native OpenFold3
+    # running openbind -- the trunk pair bias, before it is averaged away by a
+    # diffusion sample. Until then this is the documented default, not a result.
     if (self.transpose
         and self.global_config.model in ('openfold3', 'opendde', 'boltz2', 'protenix2')):
       nonbatched_bias = jnp.swapaxes(nonbatched_bias, -1, -2)

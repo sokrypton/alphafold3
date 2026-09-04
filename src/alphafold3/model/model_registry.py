@@ -506,6 +506,16 @@ MODEL_SPECS = {
                             weights_repo=None, weights_file='af3.bin.zst'),
     'openfold3': ModelSpec('openfold3', weights_licence='the Apache License, Version 2.0',
                            weights_source='https://github.com/aqlaboratory/openfold'),
+    # OpenBind, OpenFold3's v0.5.0 release, which upstream says supersedes the
+    # preview-2 weights `openfold3` runs ("the previously released preview 2
+    # weights are deprecated and will not function correctly with
+    # openfold3>=0.5"). A SEPARATE MODEL rather than a flag on openfold3: it
+    # differs in a forward convention, and every other divergence in this file is
+    # named by model, so a boolean here would be the one thing you had to
+    # remember. The two share a converter, which picks the mapping off the
+    # checkpoint (converters/openfold3.py `is_openbind_checkpoint`).
+    'openbind': ModelSpec('openbind', weights_licence='the Apache License, Version 2.0',
+                          weights_source='https://github.com/aqlaboratory/openfold-3'),
     # IntelliFold-v2: stock-AF3 module tree (deliberately NOT in
     # OPENFOLD3_LINEAGE -- its converter emits stock-AF3 haiku names) at the
     # "full_fat" widened channels.

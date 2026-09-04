@@ -37,6 +37,24 @@ DIALECT_OPENFOLD3 = C.Dialect(
 )
 
 
+# ─── which OpenFold3 release is this? ────────────────────────────────────────
+# openbind (v0.5.0) runs ONE pair LayerNorm for the whole diffusion transformer;
+# preview-2 stores one per block. So the two releases are told apart by a tensor
+# that only one of them has, never by a version string or a filename -- the
+# artefact survives a rename, and a formula does not (the lesson of D36 in
+# ChoongHwanLee's port, credited in the README).
+#
+# Measured on the real checkpoints: preview-2 has 4936 tensors, openbind 4890 --
+# 24 per-block LayerNorms gone and 1 shared one added, in each of the two copies
+# the file carries. Nothing else differs by name.
+_OPENBIND_SHARED_PAIR_NORM = 'diffusion_module.diffusion_transformer.layer_norm_z.weight'
+
+
+def is_openbind_checkpoint(sd: dict) -> bool:
+  """True for an OpenFold3 >= 0.5.0 (openbind) checkpoint, False for preview-2."""
+  return _has(sd, _OPENBIND_SHARED_PAIR_NORM)
+
+
 # ─── OF3→AF3 aatype remap ─────────────────────────────────────────────────────
 # OF3 uses 32 residue types; AF3 uses 31.  For each AF3 type index a (0-30),
 # _AF3_TO_OF3_AATYPE[a] gives the corresponding OF3 type index.
@@ -502,15 +520,17 @@ def _diff_cond_transition_params(sd: dict, prefix: str, name: str) -> dict[str, 
 
 
 def convert_diff_self_attn_block(sd: dict, block_idx: int, prefix_base: str,
-                                  name: str, H: int, D: int) -> dict[str, np.ndarray]:
+                                  name: str, H: int, D: int, *,
+                                  per_block_pair_bias: bool = True) -> dict[str, np.ndarray]:
     pa = f'{prefix_base}.blocks.{block_idx}.attention_pair_bias'
     pt = f'{prefix_base}.blocks.{block_idx}.conditioned_transition'
     d = {}
     d.update(_diff_adaln_params(sd, f'{pa}.layer_norm_a', name))
-    # Per-block pair LayerNorm + projection stored without name prefix to match
-    # bare hm.LayerNorm(name='pair_input_layer_norm') in diffusion_transformer.py
-    d['pair_input_layer_norm/scale'] = _get(sd, f'{pa}.layer_norm_z.weight')
-    d['pair_logits_projection/weights'] = _t(_get(sd, f'{pa}.linear_z.weight'))
+    if per_block_pair_bias:
+        # Per-block pair LayerNorm + projection stored without name prefix to match
+        # bare hm.LayerNorm(name='pair_input_layer_norm') in diffusion_transformer.py
+        d['pair_input_layer_norm/scale'] = _get(sd, f'{pa}.layer_norm_z.weight')
+        d['pair_logits_projection/weights'] = _t(_get(sd, f'{pa}.linear_z.weight'))
     qw = _get(sd, f'{pa}.mha.linear_q.weight')
     d[f'{name}q_projection/weights'] = qw.T.reshape(-1, H, D)
     d[f'{name}q_projection/bias'] = _get(sd, f'{pa}.mha.linear_q.bias').reshape(H, D)
@@ -564,9 +584,12 @@ def _pair_logits_flat(sd: dict, prefix_base: str, n_blocks: int) -> np.ndarray:
 
 
 def _stack_main_transformer(sd: dict, prefix_base: str, name: str,
-                              n_blocks: int, n_super: int, H: int, D: int) -> dict[str, np.ndarray]:
+                              n_blocks: int, n_super: int, H: int, D: int, *,
+                              per_block_pair_bias: bool = True) -> dict[str, np.ndarray]:
     super_size = n_blocks // n_super
-    all_blocks = [convert_diff_self_attn_block(sd, i, prefix_base, name, H, D)
+    all_blocks = [convert_diff_self_attn_block(
+                      sd, i, prefix_base, name, H, D,
+                      per_block_pair_bias=per_block_pair_bias)
                   for i in range(n_blocks)]
     result = {}
     for key in all_blocks[0]:
@@ -751,9 +774,45 @@ def map_diffusion_head(sd: dict, params: dict, *,
     tr_base = f'{dm}.diffusion_transformer'
     tr_name = 'transformer'
     tr_scope = f'{scope}/{tr_name}'
-    tr_stacked = _stack_main_transformer(sd, tr_base, tr_name, n_diff_blocks, n_super_blocks, diff_H, diff_D)
-    tr_inner = f'{tr_scope}/__layer_stack_no_per_layer/__layer_stack_no_per_layer'
+    openbind = is_openbind_checkpoint(sd)
+    tr_stacked = _stack_main_transformer(sd, tr_base, tr_name, n_diff_blocks,
+                                         n_super_blocks, diff_H, diff_D,
+                                         per_block_pair_bias=not openbind)
+    # The stack SCOPE NAME differs between the two releases, because the graph
+    # builds a different loop for each. AF3's path threads per-super-block pair
+    # logits into the inner stack (layer_stack(..., with_per_layer_inputs=True)),
+    # so openbind's blocks live under __layer_stack_with_per_layer twice; the
+    # per-block-LN path has nothing to thread and uses __layer_stack_no_per_layer.
+    # Getting this wrong is not a crash -- the blob simply misses every block
+    # parameter and the manifest reports 20 uncovered, which is how it was caught.
+    _stack = ('__layer_stack_with_per_layer' if openbind
+              else '__layer_stack_no_per_layer')
+    tr_inner = f'{tr_scope}/{_stack}/{_stack}'
     _populate_scope(params, tr_inner, tr_stacked)
+
+    if openbind:
+        # openbind runs the pair LayerNorm ONCE for the whole stack, which is
+        # AlphaFold 3's own arrangement, so the two tensors land in AF3's own
+        # scopes rather than being stacked into every block:
+        #
+        #   transformer/pair_input_layer_norm            scale   (c_z,)
+        #   transformer/__layer_stack_with_per_layer/
+        #       pair_logits_projection                   weights (n_super, c_z,
+        #                                                         super_size, H)
+        #
+        # The projection is still per block upstream; AF3 just groups it by
+        # super-block, so the 24 (H, c_z) torch tensors are transposed and
+        # regrouped rather than summed or shared.
+        _set(params, f'{tr_scope}/pair_input_layer_norm', 'scale',
+             _get(sd, f'{tr_base}.layer_norm_z.weight'))
+        super_size = n_diff_blocks // n_super_blocks
+        logits = np.stack(
+            [_t(_get(sd, f'{tr_base}.blocks.{i}.attention_pair_bias.linear_z.weight'))
+             for i in range(n_diff_blocks)], axis=0)      # (blocks, c_z, H)
+        logits = logits.reshape(n_super_blocks, super_size, *logits.shape[1:])
+        logits = np.transpose(logits, (0, 2, 1, 3))       # (n_super, c_z, super, H)
+        _set(params, f'{tr_scope}/__layer_stack_with_per_layer/pair_logits_projection',
+             'weights', logits)
 
     _set(params, f'{scope}/single_cond_embedding_norm', 'scale', _get(sd, f'{dm}.layer_norm_s.weight'))
     _set(params, f'{scope}/single_cond_embedding_projection', 'weights', _t(_get(sd, f'{dm}.linear_s.weight')))
@@ -843,24 +902,50 @@ def load_of3_checkpoint(ckpt_path: Path | str, use_ema: bool = True) -> dict:
     }
 
 
-def save_af3_params(params: dict[str, dict[str, np.ndarray]], output_dir: Path | str) -> Path:
+def save_af3_params(params: dict[str, dict[str, np.ndarray]], output_dir: Path | str,
+                    model_name: str = 'openfold3') -> Path:
     """Save converted params in AF3 binary format (.bin.zst).
 
     Thin wrapper over the shared blob writer; the __meta__ record and scope/name sort
     are the OF3 blob's layout. Returns the output path.
     """
-    return Path(C.write_params_blob(output_dir, 'openfold3.bin.zst',
+    return Path(C.write_params_blob(output_dir, f'{model_name}.bin.zst',
                                     params, add_meta=True))
 
 
+def _convert_of3(checkpoint, output_dir, model_name, use_ema=True):
+    """Shared body for both OpenFold3 releases.
+
+    ONE converter, because preview-2 and openbind differ in exactly one family of
+    tensors and share every other convention. It refuses a mismatch rather than
+    quietly producing a blob the graph will misread: the two releases need
+    different forward branches (model_config.PER_BLOCK_PAIR_LAYER_NORM), so
+    converting one under the other's name would load 24 per-block LayerNorms into
+    a graph that runs one, or leave a graph that runs 24 with none.
+    """
+    import os
+    sd = load_of3_checkpoint(os.path.expanduser(str(checkpoint)), use_ema=use_ema)
+    found = 'openbind' if is_openbind_checkpoint(sd) else 'openfold3'
+    if found != model_name:
+        raise ValueError(
+            f'--model {model_name} but this checkpoint is {found}. '
+            + ('openbind carries one shared '
+               f'{_OPENBIND_SHARED_PAIR_NORM!r}; preview-2 carries one per block. '
+               'Pass the other checkpoint, or the other --model.'))
+    save_af3_params(map_openfold3_to_af3(sd), output_dir, model_name)
+    return output_dir
+
+
 def convert_openfold3_weights(checkpoint, output_dir, use_ema=True):
-    """Convert an OpenFold3 checkpoint to a loadable AF3-haiku blob.
+    """Convert an OpenFold3 preview-2 checkpoint to a loadable AF3-haiku blob.
 
     The mapping is not mechanical -- see OF3_AF3_PORTING_NOTES.md for the
     residue-alphabet permutation, the i/j transposes in the confidence head and
     template embedder, and the two feature columns that must be kept.
     """
-    import os
-    sd = load_of3_checkpoint(os.path.expanduser(str(checkpoint)), use_ema=use_ema)
-    save_af3_params(map_openfold3_to_af3(sd), output_dir)
-    return output_dir
+    return _convert_of3(checkpoint, output_dir, 'openfold3', use_ema)
+
+
+def convert_openbind_weights(checkpoint, output_dir, use_ema=True):
+    """Convert an OpenFold3 v0.5.0 (openbind) checkpoint."""
+    return _convert_of3(checkpoint, output_dir, 'openbind', use_ema)
