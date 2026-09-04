@@ -316,6 +316,13 @@ Beyond them, three whose code this borrows from directly:
     scored as passing. Independent agreement on the rest of the Protenix config
     is the strongest evidence either port has.
 
+*   **[juliabuhmann](https://github.com/juliabuhmann)** — the openbind port
+    ([PR #6](https://github.com/sokrypton/alphafold3/pull/6)). She found that
+    OpenFold3's v0.5.0 weights revert two of the deviations this code compensates
+    for, worked out which, and built the one-key checkpoint detection that tells
+    the two releases apart without a version string. `--model openbind` is her
+    work, re-expressed for this branch's per-model registry.
+
 *   **[Milot Mirdita](https://github.com/milot-mirdita)** —
     [ColabFold](https://github.com/sokrypton/ColabFold) and the public MMseqs2
     API. `src/alphafold3/data/msa_server.py` is adapted from ColabFold's
