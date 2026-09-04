@@ -434,10 +434,71 @@ def map_diffusion(sd, dims=None):
   return out
 
 
+# ---------------------------------------------------------------------------
+# the confidence head
+# ---------------------------------------------------------------------------
+#
+# Structure: build a pair rep from z + rel_pos + token_bonds + three s_inputs
+# projections (row, column and an outer PRODUCT), add a distogram-bin embedding
+# of the PREDICTED representative-atom distances, run 4 pair-only blocks, and
+# read pLDDT / resolved off a row-attention pooling of the pair, pae / pde off
+# the pair directly.
+#
+# Two things a name-level check would miss:
+#   * the 4-block trunk is wrapped in ONE MORE residual: `pair.add_(trunk(pair))`.
+#     The blocks already carry their own residuals, so this is a stack-level skip
+#     on top of them.
+#   * THREE parameters are DEAD in the released checkpoint -- s_inputs_to_single,
+#     s_input_to_s and s_norm are constructed in __init__ and never read by
+#     forward.  They are converted anyway (harmless, and it keeps coverage at
+#     100%), but nothing consumes them.
+
+CONFIDENCE_DEAD_PARAMS = ('s_inputs_to_single', 's_input_to_s', 's_norm')
+
+
+def confidence_head(sd, dims, prefix='confidence_head'):
+  g = lambda leaf: sd['%s.%s' % (prefix, leaf)]
+  out = {
+      'boundaries': _arr(g('boundaries')),
+      'dist_bin_embed/weights': _arr(g('dist_bin_pairwise_embed.weight')),
+      's_inputs_norm/scale': _arr(g('s_inputs_norm.weight')),
+      's_inputs_norm/offset': _arr(g('s_inputs_norm.bias')),
+      'z_norm/scale': _arr(g('z_norm.weight')),
+      'z_norm/offset': _arr(g('z_norm.bias')),
+      's_to_z/weights': t(g('s_to_z.weight')),
+      's_to_z_transpose/weights': t(g('s_to_z_transpose.weight')),
+      's_to_z_prod_in1/weights': t(g('s_to_z_prod_in1.weight')),
+      's_to_z_prod_in2/weights': t(g('s_to_z_prod_in2.weight')),
+      's_to_z_prod_out/weights': t(g('s_to_z_prod_out.weight')),
+      'row_pool_attn/weights': t(g('row_attention_pooling.attn_proj.weight')),
+      'row_pool_out/weights': t(g('row_attention_pooling.out_proj.weight')),
+      'plddt_norm/scale': _arr(g('plddt_ln.weight')),
+      'plddt_norm/offset': _arr(g('plddt_ln.bias')),
+      'plddt_weight': _arr(g('plddt_weight')),          # (max_atoms_per_token, c_s, bins)
+      'resolved_norm/scale': _arr(g('resolved_ln.weight')),
+      'resolved_norm/offset': _arr(g('resolved_ln.bias')),
+      'resolved_weight': _arr(g('resolved_weight')),
+      'pae_norm/scale': _arr(g('pae_ln.weight')),
+      'pae_norm/offset': _arr(g('pae_ln.bias')),
+      'pae/weights': t(g('pae_head.weight')),
+      'pde_norm/scale': _arr(g('pde_ln.weight')),
+      'pde_norm/offset': _arr(g('pde_ln.bias')),
+      'pde/weights': t(g('pde_head.weight')),
+      # dead in the released checkpoint -- carried for coverage only
+      'unused_s_inputs_to_single/weights': t(g('s_inputs_to_single.weight')),
+      'unused_s_input_to_s/weights': t(g('s_input_to_s.weight')),
+      'unused_s_norm/scale': _arr(g('s_norm.weight')),
+      'unused_s_norm/offset': _arr(g('s_norm.bias')),
+  }
+  out.update(nest('folding_trunk',
+                  pair_only_stack(sd, prefix + '.folding_trunk', dims['n_conf'])))
+  return out
+
+
 def map_esmfold2_to_af3(sd, **overrides):
   """Everything converted so far: trunk + inputs embedder + diffusion module.
 
-  The confidence head and the ESM-C tower are not yet included.
+  Everything except the ESM-C tower, which is a separate artifact.
   """
   dims = derive_dims(sd)
   dims.update(overrides)
@@ -446,4 +507,5 @@ def map_esmfold2_to_af3(sd, **overrides):
                 atom_encoder(sd, 'inputs_embedder.atom_attention_encoder',
                              dims.get('n_input_atom', 3))))
   p.update(nest('diffusion', map_diffusion(sd, dims)))
+  p.update(nest('confidence', confidence_head(sd, dims)))
   return p
