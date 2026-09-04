@@ -53,18 +53,24 @@ Peak GiB, A10:
     opendde           2.82    3.78    5.31    7.43   13.57     OOM     OOM     OOM
     intellifold2      2.58    3.03    3.49    3.91    5.06    7.36   13.39     OOM
     boltz2            2.10    2.26    2.68    3.27    4.71    6.88   13.06     OOM
-    protenix2         2.01    2.24    2.47    2.70    3.66    4.86    8.69       -
-    chai1             1.39    1.53    1.83    2.04    3.00    4.25    7.93       -
+    protenix2         2.01    2.24    2.47    2.70    3.66    4.86    8.69   14.04
+    chai1             1.39    1.53    1.83    2.04    3.00    4.25    7.93   13.04
     openfold3         1.55    1.64    1.76    1.88    2.35    3.01    4.82    7.20
-    rosettafold3      1.56    1.64    1.76    1.88    2.34    2.97    4.83       -
-    openbind          1.56    1.64    1.76    1.88    2.35    3.01    4.82       -
+    rosettafold3      1.56    1.64    1.76    1.88    2.34    2.97    4.83    7.18
+    openbind          1.56    1.64    1.76    1.88    2.35    3.01    4.82    7.19
     alphafold3        1.23    1.31    1.43    1.55    2.02    2.68    4.50    6.89
 
 **Runtime does not predict footprint**, which is the reason to measure both.
 boltz2 is 2.3x FASTER than protenix2 at 512 tokens (41.2 s against 60.5 s) and
 uses 42% MORE memory (6.88 GiB against 4.86) -- so boltz2 OOMs at 1024 while
-protenix2, the slower model, keeps running. A runtime plot cannot tell you which
-model will fit on your card.
+protenix2, the slower model, keeps running at 14.04 GiB. A runtime plot cannot
+tell you which model will fit on your card.
+
+And it is not a near miss that boltz2 happened to lose: its footprint SCALES
+faster. boltz2 goes 6.88 -> 13.06 GiB from 512 to 768 (1.90x for a 1.5x length),
+where protenix2 goes 4.86 -> 8.69 -> 14.04 (1.79x then 1.62x). Extrapolating
+boltz2 to 1024 gives roughly 20 GiB against the ~22 usable here, so the OOM is
+the exponent, not luck.
 
 openfold3, openbind and rosettafold3 agree to ~0.02 GiB at every length, which
 is what three pair_channel=128 graphs with the same block counts should do; they
