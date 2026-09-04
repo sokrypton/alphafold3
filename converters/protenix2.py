@@ -448,9 +448,24 @@ def _af3_config():
   return model.Model.Config()
 
 
+def convert_protenix05_weights(checkpoint, output_dir):
+  """Convert Protenix's `protenix_base_default_v0.5.0` checkpoint (templateless)."""
+  return _convert_protenix(checkpoint, output_dir, 'protenix05')
+
+
 def convert_protenix1_weights(checkpoint, output_dir):
   """Convert Protenix's `protenix_base_default_v1.0.0` checkpoint (368 M)."""
   return _convert_protenix(checkpoint, output_dir, 'protenix1')
+
+
+def convert_protenix1_20250630_weights(checkpoint, output_dir):
+  """Convert Protenix's `protenix_base_20250630_v1.0.0` checkpoint.
+
+  Architecturally identical to protenix1 -- derive_dims reports the same 14
+  numbers for both -- so this exists only to pin the name, and hence the blob
+  filename, of a distinct set of weights.
+  """
+  return _convert_protenix(checkpoint, output_dir, 'protenix1_20250630')
 
 
 def convert_protenix_mini_weights(checkpoint, output_dir):

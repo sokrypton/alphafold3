@@ -39,6 +39,13 @@ MODELS = (
     # Protenix's v1 release (368 M). Stock AlphaFold 3 everywhere except one
     # width -- see PROTENIX1_SETTINGS.
     'protenix1',
+    # A later training run of the SAME graph as protenix1 -- derive_dims reports
+    # byte-identical dimensions -- so it is a weights-only variant.
+    'protenix1_20250630',
+    # Protenix v0.5.0 base: the same graph as v1 but TEMPLATELESS (the checkpoint
+    # carries zero template_embedder blocks), which is what made it the variant an
+    # earlier port reached for when the template widths were still unsolved.
+    'protenix05',
     # Protenix ships nine model types that differ only in counts and widths.
     # protenix2 is its flagship; these two are the small ones, and they are
     # genuinely small -- 16 and 8 pairformer blocks against 48, an 8-block
@@ -60,7 +67,8 @@ MODELS = (
 # lists and missed in a fifth -- which happened three times while mini was being
 # ported, each time surfacing only as a shape error or an uncovered-parameter
 # count, never as anything that named the cause.
-PROTENIX_FAMILY = ('protenix1', 'protenix2', 'protenix_mini', 'protenix_tiny')
+PROTENIX_FAMILY = ('protenix05', 'protenix1', 'protenix1_20250630',
+                   'protenix2', 'protenix_mini', 'protenix_tiny')
 
 
 # Models whose forward graph follows OpenFold3's conventions rather than stock

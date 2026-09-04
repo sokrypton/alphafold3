@@ -24,11 +24,21 @@ SOURCES = {
         url='https://openfold3-data.s3.amazonaws.com/openfold3-parameters/'
             'of3-ob-2025-06-30-174k.pt',
         file='of3-ob-2025-06-30-174k.pt'),
+    # Protenix v0.5.0 base, templateless.
+    'protenix05': dict(
+        url='https://protenix.tos-cn-beijing.volces.com/checkpoint/'
+            'protenix_base_default_v0.5.0.pt',
+        file='protenix_base_default_v0.5.0.pt'),
     # Protenix-v1, the 368 M release that preceded v2.
     'protenix1': dict(
         url='https://protenix.tos-cn-beijing.volces.com/checkpoint/'
             'protenix_base_default_v1.0.0.pt',
         file='protenix_base_default_v1.0.0.pt'),
+    # A later training run of the same graph as protenix1.
+    'protenix1_20250630': dict(
+        url='https://protenix.tos-cn-beijing.volces.com/checkpoint/'
+            'protenix_base_20250630_v1.0.0.pt',
+        file='protenix_base_20250630_v1.0.0.pt'),
     # Protenix's small model types, from the same publisher as protenix-v2.
     'protenix_mini': dict(
         url='https://protenix.tos-cn-beijing.volces.com/checkpoint/protenix_mini_default_v0.5.0.pt',

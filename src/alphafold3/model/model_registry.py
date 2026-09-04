@@ -253,6 +253,22 @@ def _widen_protenix1(cfg):
   _apply_settings(cfg, PROTENIX1_SETTINGS, 'protenix1')
 
 
+def _widen_protenix1_20250630(cfg):
+  # same graph as protenix1, different training run
+  _apply_settings(cfg, PROTENIX1_SETTINGS, 'protenix1_20250630')
+
+
+# Protenix v0.5.0 base. Stock AlphaFold 3 throughout -- v1's template widths do
+# not apply because there is no template stack to widen.
+PROTENIX05_SETTINGS = (
+    ('evoformer.template.template_stack.num_layer', 0),
+)
+
+
+def _widen_protenix05(cfg):
+  _apply_settings(cfg, PROTENIX05_SETTINGS, 'protenix05')
+
+
 def _widen_protenix_mini(cfg):
   _apply_settings(cfg, PROTENIX_MINI_SETTINGS, 'protenix_mini')
 
@@ -394,7 +410,9 @@ _WIDENERS = {
     'opendde': _widen_opendde,
     'boltz2': _widen_boltz2,
     'protenix2': _widen_protenix2,
+    'protenix05': _widen_protenix05,
     'protenix1': _widen_protenix1,
+    'protenix1_20250630': _widen_protenix1_20250630,
     'protenix_mini': _widen_protenix_mini,
     'protenix_tiny': _widen_protenix_tiny,
     'rosettafold3': _widen_rosettafold3,
@@ -599,9 +617,15 @@ MODEL_SPECS = {
     # named by model, so a boolean here would be the one thing you had to
     # remember. The two share a converter, which picks the mapping off the
     # checkpoint (converters/openfold3.py `is_openbind_checkpoint`).
+    'protenix05': ModelSpec('protenix05',
+                            weights_licence='the Apache License, Version 2.0',
+                            weights_source='https://github.com/bytedance/Protenix'),
     'protenix1': ModelSpec('protenix1',
                            weights_licence='the Apache License, Version 2.0',
                            weights_source='https://github.com/bytedance/Protenix'),
+    'protenix1_20250630': ModelSpec('protenix1_20250630',
+                                    weights_licence='the Apache License, Version 2.0',
+                                    weights_source='https://github.com/bytedance/Protenix'),
     'protenix_mini': ModelSpec('protenix_mini',
                                weights_licence='the Apache License, Version 2.0',
                                weights_source='https://github.com/bytedance/Protenix'),
