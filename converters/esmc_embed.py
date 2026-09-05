@@ -53,11 +53,40 @@ def _rope(x, pos, base=10000.0):
   return jnp.concatenate([x1 * c - x2 * s, x1 * s + x2 * c], -1)
 
 
+def _block(x, w, pos, heads, head_dim, scale):
+  """One ESM-C transformer block, with int8 weights dequantised in place."""
+  deq = lambda k: (w[k].astype(jnp.float32) * w[k + '__q_scale']
+                   if k + '__q_scale' in w else w[k].astype(jnp.float32))
+  n_len = x.shape[0]
+  h = _layer_norm(x, w['attn_norm/scale'], w['attn_norm/offset']) @ deq('qkv/weights')
+  q, k, v = jnp.split(h, 3, -1)
+  q = _layer_norm(q, w['q_norm/scale'])       # over the FULL d_model, not per head
+  k = _layer_norm(k, w['k_norm/scale'])
+  q = _rope(q.reshape(n_len, heads, head_dim), pos)
+  k = _rope(k.reshape(n_len, heads, head_dim), pos)
+  v = v.reshape(n_len, heads, head_dim)
+  logits = jnp.einsum('ihd,jhd->hij', q, k) * head_dim ** -0.5
+  ctx = jnp.einsum('hij,jhd->ihd', jax.nn.softmax(logits, -1), v).reshape(n_len, -1)
+  x = x + (ctx @ deq('attn_out/weights')) / scale
+  h = _layer_norm(x, w['ffn_norm/scale'], w['ffn_norm/offset']) @ deq('fc1/weights')
+  n = h.shape[-1] // 2
+  return x + ((jax.nn.silu(h[..., :n]) * h[..., n:]) @ deq('fc2/weights')) / scale
+
+
 def forward(ids, p, dims):
   """-> (n_layers + 1, L, d_model) hidden states, BOS/EOS still attached.
 
-  ESMFold2 consumes ALL 81 -- embedding plus 80 blocks -- and mixes them with a
-  learned softmax, so none can be skipped. The LAST state is post the stack's
+  A lax.scan over the blocks, NOT a python loop. The loop traced all 80 blocks
+  into one graph and moved each block's weights to the device as it went, so the
+  whole 25 GB tower ended up resident and a 23 GB card ran out on the last few
+  layers -- the native torch implementation never hits this because it executes
+  eagerly and frees as it goes. Scanning compiles ONE block body and keeps the
+  weights as the scanned axis, which is also why they stay int8 on the device
+  and are dequantised inside the body: 6.35 GB resident instead of 25.4 GB. That
+  is the real reason for int8 here; the download size is a side benefit.
+
+  ESMFold2 consumes ALL 81 states -- embedding plus 80 blocks -- and mixes them
+  with a learned softmax, so none can be skipped. The LAST is post the stack's
   final LayerNorm while the other 80 are the raw residual stream; returning the
   pre-norm value there reads corr 0.909 against native on layer 80 where every
   other layer is >= 0.9998.
@@ -66,52 +95,64 @@ def forward(ids, p, dims):
   n_len = ids.shape[0]
   heads, head_dim = dims['n_heads'], dims['d_model'] // dims['n_heads']
   scale = dims['residual_scale']
-  x = jnp.asarray(p['embed/weights'])[ids]
-  states = [x]
+  x = jnp.asarray(p['embed/weights']).astype(jnp.float32)[ids]
   pos = jnp.arange(n_len, dtype=jnp.float32)
-  blocks = {k[len('blocks/'):]: v for k, v in p.items() if k.startswith('blocks/')}
-  for i in range(dims['n_layers']):
-    b = {k: jnp.asarray(v[i]) for k, v in blocks.items()}
-    h = _layer_norm(x, b['attn_norm/scale'], b['attn_norm/offset']) @ b['qkv/weights']
-    q, k, v = jnp.split(h, 3, -1)
-    q = _layer_norm(q, b['q_norm/scale'])       # over the FULL d_model, not per head
-    k = _layer_norm(k, b['k_norm/scale'])
-    q = _rope(q.reshape(n_len, heads, head_dim), pos)
-    k = _rope(k.reshape(n_len, heads, head_dim), pos)
-    v = v.reshape(n_len, heads, head_dim)
-    logits = jnp.einsum('ihd,jhd->hij', q, k) * head_dim ** -0.5
-    ctx = jnp.einsum('hij,jhd->ihd', jax.nn.softmax(logits, -1), v).reshape(n_len, -1)
-    x = x + (ctx @ b['attn_out/weights']) / scale
-    h = _layer_norm(x, b['ffn_norm/scale'], b['ffn_norm/offset']) @ b['fc1/weights']
-    n = h.shape[-1] // 2
-    x = x + ((jax.nn.silu(h[..., :n]) * h[..., n:]) @ b['fc2/weights']) / scale
-    states.append(x)
-  states[-1] = _layer_norm(states[-1], p['final_norm/scale'])
-  return jnp.stack(states)
+  xs = {k[len('blocks/'):]: jnp.asarray(v)
+        for k, v in p.items() if k.startswith('blocks/')}
+
+  def body(carry, w):
+    out = _block(carry, w, pos, heads, head_dim, scale)
+    return out, out
+
+  x, states = jax.lax.scan(body, x, xs)
+  states = jnp.concatenate([jnp.asarray(p['embed/weights']).astype(jnp.float32)[ids][None],
+                            states], axis=0)
+  return states.at[-1].set(_layer_norm(states[-1], p['final_norm/scale']))
 
 
 def load(model_dir='~/ported/esmc'):
-  """-> (params dict keyed 'embed/weights' etc, dims). Dequantises int8."""
-  from alphafold3.model import params as afp
-  raw = afp.get_model_haiku_params(model_dir=os.path.expanduser(str(model_dir)))
+  """-> (params, dims). Weights stay INT8; the scan body dequantises per block.
+
+  Deliberately not `params.get_model_haiku_params`, which dequantises on load
+  and would put 25.4 GB of float32 in host memory on the way to a card that
+  holds 23.
+  """
   import collections
   import re
-  p = {}
+  from converters.common import read_blob
+
+  path = os.path.join(os.path.expanduser(str(model_dir)), 'esmc.bin.zst')
   per_block = collections.defaultdict(dict)
-  for scope, leaves in raw.items():
+  p = {}
+  for scope, name, arr in read_blob(path):
     if scope.startswith('__meta__'):
       continue
     sub = scope[len('esmc/'):] if scope.startswith('esmc/') else scope
-    # the blocks are stored one record per layer (see split_stacked_blocks);
-    # restack them on the leading axis, which is what forward() indexes.
     m = re.match(r'(blocks/.+)/(\d+)$', sub)
-    for name, arr in leaves.items():
-      if m:
-        per_block['%s/%s' % (m.group(1), name)][int(m.group(2))] = arr
-      else:
-        p['%s/%s' % (sub, name) if sub else name] = arr
+    if m:
+      per_block['%s/%s' % (m.group(1), name)][int(m.group(2))] = arr
+    else:
+      p['%s/%s' % (sub, name) if sub else name] = arr
   for key, layers in per_block.items():
     p[key] = np.stack([layers[i] for i in sorted(layers)])
+  # Only the BLOCK weights stay int8, because only they are scanned and only
+  # they are big enough to matter. Everything else -- notably embed/weights, the
+  # input to the whole stack -- is dequantised here. Leaving the embedding as
+  # raw int8 codes silently scaled the tower's input by its per-channel scales
+  # and read corr 0.19 against native, with layer 0 already at 0.89.
+  from converters.quantise import SCALE_SUFFIX, dequantise_int8
+  for key, arr in list(p.items()):
+    if key.endswith(SCALE_SUFFIX):
+      continue
+    scale_key = key + SCALE_SUFFIX
+    if key.startswith('blocks/'):
+      if arr.dtype != np.int8:
+        p[key] = np.asarray(arr, np.float32)
+      continue
+    if scale_key in p:
+      p[key] = dequantise_int8(np.asarray(arr), np.asarray(p.pop(scale_key)))
+    else:
+      p[key] = np.asarray(arr, np.float32)
   n_layers = p['blocks/qkv/weights'].shape[0]
   d_model = p['embed/weights'].shape[1]
   dims = dict(n_layers=n_layers, d_model=d_model,
