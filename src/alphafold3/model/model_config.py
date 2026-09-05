@@ -35,7 +35,7 @@ MODELS = (
     'openfold3',
     # OpenFold3's v0.5.0 release. Its own name because it diverges from
     # `openfold3` in a forward convention, not just in weights.
-    'openbind',
+    'openbind0',
     # Protenix's v1 release (368 M). Stock AlphaFold 3 everywhere except one
     # width -- see PROTENIX1_SETTINGS.
     'protenix1',
@@ -87,7 +87,7 @@ PROTENIX_FAMILY = ('protenix05', 'protenix1', 'protenix1_20250630',
 # swapped column-attention pair bias (an explicit list at modules.py, where the
 # open question about openbind's direction is recorded).
 OPENFOLD3_LINEAGE = (
-    'openfold3', 'openbind', 'opendde', 'boltz2', 'rosettafold3',
+    'openfold3', 'openbind0', 'opendde', 'boltz2', 'rosettafold3',
 ) + PROTENIX_FAMILY
 
 
@@ -106,7 +106,7 @@ OPENFOLD3_LINEAGE = (
 # The checkpoint states which it is, so nothing has to be remembered: preview-2
 # carries 24 `blocks.N.attention_pair_bias.layer_norm_z.weight`, openbind carries
 # a single `diffusion_transformer.layer_norm_z.weight` (converters/openfold3.py
-# `is_openbind_checkpoint`).
+# `of3_release`).
 PER_BLOCK_PAIR_LAYER_NORM = (
     'openfold3', 'opendde', 'boltz2', 'rosettafold3',
 ) + PROTENIX_FAMILY

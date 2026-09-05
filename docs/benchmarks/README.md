@@ -18,11 +18,11 @@ alphabet) so both sides fold the same input.
 ## Provenance of these numbers (2026-09-04)
 
 The A10 sweep (`sweep_a10.tsv`) was re-measured after the parameter fixes of
-2026-09-04 and now includes `openbind`. Every model landed within +/-0.025 s of
+2026-09-04 and now includes `openbind0`. Every model landed within +/-0.025 s of
 its previous 64-token figure, so those fixes cost no measurable speed.
 
 **The A100 curves are OLDER.** `sweep_a100.tsv` predates that re-measurement and
-has no `openbind` row, so `runtime_all_A100.png` shows eight ports where the A10
+has no `openbind0` row, so `runtime_all_A100.png` shows eight ports where the A10
 plot shows nine. It is a different day's data on a different machine; do not
 read an A10-vs-A100 difference off these two plots as if it were controlled.
 
@@ -34,7 +34,7 @@ sweep recorded the same failure at the same length.
 Three models have no native torch ratio. `alphafold3` has no torch native at all
 -- it IS the JAX one, so that comparison is port fidelity, not speed.
 `intellifold2`'s two harnesses (torch and jax) are written but have never been
-run. `openbind` needs openfold3>=0.5, which the `~/of3_extra` install predates.
+run. `openbind0` needs openfold3>=0.5, which the `~/of3_extra` install predates.
 
 ## Results
 
@@ -57,7 +57,7 @@ Peak GiB, A10:
     chai1             1.39    1.53    1.83    2.04    3.00    4.25    7.93   13.04
     openfold3         1.55    1.64    1.76    1.88    2.35    3.01    4.82    7.20
     rosettafold3      1.56    1.64    1.76    1.88    2.34    2.97    4.83    7.18
-    openbind          1.56    1.64    1.76    1.88    2.35    3.01    4.82    7.19
+    openbind0         1.56    1.64    1.76    1.88    2.35    3.01    4.82    7.19
     alphafold3        1.23    1.31    1.43    1.55    2.02    2.68    4.50    6.89
 
 **Runtime does not predict footprint**, which is the reason to measure both.
@@ -72,7 +72,7 @@ where protenix2 goes 4.86 -> 8.69 -> 14.04 (1.79x then 1.62x). Extrapolating
 boltz2 to 1024 gives roughly 20 GiB against the ~22 usable here, so the OOM is
 the exponent, not luck.
 
-openfold3, openbind and rosettafold3 agree to ~0.02 GiB at every length, which
+openfold3, openbind0 and rosettafold3 agree to ~0.02 GiB at every length, which
 is what three pair_channel=128 graphs with the same block counts should do; they
 are drawn with different dashes because otherwise two of the three vanish under
 the third.

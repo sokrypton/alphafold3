@@ -76,11 +76,50 @@ def lm_input_ids(token_ids):
   return np.concatenate([[BOS], np.asarray(token_ids, np.int64), [EOS]])
 
 
-def convert_esmc_weights(checkpoint, output_dir):
-  """Convert biohub/ESMC-6B (sharded safetensors dir) to an AF3-haiku blob."""
+def convert_esmc_weights(checkpoint, output_dir, scheme='int8'):
+  """Convert biohub/ESMC-6B (sharded safetensors dir) to an AF3-haiku blob.
+
+  int8 by default, and not only to save bytes: float32 CANNOT be written at all.
+  The record header packs the payload length as a signed 32-bit int and the
+  tower's fused fc1 stack is a single 5.27 GiB tensor, so an fp32 write dies
+  partway through with a struct.error. int8 puts it at 1.32 GiB, and the whole
+  tower at ~6.4 GB -- which also fits a 23 GB GPU, where the fp32 tower never
+  did (the ESM-C gate had been running on CPU for exactly that reason).
+
+  Quantisation happens HERE rather than through converters.quantise's
+  requantise_blob, which reads an existing blob: there is no fp32 blob to read.
+  """
   from pathlib import Path
+  from . import quantise
   from .esmfold2 import load_esmfold2_checkpoint
   sd = load_esmfold2_checkpoint(checkpoint)
+  dims = derive_dims(sd)
   params = {}
-  common.populate(params, 'esmc', map_esmc_to_af3(sd))
-  return Path(common.write_params_blob(output_dir, 'esmc.bin.zst', params, add_meta=True))
+  common.populate(params, 'esmc', map_esmc_to_af3(sd, dims))
+  del sd
+  records = split_stacked_blocks(common.tree_to_records(params), dims['n_layers'])
+  del params
+  records = quantise.quantise_records(records, scheme)
+  return Path(common.write_records_blob(
+      Path(output_dir) / 'esmc.bin.zst', records, identifier='esmc'))
+
+
+def split_stacked_blocks(records, n_layers):
+  """Write the 80 transformer blocks one record each, not one stacked array.
+
+  The stacked fc1 weight is 17.8 GB in float32 and still 4.4 GB in int8, over
+  the 2 GiB a record header can describe (`'<5i'`, a signed 32-bit length). ESM-C
+  is a separate graph with its own loader, so its blob layout is ours to choose:
+  splitting on the layer axis puts the largest record at ~56 MB and costs
+  nothing, because esmc_embed.load restacks them. It also makes the int8 scales
+  PER BLOCK rather than shared across all 80, which is strictly more accurate.
+  """
+  out = []
+  for scope, name, arr in records:
+    arr = np.asarray(arr)
+    if '/blocks/' in scope + '/' and arr.ndim >= 1 and arr.shape[0] == n_layers:
+      for i in range(n_layers):
+        out.append(('%s/%d' % (scope, i), name, arr[i]))
+    else:
+      out.append((scope, name, arr))
+  return out

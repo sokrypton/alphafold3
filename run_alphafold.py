@@ -1196,7 +1196,7 @@ def main(_):
     os.makedirs(_jax_cache, exist_ok=True)
     jax.config.update('jax_compilation_cache_dir', _jax_cache)
     # Deliberately NOT lowering jax_persistent_cache_min_{entry_size_bytes,
-    # compile_time_secs}. Tried on 6MRR/openbind: it grows the cache 3.5 -> 4.1 MB
+    # compile_time_secs}. Tried on 6MRR/openbind0: it grows the cache 3.5 -> 4.1 MB
     # and changes a warm start by 0.04 s (16.35 -> 16.31), because what the
     # defaults exclude is not where the time is.
     #

@@ -37,22 +37,42 @@ DIALECT_OPENFOLD3 = C.Dialect(
 )
 
 
-# ─── which OpenFold3 release is this? ────────────────────────────────────────
-# openbind (v0.5.0) runs ONE pair LayerNorm for the whole diffusion transformer;
-# preview-2 stores one per block. So the two releases are told apart by a tensor
-# that only one of them has, never by a version string or a filename -- the
-# artefact survives a rename, and a formula does not (the lesson of D36 in
+# ─── which OpenFold3-lineage release is this? ────────────────────────────────
+# OpenBind 0 (OpenFold3 v0.5.0) runs ONE pair LayerNorm for the whole diffusion
+# transformer; preview-2 stores one per block. So the releases are told apart by
+# a tensor that only one of them has, never by a version string or a filename --
+# the artefact survives a rename, and a formula does not (the lesson of D36 in
 # ChoongHwanLee's port, credited in the README).
 #
-# Measured on the real checkpoints: preview-2 has 4936 tensors, openbind 4890 --
-# 24 per-block LayerNorms gone and 1 shared one added, in each of the two copies
-# the file carries. Nothing else differs by name.
-_OPENBIND_SHARED_PAIR_NORM = 'diffusion_module.diffusion_transformer.layer_norm_z.weight'
+# Measured on the real checkpoints: preview-2 has 4936 tensors, OpenBind 0 has
+# 4890 -- 24 per-block LayerNorms gone and 1 shared one added, in each of the two
+# copies the file carries. Nothing else differs by name.
+_SHARED_PAIR_NORM = 'diffusion_module.diffusion_transformer.layer_norm_z.weight'
 
 
-def is_openbind_checkpoint(sd: dict) -> bool:
-  """True for an OpenFold3 >= 0.5.0 (openbind) checkpoint, False for preview-2."""
-  return _has(sd, _OPENBIND_SHARED_PAIR_NORM)
+def has_shared_pair_norm(sd: dict) -> bool:
+  """The forward CONVENTION the converter branches on, not a release name.
+
+  Named for what it detects so that a future OpenBind release which keeps this
+  convention needs no change here -- only a row in `_RELEASES`.
+  """
+  return _has(sd, _SHARED_PAIR_NORM)
+
+
+# Checkpoint signature -> model name. Ordered most-specific first; a new OpenBind
+# release adds a row (and, if it changes a convention, a detector beside
+# has_shared_pair_norm) rather than editing a boolean.
+_RELEASES = (
+    ('openbind0', has_shared_pair_norm),
+)
+
+
+def of3_release(sd: dict) -> str:
+  """Which release this checkpoint is, as a MODEL NAME."""
+  for name, matches in _RELEASES:
+    if matches(sd):
+      return name
+  return 'openfold3'
 
 
 # ─── OF3→AF3 aatype remap ─────────────────────────────────────────────────────
@@ -774,24 +794,24 @@ def map_diffusion_head(sd: dict, params: dict, *,
     tr_base = f'{dm}.diffusion_transformer'
     tr_name = 'transformer'
     tr_scope = f'{scope}/{tr_name}'
-    openbind = is_openbind_checkpoint(sd)
+    shared_pair_norm = has_shared_pair_norm(sd)
     tr_stacked = _stack_main_transformer(sd, tr_base, tr_name, n_diff_blocks,
                                          n_super_blocks, diff_H, diff_D,
-                                         per_block_pair_bias=not openbind)
+                                         per_block_pair_bias=not shared_pair_norm)
     # The stack SCOPE NAME differs between the two releases, because the graph
     # builds a different loop for each. AF3's path threads per-super-block pair
     # logits into the inner stack (layer_stack(..., with_per_layer_inputs=True)),
-    # so openbind's blocks live under __layer_stack_with_per_layer twice; the
+    # so OpenBind 0's blocks live under __layer_stack_with_per_layer twice; the
     # per-block-LN path has nothing to thread and uses __layer_stack_no_per_layer.
     # Getting this wrong is not a crash -- the blob simply misses every block
     # parameter and the manifest reports 20 uncovered, which is how it was caught.
-    _stack = ('__layer_stack_with_per_layer' if openbind
+    _stack = ('__layer_stack_with_per_layer' if shared_pair_norm
               else '__layer_stack_no_per_layer')
     tr_inner = f'{tr_scope}/{_stack}/{_stack}'
     _populate_scope(params, tr_inner, tr_stacked)
 
-    if openbind:
-        # openbind runs the pair LayerNorm ONCE for the whole stack, which is
+    if shared_pair_norm:
+        # OpenBind 0 runs the pair LayerNorm ONCE for the whole stack, which is
         # AlphaFold 3's own arrangement, so the two tensors land in AF3's own
         # scopes rather than being stacked into every block:
         #
@@ -916,8 +936,8 @@ def save_af3_params(params: dict[str, dict[str, np.ndarray]], output_dir: Path |
 def _convert_of3(checkpoint, output_dir, model_name, use_ema=True):
     """Shared body for both OpenFold3 releases.
 
-    ONE converter, because preview-2 and openbind differ in exactly one family of
-    tensors and share every other convention. It refuses a mismatch rather than
+    ONE converter, because preview-2 and OpenBind 0 differ in exactly one family
+    of tensors and share every other convention. It refuses a mismatch rather than
     quietly producing a blob the graph will misread: the two releases need
     different forward branches (model_config.PER_BLOCK_PAIR_LAYER_NORM), so
     converting one under the other's name would load 24 per-block LayerNorms into
@@ -925,12 +945,12 @@ def _convert_of3(checkpoint, output_dir, model_name, use_ema=True):
     """
     import os
     sd = load_of3_checkpoint(os.path.expanduser(str(checkpoint)), use_ema=use_ema)
-    found = 'openbind' if is_openbind_checkpoint(sd) else 'openfold3'
+    found = of3_release(sd)
     if found != model_name:
         raise ValueError(
             f'--model {model_name} but this checkpoint is {found}. '
-            + ('openbind carries one shared '
-               f'{_OPENBIND_SHARED_PAIR_NORM!r}; preview-2 carries one per block. '
+            + (f'OpenBind carries one shared {_SHARED_PAIR_NORM!r}; '
+               'preview-2 carries one per block. '
                'Pass the other checkpoint, or the other --model.'))
     save_af3_params(map_openfold3_to_af3(sd), output_dir, model_name)
     return output_dir
@@ -946,6 +966,11 @@ def convert_openfold3_weights(checkpoint, output_dir, use_ema=True):
     return _convert_of3(checkpoint, output_dir, 'openfold3', use_ema)
 
 
-def convert_openbind_weights(checkpoint, output_dir, use_ema=True):
-    """Convert an OpenFold3 v0.5.0 (openbind) checkpoint."""
-    return _convert_of3(checkpoint, output_dir, 'openbind', use_ema)
+def convert_openbind0_weights(checkpoint, output_dir, use_ema=True):
+    """Convert an OpenBind 0 (OpenFold3 v0.5.0) checkpoint.
+
+    A later OpenBind release gets its own entry point beside this one, a row in
+    _RELEASES, and a MODEL_SPECS key -- the version is in the name precisely so
+    that adding one does not mean redefining what "openbind" refers to.
+    """
+    return _convert_of3(checkpoint, output_dir, 'openbind0', use_ema)

@@ -58,7 +58,7 @@ colour = {m: cmap(i % 10) for i, m in enumerate(sorted(mem))}
 # three are pair_channel=128 with the same block counts, so their footprints
 # agree to ~0.02 GiB. That is a result, not a plotting bug, but three curves
 # under one line reads as one curve, so vary the dash.
-STYLE = {'openfold3': '-', 'openbind': '--', 'rosettafold3': ':'}
+STYLE = {'openfold3': '-', 'openbind0': '--', 'rosettafold3': ':'}
 
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12.5, 4.8))
 for m in order:

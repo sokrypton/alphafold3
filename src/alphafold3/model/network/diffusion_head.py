@@ -256,7 +256,7 @@ class DiffusionHead(hk.Module):
       features_1d = target_feat
     else:
       features_1d = jnp.concatenate([single_embedding, target_feat], axis=-1)
-    if self.global_config.model in ('openfold3', 'openbind'):
+    if self.global_config.model in ('openfold3', 'openbind0'):
       # BOTH OpenFold3 releases: openbind changed the diffusion transformer's
       # pair LayerNorm, not the feature layout, so it keeps this 833-channel
       # convention. A new model in this lineage has to be added here explicitly;

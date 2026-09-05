@@ -20,7 +20,7 @@ SOURCES = {
     # OpenBind, OpenFold3 v0.5.0. A different bucket from preview-2 -- the one
     # their own setup_openfold.py uses (S3_BUCKET = "openfold3-data").
     # Upstream deprecates preview-2 as of this release.
-    'openbind': dict(
+    'openbind0': dict(
         url='https://openfold3-data.s3.amazonaws.com/openfold3-parameters/'
             'of3-ob-2025-06-30-174k.pt',
         file='of3-ob-2025-06-30-174k.pt'),

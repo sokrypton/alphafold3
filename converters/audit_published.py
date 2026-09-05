@@ -23,8 +23,15 @@ import os
 import sys
 
 
+def _model_names():
+  from alphafold3.model import model_registry
+  return set(model_registry.MODEL_SPECS) | set(model_registry.ALIASES)
+
+
 def audit(root, do_apply=False):
   from converters import shapes
+  global _MODEL_NAMES
+  _MODEL_NAMES = _model_names()
   from converters.common import read_blob
   rows = []
   for m in sorted(os.listdir(root)):
@@ -32,6 +39,16 @@ def audit(root, do_apply=False):
     blob = os.path.join(d, '%s.bin.zst' % m)
     man = os.path.join(d, '%s.shapes.json' % m)
     if not os.path.isdir(d) or not os.path.exists(blob):
+      continue
+    if m not in _MODEL_NAMES:
+      # ESM-C is a weights artifact but NOT an AF3 model: it is the separate
+      # graph ESMFold2 conditions on, with its own loader and its own blob
+      # layout (one record per transformer block). It has no ModelSpec, no
+      # canonical batch and no shape manifest, so every column here would be a
+      # category error -- report it and leave it out of the verdict.
+      rows.append(dict(model=m, records=None, sorted=None, missing=None,
+                       stamp='not an AF3 model',
+                       sha=hashlib.sha256(open(blob, 'rb').read()).hexdigest()[:16]))
       continue
     recs = [(s, n) for s, n, _ in read_blob(blob) if s != '__meta__']
     row = dict(model=m, records=len(recs), sorted=recs == sorted(recs),
@@ -99,6 +116,10 @@ def main(argv=None):
                                           'stamp', 'sha256')
   print(hdr)
   for r in rows:
+    if r['records'] is None:
+      print('%-20s %-8s %-7s %-8s %-9s %s' % (r['model'], '-', '-', '-',
+                                              r['stamp'], r['sha']))
+      continue
     print('%-20s %-8d %-7s %-8d %-9s %s' % (r['model'], r['records'], r['sorted'],
                                             r['missing'], r['stamp'], r['sha']))
     if a.apply and r.get('applies') is not True:
@@ -109,8 +130,9 @@ def main(argv=None):
   # looked at the manifest, which is a converter-vs-blob check and cannot see
   # what the GRAPH asks for.
   bad = [r['model'] for r in rows
-         if r['missing'] > 0 or not r['sorted']
-         or (a.apply and r.get('applies') is not True)]
+         if r['records'] is not None
+         and (r['missing'] > 0 or not r['sorted']
+         or (a.apply and r.get('applies') is not True))]
   print('\nNOT SAFE TO PUBLISH: %s' % (bad or 'none'))
   return 1 if bad else 0
 

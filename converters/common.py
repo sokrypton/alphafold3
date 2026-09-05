@@ -51,6 +51,43 @@ def write_params_blob(output_dir, filename, params, *, add_meta=True,
   return out_path
 
 
+def write_records_blob(out_path, records, *, level=10, identifier=None):
+  """Write (scope, name, array) records verbatim -- no dtype coercion.
+
+  write_params_blob casts everything to float32, which is right for a converted
+  AF3 model but cannot express a QUANTISED blob, and cannot write ESM-C at all:
+  the record header packs the payload length as a signed 32-bit int and the
+  tower's fused fc1 stack is one 5.27 GiB tensor. Quantising to int8 during
+  conversion brings every record under the limit and never materialises the
+  float32 blob that could not be written in the first place.
+  """
+  from alphafold3.model.params import encode_record
+  out_path = os.path.expanduser(str(out_path))
+  os.makedirs(os.path.dirname(out_path), exist_ok=True)
+  with zstandard.ZstdCompressor(level=level).stream_writer(open(out_path, 'wb')) as comp:
+    if identifier is not None:
+      ident = np.zeros(64, dtype=np.uint8)
+      name = str(identifier).encode()[:64]
+      ident[:len(name)] = np.frombuffer(name, dtype=np.uint8)
+      comp.write(encode_record('__meta__', '__identifier__', ident))
+    for scope, name, arr in records:
+      arr = np.asarray(arr)
+      if arr.nbytes >= 2 ** 31:
+        raise ValueError(
+            '%s/%s is %.2f GiB; a record header packs its length as a SIGNED '
+            '32-bit int, so 2 GiB is the ceiling. Split the array (see '
+            'converters.esmc.split_stacked_blocks) or store it smaller.'
+            % (scope, name, arr.nbytes / 2 ** 30))
+      comp.write(encode_record(scope, name, arr))
+  return out_path
+
+
+def tree_to_records(params):
+  """{scope: {name: array}} -> sorted (scope, name, array) records."""
+  return [(scope, name, params[scope][name])
+          for scope in sorted(params) for name in sorted(params[scope])]
+
+
 def fold_element_index_shift(w):
   """Fold a 0-indexed-element convention into the embedding rows.
 

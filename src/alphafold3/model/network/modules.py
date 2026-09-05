@@ -308,7 +308,7 @@ class GridSelfAttention(hk.Module):
     # TriangleAttention (end-node) computes to_b from the NON-transposed pair and does
     # NOT transpose the bias (it transposes only the pair before attention), so it is
     # excluded from the list below.
-    # 'openbind' (OpenFold3 >= 0.5.0) is deliberately ABSENT, following AF3's own
+    # 'openbind0' (OpenFold3 >= 0.5.0) is deliberately ABSENT, following AF3's own
     # Algorithm 15 -- and this is the one openbind convention still taken on
     # reading rather than measurement. Upstream made the end-node transposition
     # explicit in v0.5.0 (TriangularAttention gained `transpose_bias`, passed True

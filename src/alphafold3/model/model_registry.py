@@ -651,7 +651,7 @@ MODEL_SPECS = {
     # differs in a forward convention, and every other divergence in this file is
     # named by model, so a boolean here would be the one thing you had to
     # remember. The two share a converter, which picks the mapping off the
-    # checkpoint (converters/openfold3.py `is_openbind_checkpoint`).
+    # checkpoint (converters/openfold3.py `of3_release`).
     'protenix05': ModelSpec('protenix05',
                             weights_licence='the Apache License, Version 2.0',
                             weights_source='https://github.com/bytedance/Protenix'),
@@ -667,8 +667,8 @@ MODEL_SPECS = {
     'protenix_tiny': ModelSpec('protenix_tiny',
                                weights_licence='the Apache License, Version 2.0',
                                weights_source='https://github.com/bytedance/Protenix'),
-    'openbind': ModelSpec('openbind', weights_licence='the Apache License, Version 2.0',
-                          weights_source='https://github.com/aqlaboratory/openfold-3'),
+    'openbind0': ModelSpec('openbind0', weights_licence='the Apache License, Version 2.0',
+                           weights_source='https://github.com/aqlaboratory/openfold-3'),
     # IntelliFold-v2: stock-AF3 module tree (deliberately NOT in
     # OPENFOLD3_LINEAGE -- its converter emits stock-AF3 haiku names) at the
     # "full_fat" widened channels.
@@ -704,6 +704,12 @@ ALIASES = {
     'protenix': 'protenix2',
     'rf3': 'rosettafold3',
     'chai': 'chai1',
+    # OpenBind's own release is called "OpenBind 0"
+    # (openbind.uk/news/blog-openbind-0-advancing-open-molecular-structure-prediction),
+    # so the model key carries the version and leaves room for the next one.
+    # The unversioned name stays an alias: it is what the published weights file
+    # is still called, and what earlier runs and notes refer to.
+    'openbind': 'openbind0',
 }
 
 

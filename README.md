@@ -42,7 +42,7 @@ shapes, sampler constants and input conventions are used.
 |---|---|---|
 | `alphafold3` | AlphaFold 3 (Google DeepMind) | request from DeepMind |
 | `openfold3` | [OpenFold3 preview-2](https://github.com/aqlaboratory/openfold3) (AlQuraishi Lab) | Apache 2.0 |
-| `openbind` | [OpenFold3 v0.5.0 "OpenBind"](https://github.com/aqlaboratory/openfold-3/releases/tag/v0.5.0) (AlQuraishi Lab) | Apache 2.0 |
+| `openbind0` | [OpenFold3 v0.5.0 "OpenBind"](https://github.com/aqlaboratory/openfold-3/releases/tag/v0.5.0) (AlQuraishi Lab) | Apache 2.0 |
 | `intellifold2` | [IntelliFold-v2](https://huggingface.co/intelligenAI/intellifold) (IntelligenAI) | see upstream |
 | `opendde` | [OpenDDE](https://huggingface.co/aurekaresearch/OpenDDE) (Aureka Research) | see upstream |
 | `boltz2` | [Boltz-2](https://github.com/jwohlwend/boltz) | MIT |
@@ -82,7 +82,7 @@ with stereochemistry unchanged.
 | `protenix2` | 1.33 GB | 0.19 GB |
 | `rosettafold3` | 1.36 GB | 0.27 GB |
 | `openfold3` | 1.37 GB | 0.26 GB |
-| `openbind` | 1.31 GB | 0.27 GB |
+| `openbind0` | 1.31 GB | 0.27 GB |
 | `intellifold2` | 1.77 GB | 0.63 GB |
 | `boltz2` | 1.88 GB | 0.38 GB |
 | `opendde` | 2.47 GB | 0.35 GB |
@@ -316,11 +316,11 @@ Beyond them, three whose code this borrows from directly:
     scored as passing. Independent agreement on the rest of the Protenix config
     is the strongest evidence either port has.
 
-*   **[juliabuhmann](https://github.com/juliabuhmann)** — the openbind port
+*   **[juliabuhmann](https://github.com/juliabuhmann)** — the OpenBind port
     ([PR #6](https://github.com/sokrypton/alphafold3/pull/6)). She found that
     OpenFold3's v0.5.0 weights revert two of the deviations this code compensates
     for, worked out which, and built the one-key checkpoint detection that tells
-    the two releases apart without a version string. `--model openbind` is her
+    the two releases apart without a version string. `--model openbind0` is her
     work, re-expressed for this branch's per-model registry.
 
 *   **[Milot Mirdita](https://github.com/milot-mirdita)** —
