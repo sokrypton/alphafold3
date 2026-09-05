@@ -854,3 +854,49 @@ def af3_diffusion_conditioning(sd, prefix):
     out.update(nest('single_transition_%d' % i,
                     common.transition(sd, '%s.s_transitions.%d' % (prefix, i), d)))
   return out
+
+
+# ---------------------------------------------------------------------------
+# full AF3-scope conversion
+# ---------------------------------------------------------------------------
+
+ESM_RESTYPE_OFFSET = 2          # ESMFold2 reserves classes 0 and 1
+
+
+def _remap_restype_block(w, n_af3):
+  """ESMFold2's 33-class residue block -> AF3's n_af3 classes.
+
+  Both order residues the same way -- ALA, ARG, ASN, ASP, ... , VAL, UNK, then
+  nucleic -- but ESMFold2 reserves two leading classes, so the whole block is
+  shifted by two and the remap is a SLICE rather than a permutation. Verified on
+  6MRR, whose res_type values run 3..21, i.e. inside the shifted protein range.
+  """
+  return w[ESM_RESTYPE_OFFSET:ESM_RESTYPE_OFFSET + n_af3]
+
+
+def remap_s_inputs(w, c_atom=384, n_esm=33, n_af3=31):
+  """(451, out) -> (447, out): [atom | restype | profile | deletion] blockwise."""
+  atom = w[:c_atom]
+  rest = _remap_restype_block(w[c_atom:c_atom + n_esm], n_af3)
+  prof = _remap_restype_block(w[c_atom + n_esm:c_atom + 2 * n_esm], n_af3)
+  tail = w[c_atom + 2 * n_esm:]
+  return np.concatenate([atom, rest, prof, tail], axis=0)
+
+
+def remap_msa_feat(w, n_esm=33, gap_index=21):
+  """(35, out) -> (34, out): [one-hot | has_deletion | deletion_value].
+
+  Unlike s_inputs this is NOT a plain slice. AF3's MSA alphabet is
+  POLYMER_TYPES_ORDER_WITH_ALL_UNKS_AND_GAP -- 32 classes with a GAP at index 21,
+  between UNK and the nucleic acids -- and ESMFold2 has no gap class of its own.
+  So the shifted block supplies AF3's 0..20 and 22..31, and index 21 is a ZERO
+  row: a gap contributes nothing rather than aliasing onto a residue.
+
+  Getting this wrong would not raise -- 33 columns land in a 34-wide slot only if
+  something is inserted -- but every nucleic class would sit one slot low, which
+  is exactly the rf3 G/C swap that broke RNA while every protein gate passed.
+  """
+  block = w[ESM_RESTYPE_OFFSET:n_esm]                       # AF3 0..20, then 22..
+  head, tail = block[:gap_index], block[gap_index:]
+  gap = np.zeros((1,) + w.shape[1:], w.dtype)
+  return np.concatenate([head, gap, tail, w[n_esm:]], axis=0)
