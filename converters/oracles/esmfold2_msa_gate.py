@@ -96,6 +96,16 @@ def main():
   pairs = [(n - 1, xyz) for n, c, xyz in res if 1 <= n <= len(seq) and seq[n - 1] == c]
   sel = np.array([i for i, _ in pairs])
   nat = np.array([x for _, x in pairs])
+  # Refuse to score a bad alignment. Mapping model token j to auth_seq_id j+1
+  # only holds when the a3m query IS the deposited construct; for 1STP it is
+  # not, and the map kept 7 of 121 residues -- an RMSD over 7 atoms that looked
+  # like an ordinary number. This is the same class of error that once read
+  # 6.06 A on a good 5CAJ fold.
+  if len(sel) < 0.5 * len(seq):
+    raise SystemExit(
+        'only %d of %d residues aligned by auth number -- the a3m query and %s '
+        'are not the same construct, so any RMSD here is meaningless'
+        % (len(sel), len(seq), os.path.basename(cif)))
 
   model_dir = os.path.expanduser('~/ported/esmfold2')
   spec = model_registry.get('esmfold2')
