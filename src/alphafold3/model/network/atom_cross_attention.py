@@ -70,10 +70,11 @@ def _per_atom_conditioning(
   act += hm.Linear(c.per_atom_channels, name=f'{name}_embed_ref_element')(
       jax.nn.one_hot(batch.ref_structure.element, 128)
   )
-  # chai feeds the RAW charge; AF3 (and everyone else) feeds arcsinh(charge).
-  # Identical at charge 0, so a neutral-only test would never see it.
+  # chai and ESMFold2 feed the RAW charge; AF3 (and everyone else) feeds
+  # arcsinh(charge). Identical at charge 0, so a neutral-only test would never
+  # see it -- 6MRR has 17 charged atoms out of 574.
   charge = batch.ref_structure.charge
-  if global_config is not None and global_config.model != 'chai1':
+  if global_config is not None and global_config.model not in ('chai1', 'esmfold2'):
     charge = jnp.arcsinh(charge)
   act += hm.Linear(c.per_atom_channels, name=f'{name}_embed_ref_charge')(
       charge[:, :, None]
