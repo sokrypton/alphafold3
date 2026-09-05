@@ -646,12 +646,14 @@ def convert_esmfold2_weights(checkpoint, output_dir, model_name='esmfold2'):
   # are 40 MB against the blob's 800 and a fold that skips ESM-C never loads
   # them.
   lm = {k.replace('/', '.'): v for k, v in language_model_shim(sd).items()}
-  # ONE shim file for the family: every variant here rides the same ESM-C 6B
-  # tower, and the published name is esmfold2.lm.npz whichever variant fetched
-  # it (weights._COMPANIONS).
+  # PER MODEL, not per family. The variants share the ESM-C TOWER; they do NOT
+  # share the shim that turns its hidden states into a pair representation --
+  # each trains its own `language_model.*`. Feeding one variant another's shim
+  # reads corr 0.026 against native and folds 6MRR at 8.8 A where its own gives
+  # 0.96, which is exactly the mistake one shared filename invites.
   out = Path(os.path.expanduser(str(output_dir)))
   out.mkdir(parents=True, exist_ok=True)
-  np.savez(out / 'esmfold2.lm.npz', **lm)
+  np.savez(out / ('%s.lm.npz' % model_name), **lm)
   return Path(common.write_params_blob(output_dir, '%s.bin.zst' % model_name,
                                        params, add_meta=True))
 

@@ -64,8 +64,7 @@ def _download(url: str, dst: str, log=print) -> None:
 # 3.7 MB, and without it the ESM-C path raises on the first fold. The tower
 # ITSELF is fetched on demand by converters.esmc_embed, because it is 5.5 GB and
 # ESMFold2 also runs from an MSA.
-_COMPANIONS = {m: ('esmfold2.lm.npz',)
-               for m in model_config.ESMFOLD2_FAMILY}
+_COMPANIONS = {m: ('%s.lm.npz' % m,) for m in model_config.ESMFOLD2_FAMILY}
 
 
 def ensure_weights(model_name: str, model_dir=None, *, download=True,

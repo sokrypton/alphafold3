@@ -75,7 +75,18 @@ def fold(model_name, seq, model_dir=None, seed=0, templates=None):
   # language model (natively 1.719 A on 6MRR against 1.7 with it).
   lm_pair = None
   lm_npz = os.environ.get('LM_PAIR')
-  if lm_npz:
+  hidden = os.environ.get('ESMC_HIDDEN')
+  if hidden:
+    # Preferred over LM_PAIR: build the pair rep with THIS model's own shim.
+    # Every ESMFold2 release trains its own, and handing one variant another's
+    # reads corr 0.026 against native -- a mistake a precomputed lm_pair file
+    # makes very easy to make.
+    from converters import esmfold2_lm
+    h = np.load(os.path.expanduser(hidden))
+    h = h['lm_hidden'] if hasattr(h, 'files') else h
+    lm_pair = np.asarray(esmfold2_lm.shim(
+        h, esmfold2_lm.load_params(model_dir, model_name)), np.float32)
+  elif lm_npz:
     z = np.load(os.path.expanduser(lm_npz))
     lm_pair = z['lm_pair'] if hasattr(z, 'files') else z
   if spec.featurise:
@@ -85,6 +96,11 @@ def fold(model_name, seq, model_dir=None, seed=0, templates=None):
   cfg = af3_model.Model.Config()
   cfg.global_config.flash_attention_implementation = 'xla'
   spec.configure(cfg)
+  # BF16=none runs the trunk in float32. Worth having as a knob rather than a
+  # constant: a model whose trunk is already marginal can be pushed over by
+  # bfloat16, and that is invisible next to a gate that was measured in fp32.
+  if os.environ.get('BF16'):
+    cfg.global_config.bfloat16 = os.environ['BF16']
 
   @hk.transform
   def forward(b):

@@ -92,3 +92,38 @@ print('   corr %.6f   relerr %.3e' % (
     np.abs(z - z_native).max() / max(np.abs(z_native).max(), 1e-9)))
 print('   ours std %.4f  absmax %.3f' % (z.std(), np.abs(z).max()))
 print('   nat  std %.4f  absmax %.3f' % (z_native.std(), np.abs(z_native).max()))
+
+# The distogram is deterministic and reads straight off the trunk, so it says
+# whether the remaining trunk gap MATTERS -- a contact map that agrees with
+# native's argmax leaves only the diffusion to explain the fold.
+from alphafold3.model.network import distogram_head as dh
+
+
+@hk.transform
+def disto(b, pair, tf):
+  fb = feat_batch.Batch.from_data_dict(b)
+  return dh.DistogramHead(cfg.heads.distogram, cfg.global_config)(
+      fb, {'pair': jnp.asarray(pair), 'single': jnp.zeros(
+          (pair.shape[0], cfg.evoformer.seq_channel), jnp.float32),
+       'target_feat': tf}, return_distogram=True)
+
+
+tf = np.asarray(g['target_feat'])
+try:
+  ours = disto.apply(p, jax.random.PRNGKey(0), b, z, jnp.asarray(tf))
+  logits = np.asarray(ours['bin_edges'] if 'bin_edges' in ours else
+                      ours.get('distogram', ours))
+except Exception as err:
+  print('   distogram head: %s: %s' % (type(err).__name__, err))
+  logits = None
+nat_logits = nat['distogram_logits'][0]
+if logits is not None and getattr(logits, 'shape', ())[-1:] == nat_logits.shape[-1:]:
+  a = logits.argmax(-1); bnat = nat_logits.argmax(-1)
+  print('   distogram argmax agreement %.4f   corr %.6f'
+        % ((a == bnat).mean(),
+           np.corrcoef(np.asarray(logits).ravel(), nat_logits.ravel())[0, 1]))
+else:
+  # even without the head, the SYMMETRISED trunk is what the head reads
+  sym = z + z.transpose(1, 0, 2)
+  symn = z_native + z_native.transpose(1, 0, 2)
+  print('   symmetrised trunk corr %.6f' % np.corrcoef(sym.ravel(), symn.ravel())[0, 1])

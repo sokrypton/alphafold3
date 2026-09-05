@@ -28,13 +28,20 @@ import pathlib
 import numpy as np
 
 
-def load_params(model_dir):
-  """-> the shim weights written beside the blob by convert_esmfold2_weights."""
-  p = pathlib.Path(os.path.expanduser(str(model_dir))) / 'esmfold2.lm.npz'
-  if not p.exists():
-    raise FileNotFoundError(
-        f'{p} not found -- rerun convert_esmfold2_weights, or run without ESM-C')
-  return {k.replace('.', '/'): v for k, v in np.load(p).items()}
+def load_params(model_dir, model_name=None):
+  """-> the shim weights written beside the blob by convert_esmfold2_weights.
+
+  Named after the MODEL: each ESMFold2 release trains its own shim, and using
+  another's is not a small error -- corr 0.026 against native, and a fold that
+  goes from 0.96 A to 8.8.
+  """
+  root = pathlib.Path(os.path.expanduser(str(model_dir)))
+  name = model_name or root.name
+  for cand in (root / ('%s.lm.npz' % name), root / 'esmfold2.lm.npz'):
+    if cand.exists():
+      return {k.replace('.', '/'): v for k, v in np.load(cand).items()}
+  raise FileNotFoundError(
+      f'no shim in {root} -- rerun convert_esmfold2_weights, or run without ESM-C')
 
 
 def _layer_norm(x, scale, offset, eps=1e-5):
