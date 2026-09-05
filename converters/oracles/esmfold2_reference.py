@@ -272,6 +272,12 @@ def msa_encoder(z, s_inputs, msa_oh, has_deletion, deletion_value, mmask, p, dim
 
 # ── the trunk ───────────────────────────────────────────────────────────────
 
+# Stage taps, mirroring evoformer.ESM_TRUNK_TAPS so the two can be compared
+# stage by stage rather than only at the end. Always on: this file is a spec,
+# not a hot path.
+TAPS = {}
+
+
 def trunk(f, lm_hidden, p, dims, n_loops=3, key=None, lm_dropout=0.25, msa=None):
   """features + ESM-C hidden states -> (z, s_inputs, rel_pos).
 
@@ -295,9 +301,13 @@ def trunk(f, lm_hidden, p, dims, n_loops=3, key=None, lm_dropout=0.25, msa=None)
   rp = jnp.asarray(rel_pos_features(f['residue_index'].astype(int), f['asym_id'].astype(int),
                                     f['sym_id'].astype(int), f['entity_id'].astype(int),
                                     f['token_index'].astype(int))) @ p['rel_pos/weights']
-  z_init = ((s_inputs @ p['z_init_1/weights'])[:, None]
-            + (s_inputs @ p['z_init_2/weights'])[None, :]
-            + rp + f['token_bonds'] @ p['token_bonds/weights'])
+  z_pair0 = ((s_inputs @ p['z_init_1/weights'])[:, None]
+             + (s_inputs @ p['z_init_2/weights'])[None, :])
+  TAPS.setdefault('s_inputs', []).append(s_inputs)
+  TAPS.setdefault('z_pair0', []).append(z_pair0)
+  TAPS.setdefault('z_relpos', []).append(z_pair0 + rp)
+  z_init = (z_pair0 + rp + f['token_bonds'] @ p['token_bonds/weights'])
+  TAPS.setdefault('z_init', []).append(z_init)
 
   pm = jnp.ones((L, L))
   # lm_hidden=None reproduces native's no-LM path exactly: `lm_z is None` means
@@ -327,9 +337,11 @@ def trunk(f, lm_hidden, p, dims, n_loops=3, key=None, lm_dropout=0.25, msa=None)
       # OVERWRITE, not add (config.msa_encoder_overwrite)
       z_inject = msa_encoder(z_inject, s_inputs, msa['oh'], msa['has_deletion'],
                              msa['deletion_value'], msa['mask'], p, dims)
+    TAPS.setdefault('z_inject', []).append(z_inject)
     inj = layer_norm(z_inject if lm_ref is None else z_inject + lm_ref,
                      p['parcae_input_norm/scale'], p['parcae_input_norm/offset'])
     z = av * z + inj @ bT
+    TAPS.setdefault('z_parcae', []).append(z)
     z = pair_stack(z, p, 'folding_trunk/', dims['n_trunk'], pm)
   z = pair_stack(z @ p['parcae_readout/weights'], p, 'parcae_coda/', dims['n_coda'], pm)
   return z, s_inputs, rp

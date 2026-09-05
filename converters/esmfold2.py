@@ -575,9 +575,13 @@ def convert_esmfold2_weights(checkpoint, output_dir):
   """
   from pathlib import Path
   sd = load_esmfold2_checkpoint(checkpoint)
-  flat = map_esmfold2_to_af3(sd)
+  # the GRAPH map, not map_esmfold2_to_af3: the latter keys on the reference
+  # implementation's own scopes and is the oracle's input, not the model's.
+  flat = map_esmfold2_to_af3_graph(sd)
   params = {}
-  common.populate(params, 'esmfold2', flat)
+  for key, arr in flat.items():
+    scope, name = key.rsplit('/', 1)
+    params.setdefault(scope, {})[name] = arr
   return Path(common.write_params_blob(output_dir, 'esmfold2.bin.zst',
                                        params, add_meta=True))
 
@@ -914,12 +918,24 @@ def _remap_vec(v):
 
 
 def remap_s_inputs(w, c_atom=384, n_esm=33, n_af3=31):
-  """(451, out) -> (447, out): [atom | restype | profile | deletion] blockwise."""
+  """(451, out) -> (447, out): ESMFold2's s_inputs rows in AF3's order.
+
+  The two models concatenate the SAME four blocks in different orders:
+
+      ESMFold2   [atom 384 | restype 33 | profile 33 | deletion 1]  = 451
+      AF3        [restype 31 | profile 31 | deletion 1 | atom 384]  = 447
+
+  (model.create_target_feat_embedding: `concatenate([target_feat, token_act])`,
+  and create_target_feat puts restype, profile, deletion in that order.) So this
+  is a PERMUTATION as well as a slice -- reading it as a slice alone leaves
+  every consumer multiplying the atom block by the restype weights, which is
+  not a small error: z_init came out at corr 0.008 against the reference.
+  """
   atom = w[:c_atom]
   rest = _remap_restype_block(w[c_atom:c_atom + n_esm], n_af3)
   prof = _remap_restype_block(w[c_atom + n_esm:c_atom + 2 * n_esm], n_af3)
   tail = w[c_atom + 2 * n_esm:]
-  return np.concatenate([atom, rest, prof, tail], axis=0)
+  return np.concatenate([rest, prof, tail, atom], axis=0)
 
 
 def remap_msa_feat(w, n_esm=33, gap_index=21):

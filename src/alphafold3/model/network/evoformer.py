@@ -191,6 +191,17 @@ def _boltz2_contact_conditioning(contact, threshold, num_channels, dtype):
           + unselected * contact[..., 1:2].astype(dtype))
 
 
+# Diagnostic taps for the pair-only (ESMFold2) injection, default OFF. The
+# trunk is assembled from three stages that all look alike in the output; the
+# taps say WHICH one diverges without re-deriving the whole thing.
+ESM_TRUNK_TAPS = {}
+
+
+def _tap(name, value):
+  if os.environ.get('ESM_TRUNK_TAP') == '1':
+    ESM_TRUNK_TAPS.setdefault(name, []).append(value)
+
+
 class Evoformer(hk.Module):
   """Creates 'single' and 'pair' embeddings."""
 
@@ -622,7 +633,13 @@ class Evoformer(hk.Module):
       first = prev.get('recycle_first')
 
       def _add_prev(act, init_act):
-        z_prev = prev['pair'].astype(act.dtype)
+        # ESMFold2 recycles the TRUNK STACK's output, not the trunk's return
+        # value: `parcae_readout` + the coda run once, after the loop is over.
+        # AF3 has a single `pair` output that is both the carry and the result,
+        # so a pair-only trunk carries the pre-coda tensor separately -- feeding
+        # the coda's output back would recycle a differently-scaled
+        # representation through a projection every pass.
+        z_prev = prev.get('pair_pre_coda', prev['pair']).astype(act.dtype)
         if first is not None:
           z_prev = jnp.where(first > 0.5, init_act.astype(z_prev.dtype), z_prev)
         if self.global_config.model in model_config.SSM_RECYCLE:
@@ -653,15 +670,38 @@ class Evoformer(hk.Module):
         )
 
       if pair_only:
-        # ESMFold2's z_init ALREADY contains the relative encoding -- parcae
-        # injects `norm(z_init + ...)`, so the encoding has to be in `act` before
-        # the recycle reads it. AF3 adds it afterwards, which would leave the SSM
-        # injecting a z_init with no positional term at all. `pair_init` stays
-        # unset: that is chai's separate business (it seeds its recycle carry
-        # with the initial representation), and setting it here would add a
-        # fourth entry to the scan carry and break the loop.
+        # ESMFold2 assembles the ENTIRE injection -- relative encoding, bonds AND
+        # the MSA encoder -- before the parcae recurrence reads it:
+        #     z_inject = msa_encoder(z_init + rel_pos + bonds)
+        #     z        = a * z_prev + b(norm(z_inject))
+        # AF3 applies all three AFTER its recycle term. For an addition that is
+        # the same function; for the SSM it is not, because the injection is what
+        # gets normalised and projected -- running the MSA encoder afterwards
+        # feeds it (and the trunk) `a*z_prev + b(...)` instead of z_init, and the
+        # recycled term is then re-injected every pass instead of decaying.
+        # `pair_init` stays unset: that is chai's separate business (it seeds its
+        # recycle carry with the initial representation), and setting it here
+        # would add a fourth entry to the scan carry and break the loop.
+        _tap('z_pair0', pair_activations)
         pair_activations = self._relative_encoding(batch, pair_activations)
+        _tap('z_relpos', pair_activations)
+        pair_activations = self._embed_bonds(
+            batch=batch, pair_activations=pair_activations
+        )
+        _tap('z_init', pair_activations)
+        pair_activations, key = self._embed_process_msa(
+            msa_batch=batch.msa,
+            pair_activations=pair_activations,
+            pair_mask=pair_mask,
+            key=key,
+            target_feat=target_feat,
+            use_dropout=use_dropout,
+            is_ligand=batch.token_features.is_ligand,
+            asym_id=batch.token_features.asym_id,
+        )
+        _tap('z_inject', pair_activations)
         pair_activations = _add_prev(pair_activations, None)
+        _tap('z_parcae', pair_activations)
       elif chai:
         pair_activations = self._relative_encoding(batch, pair_activations)
         pair_init = pair_activations
@@ -677,7 +717,7 @@ class Evoformer(hk.Module):
       # bare protein, where the contact matrix is all zero -- but a ligand has
       # intra-ligand bonds (BTN contributes 34 nonzero entries), so this was
       # live on exactly the inputs the port had just started supporting.
-      if self.global_config.model != 'chai1':
+      if self.global_config.model != 'chai1' and not pair_only:
         pair_activations = self._embed_bonds(
             batch=batch, pair_activations=pair_activations
         )
@@ -709,22 +749,23 @@ class Evoformer(hk.Module):
           hm.LayerNorm(name='prev_single_embedding_layer_norm')(s_prev)
       )
 
-      pair_activations, key = self._embed_process_msa(
-          msa_batch=batch.msa,
-          pair_activations=pair_activations,
-          pair_mask=pair_mask,
-          key=key,
-          target_feat=target_feat,
-          use_dropout=use_dropout,
-          is_ligand=batch.token_features.is_ligand,
-          asym_id=batch.token_features.asym_id,
-          # chai's msa_module.linear_s2m reads the single AFTER its recycle
-          # term is added (its argument traces to
-          # add(token_single_trunk_initial_repr, recycle_proj(prev))), not
-          # s_init. Feeding s_init put the block-0 outer product at corr 0.613;
-          # this takes it to 0.999993.
-          single_post_recycle=single_activations,
-      )
+      if not pair_only:   # already run above, into the parcae injection
+        pair_activations, key = self._embed_process_msa(
+            msa_batch=batch.msa,
+            pair_activations=pair_activations,
+            pair_mask=pair_mask,
+            key=key,
+            target_feat=target_feat,
+            use_dropout=use_dropout,
+            is_ligand=batch.token_features.is_ligand,
+            asym_id=batch.token_features.asym_id,
+            # chai's msa_module.linear_s2m reads the single AFTER its recycle
+            # term is added (its argument traces to
+            # add(token_single_trunk_initial_repr, recycle_proj(prev))), not
+            # s_init. Feeding s_init put the block-0 outer product at corr 0.613;
+            # this takes it to 0.999993.
+            single_post_recycle=single_activations,
+        )
       del key  # Unused after this point.
 
 
@@ -763,6 +804,7 @@ class Evoformer(hk.Module):
           (pair_activations, single_activations)
       )
 
+      pair_pre_coda = pair_activations
       if pair_only and self.config.coda.num_layer:
         # ESMFold2 finishes the trunk with a readout projection and a short
         # "coda" of pair blocks, AFTER the recycle loop. AF3 has no post-trunk
@@ -794,6 +836,8 @@ class Evoformer(hk.Module):
           'single': single_activations,
           'pair': pair_activations,
           'target_feat': target_feat,
+          **({'pair_pre_coda': pair_pre_coda.astype(jnp.float32)}
+             if pair_only else {}),
           # chai's diffusion conditions on z_init alongside z_trunk. Cast to
           # float32: this rides the recycle loop's scan carry, which is float32,
           # and the trunk computes in bfloat16 inside utils.bfloat16_context.

@@ -615,6 +615,13 @@ class Model(hk.Module):
         ),
         'target_feat': target_feat,
     }
+    if self.global_config.model in model_config.PAIR_ONLY_TRUNK:
+      # ESMFold2's parcae recurrence carries the trunk stack's output, while the
+      # `pair` the trunk RETURNS has been through parcae_readout + the coda. Two
+      # different tensors, so two carry entries; seeded with zeros like `pair`.
+      embeddings['pair_pre_coda'] = jnp.zeros(
+          [num_res, num_res, self.config.evoformer.pair_channel],
+          dtype=jnp.float32)
     if self.global_config.model == 'chai1':
       # chai's diffusion conditions on z_init as well as z_trunk. The recycle
       # loop carries `embeddings` as a scan carry, so this key has to exist in

@@ -29,16 +29,29 @@ cfg.global_config.bfloat16='none'; spec.configure(cfg)
 # which include the head, so a broken head masqueraded as a broken trunk.
 from alphafold3.model.network import evoformer as ev
 from alphafold3.model import feat_batch
+# the reference runs n_loops + 1 = 4 parcae passes; one pass with a zero carry
+# is a DIFFERENT function, so the harness has to recycle too or the comparison
+# measures the loop count rather than the trunk.
+N_PASSES = 4
+
 @hk.transform
 def fwd(b):
     fb = feat_batch.Batch.from_data_dict(b)
-    emb = ev.Evoformer(cfg.evoformer, cfg.global_config)(
-        batch=fb,
-        prev={'pair': jnp.zeros((fb.token_features.mask.shape[0],)*2 + (cfg.evoformer.pair_channel,), jnp.float32),
-              'single': jnp.zeros((fb.token_features.mask.shape[0], cfg.evoformer.seq_channel), jnp.float32)},
-        target_feat=af3_model.create_target_feat_embedding(
-            batch=fb, config=cfg.evoformer, global_config=cfg.global_config),
-        key=jax.random.PRNGKey(0))
+    L = fb.token_features.mask.shape[0]
+    c = cfg.evoformer.pair_channel
+    prev = {'pair': jnp.zeros((L, L, c), jnp.float32),
+            'pair_pre_coda': jnp.zeros((L, L, c), jnp.float32),
+            'single': jnp.zeros((L, cfg.evoformer.seq_channel), jnp.float32)}
+    tf = af3_model.create_target_feat_embedding(
+        batch=fb, config=cfg.evoformer, global_config=cfg.global_config)
+    # ONE module instance, called N times -- constructing it in the loop gives
+    # `evoformer_1`, `evoformer_2`, ... each wanting its own weights.
+    mod = ev.Evoformer(cfg.evoformer, cfg.global_config)
+    for i in range(N_PASSES):
+        emb = mod(batch=fb, prev=prev, target_feat=tf,
+                  key=jax.random.PRNGKey(0))
+        prev = {**prev, **{k: v.astype(jnp.float32)
+                           for k, v in emb.items() if k in prev}}
     return emb
 b = jax.tree_util.tree_map(jnp.asarray, utils.remove_invalidly_typed_feats(batch))
 # calling Evoformer directly drops the Model's own `diffuser/` scope prefix
@@ -56,6 +69,34 @@ msa=R.self_msa(f)
 z,_,_ = R.trunk(f, None, pref, dims, n_loops=3, key=jax.random.PRNGKey(0),
                 lm_dropout=0.0, msa=msa)
 zr = np.asarray(z)
+# stage-by-stage, pass 0: which of z_init / z_inject / z_parcae first diverges
+gt = ev.ESM_TRUNK_TAPS
+for name in ('z_pair0', 'z_relpos', 'z_init', 'z_inject', 'z_parcae'):
+    if name in gt and name in R.TAPS:
+        for i in range(min(len(gt[name]), len(R.TAPS[name]), N_PASSES)):
+            x = np.asarray(gt[name][i]).ravel()
+            y = np.asarray(R.TAPS[name][i]).ravel()
+            print('   %-9s pass %d  corr %.6f  std %.4f vs %.4f'
+                  % (name, i, np.corrcoef(x, y)[0, 1], x.std(), y.std()))
+
+tf_g = np.asarray(g['target_feat']); tf_r = np.asarray(R.TAPS['s_inputs'][0])
+print('   target_feat  %s vs %s' % (tf_g.shape, tf_r.shape))
+# blockwise: [atom 384 | restype | profile | deletion]. The widths differ (ESM
+# reserves two restype classes AF3 does not), so compare the atom block
+# directly and the restype blocks after dropping ESM's leading two columns.
+print('     atom        corr %.6f  std %.4f vs %.4f'
+      % (np.corrcoef(tf_g[:, 63:].ravel(), tf_r[:, :384].ravel())[0, 1],
+         tf_g[:, 63:].std(), tf_r[:, :384].std()))
+gr, rr = tf_g[:, 0:31], tf_r[:, 384+2:384+33]
+print('     restype     corr %.6f   equal %s' % (np.corrcoef(gr.ravel(), rr.ravel())[0, 1],
+                                                 np.allclose(gr, rr)))
+print('     graph restype idx', np.argmax(tf_g[:, 0:31], -1)[:24].tolist())
+print('     ref   restype idx', (np.argmax(tf_r[:, 384:384+33], -1) - 2)[:24].tolist())
+print('     ref   res_type   ', np.asarray(f['res_type']).astype(int)[:24].tolist())
+gp, rp_ = tf_g[:, 31:62], tf_r[:, 417+2:417+33]
+print('     profile     corr %.6f   equal %s' % (np.corrcoef(gp.ravel(), rp_.ravel())[0, 1],
+                                                 np.allclose(gp, rp_)))
+
 a, c = z_graph.ravel(), zr.ravel()
 print('GRAPH trunk pair vs REFERENCE trunk pair (both no-LM, self-MSA):')
 print('   shapes %s vs %s' % (z_graph.shape, zr.shape))
