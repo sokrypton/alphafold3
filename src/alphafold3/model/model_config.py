@@ -58,6 +58,11 @@ MODELS = (
     'protenix2',
     'rosettafold3',
     'chai1',
+    # ESMFold2: an ESM-C-conditioned all-atom diffusion predictor. Rides the
+    # shared graph on zero-filled pair attention (its trunk is pair-only), an
+    # SSM recycle, a clamped OPM norm and a rotary atom window -- see
+    # SSM_RECYCLE, CLAMPED_OPM_NORM, SWA_ROPE_ATOM_ATTENTION.
+    'esmfold2',
 )
 
 # The Protenix family. Its model types differ from one another ONLY in counts
@@ -160,6 +165,12 @@ CLAMPED_OPM_NORM = ('esmfold2',)
 # even at the same width; the exact window rides in as an additive pair_mask and
 # the key subset is widened to cover it (see ATOM_KEYS_SUBSET_SIZE).
 SWA_ROPE_ATOM_ATTENTION = ('esmfold2',)
+
+
+# Models whose TRUNK carries no single track: 48 pair-only blocks, and the
+# structure head is handed s_trunk=None. Their diffusion single conditioning is
+# built from s_inputs alone rather than from [single_embedding, target_feat].
+PAIR_ONLY_TRUNK = ('esmfold2',)
 ATOM_ROPE_HALF_WINDOW = 64
 # 32 queries + 2*64 of context needs 160; the next power-of-two multiple that
 # AF3's gather machinery is happy with is 192.

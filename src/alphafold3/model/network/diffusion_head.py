@@ -234,7 +234,12 @@ class DiffusionHead(hk.Module):
       )
 
     target_feat = embeddings['target_feat']
-    features_1d = jnp.concatenate([single_embedding, target_feat], axis=-1)
+    if self.global_config.model in model_config.PAIR_ONLY_TRUNK:
+      # No single track exists, so there is no single_embedding to concatenate:
+      # ESMFold2 conditions on s_inputs alone (451 channels, not 384 + 451).
+      features_1d = target_feat
+    else:
+      features_1d = jnp.concatenate([single_embedding, target_feat], axis=-1)
     if self.global_config.model in ('openfold3', 'openbind'):
       # BOTH OpenFold3 releases: openbind changed the diffusion transformer's
       # pair LayerNorm, not the feature layout, so it keeps this 833-channel

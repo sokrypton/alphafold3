@@ -406,7 +406,29 @@ _SAMPLER_CONSTANTS = {
 
 # Config-shape divergences, one widener per family that has any. A family absent
 # here runs at stock AF3 dimensions.
+ESMFOLD2_SETTINGS = (
+    # trunk: 48 PAIR-ONLY blocks at c_z 256 (AF3 is 128), no templates
+    ('evoformer.pair_channel', 256),
+    ('evoformer.pairformer.num_layer', 48),
+    ('evoformer.msa_stack.num_layer', 4),
+    ('evoformer.msa_channel', 128),
+    ('evoformer.template.template_stack.num_layer', 0),
+    ('evoformer.per_atom_conditioning.atom_transformer.num_blocks', 3),
+    # diffusion: 12 token blocks in (3, 4) supers, 16 heads, 3 atom blocks
+    ('heads.diffusion.transformer.num_blocks', 12),
+    ('heads.diffusion.transformer.super_block_size', 4),
+    ('heads.diffusion.transformer.num_head', 16),
+    ('heads.diffusion.conditioning.pair_channel', 256),
+    ('heads.diffusion.atom_transformer.num_blocks', 3),
+)
+
+
+def _widen_esmfold2(cfg):
+  _apply_settings(cfg, ESMFOLD2_SETTINGS, 'esmfold2')
+
+
 _WIDENERS = {
+    'esmfold2': _widen_esmfold2,
     'opendde': _widen_opendde,
     'boltz2': _widen_boltz2,
     'protenix2': _widen_protenix2,
@@ -424,6 +446,10 @@ _WIDENERS = {
 # under that the input pipeline has to reproduce. Not preferences -- getting one
 # wrong is silent, and shows up as a fold that is merely mediocre.
 _FEATURISE = {
+    # ESMFold2 attends +/-64 atoms by rank, which needs 32 + 2*64 = 160 keys of
+    # context around a query block; AF3's default 128 is too narrow, so widen the
+    # key subset and let the exact window ride in as a mask.
+    'esmfold2': dict(atom_keys_subset_size=192),
     # boltz2 keeps a modified residue as ONE token holding all its atoms
     # (data/tokenize/boltz2.py: standard -> per residue, NONPOLYMER -> per atom,
     # else -> one token, all atoms). AF3 atomises instead, and handing boltz2 ten
@@ -654,6 +680,11 @@ MODEL_SPECS = {
                               weights_source='https://github.com/RosettaCommons/foundry'),
     'chai1': ModelSpec('chai1', weights_licence='the Apache License, Version 2.0',
                        weights_source='https://github.com/chaidiscovery/chai-lab'),
+    # ESMFold2 carries a trained Fourier noise embedding like the OF3 lineage,
+    # but is not OpenFold-derived, so it is named rather than inherited -- the
+    # same reason chai1 is named.
+    'esmfold2': ModelSpec('esmfold2', trained_fourier=True,
+                          weights_source='https://huggingface.co/biohub/ESMFold2'),
 }
 
 # Historical / abbreviated spellings, kept working.

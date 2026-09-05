@@ -714,14 +714,27 @@ class Evoformer(hk.Module):
       del key  # Unused after this point.
 
 
+      # ESMFold2's trunk has NO single track at all -- 48 pair-only blocks, and
+      # its structure head is handed s_trunk=None. Building the single track and
+      # zeroing it would still carry the single through unchanged (it is a
+      # residual) and would create parameters no checkpoint can fill, so the
+      # track is not built.
+      pair_only = self.global_config.model in model_config.PAIR_ONLY_TRUNK
+
       def pairformer_fn(x):
         pairformer_iteration = modules.PairFormerIteration(
             self.config.pairformer,
             self.global_config,
-            with_single=True,
+            with_single=not pair_only,
             name='trunk_pairformer',
         )
         pair_act, single_act = x
+        if pair_only:
+          return pairformer_iteration(
+              act=pair_act,
+              pair_mask=pair_mask,
+              use_dropout=use_dropout,
+          ), single_act
         return pairformer_iteration(
             act=pair_act,
             single_act=single_act,
