@@ -868,12 +868,13 @@ def af3_diffusion_conditioning(sd, prefix):
       'pair_cond_initial_norm/scale': _arr(g('z_input_norm.weight')),
       'pair_cond_initial_norm/offset': _arr(g('z_input_norm.bias')),
       'pair_cond_initial_projection/weights': t(g('z_proj.weight')),
-      # s_inputs enters the diffusion head with the SAME 451 -> 447 remap the
-      # trunk applies; the LayerNorm sits on those columns too, so it is remapped
-      # as a vector rather than copied.
-      'single_cond_initial_norm/scale': _remap_vec(_arr(g('s_input_norm.weight'))),
-      'single_cond_initial_norm/offset': _remap_vec(_arr(g('s_input_norm.bias'))),
-      'single_cond_initial_projection/weights': remap_s_inputs(t(g('s_proj.weight'))),
+      # s_inputs enters the diffusion head REORDERED but not narrowed: this
+      # LayerNorm normalises over the width, so the four dead restype columns
+      # have to stay (the graph pads them back in). Elsewhere in the port they
+      # are dropped, because a zero column is free through a bias-free Linear.
+      'single_cond_initial_norm/scale': _permute_vec(_arr(g('s_input_norm.weight'))),
+      'single_cond_initial_norm/offset': _permute_vec(_arr(g('s_input_norm.bias'))),
+      'single_cond_initial_projection/weights': permute_s_inputs(t(g('s_proj.weight'))),
       'fourier_embedding_weight': _arr(g('fourier.w')),
       'fourier_embedding_bias': _arr(g('fourier.b')),
       'noise_embedding_initial_norm/scale': _arr(g('noise_norm.weight')),
@@ -917,6 +918,11 @@ def _remap_vec(v):
   return remap_s_inputs(v[:, None])[:, 0]
 
 
+def _permute_vec(v):
+  """The padded (451-wide) s_inputs reorder for a 1-D tensor."""
+  return permute_s_inputs(v[:, None])[:, 0]
+
+
 def remap_s_inputs(w, c_atom=384, n_esm=33, n_af3=31):
   """(451, out) -> (447, out): ESMFold2's s_inputs rows in AF3's order.
 
@@ -934,6 +940,21 @@ def remap_s_inputs(w, c_atom=384, n_esm=33, n_af3=31):
   atom = w[:c_atom]
   rest = _remap_restype_block(w[c_atom:c_atom + n_esm], n_af3)
   prof = _remap_restype_block(w[c_atom + n_esm:c_atom + 2 * n_esm], n_af3)
+  tail = w[c_atom + 2 * n_esm:]
+  return np.concatenate([rest, prof, tail, atom], axis=0)
+
+
+def permute_s_inputs(w, c_atom=384, n_esm=33):
+  """(451, out) -> (451, out): AF3's block ORDER, ESM's block WIDTHS.
+
+  For the diffusion conditioner the four dead restype columns cannot be dropped:
+  its projection sits behind a LayerNorm, which normalises over the width, so
+  447 channels is not the same function as 451 with four zeros. The graph pads
+  the feature vector back to 451; these rows have to be in the padded order.
+  """
+  atom = w[:c_atom]
+  rest = w[c_atom:c_atom + n_esm]
+  prof = w[c_atom + n_esm:c_atom + 2 * n_esm]
   tail = w[c_atom + 2 * n_esm:]
   return np.concatenate([rest, prof, tail, atom], axis=0)
 
@@ -1099,6 +1120,7 @@ def map_esmfold2_to_af3_graph(sd, dims=None):
     flat['%s/pair_logits_projection/weights' % pre_at] = np.zeros((16, n_at, 4), np.float32)
 
   # ── the diffusion atom decoder and the coordinate heads ─────────────────
+  SH = 'structure_head.diffusion_module'
   AD = 'structure_head.diffusion_module.atom_decoder'
   dec = [af3_atom_block(sd, '%s.atom_transformer.blocks.%d' % (AD, i),
                         dims['c_atom'], 4) for i in range(dims['n_diff_atom'])]
@@ -1116,6 +1138,7 @@ def map_esmfold2_to_af3_graph(sd, dims=None):
           t(sd['structure_head.diffusion_module.atom_encoder.coords_linear.weight'])[:3],
       'diffusion_atom_features_to_position_update/weights': t(sd[AD + '.output_linear.weight']),
       'diffusion_atom_features_layer_norm/scale': _arr(sd[AD + '.norm.weight']),
+      'diffusion_atom_features_layer_norm/offset': _arr(sd[AD + '.norm.bias']),
       'diffusion_project_token_features_for_broadcast/weights':
           t(sd[AD + '.token_to_atom_linear.weight']),
       # no trunk single or atom-pair conditioning in this model
@@ -1123,12 +1146,17 @@ def map_esmfold2_to_af3_graph(sd, dims=None):
       'diffusion_lnorm_trunk_single_cond/scale': np.ones((c_s,), np.float32),
       'diffusion_embed_trunk_pair_cond/weights': np.zeros((c_z, 16), np.float32),
       'diffusion_lnorm_trunk_pair_cond/scale': np.ones((c_z,), np.float32),
-      'output_norm/scale': np.ones((dims['c_diff'],), np.float32),
-      # AF3 re-embeds the conditioned single before the token stack; ESMFold2
-      # feeds s straight in, so this is the identity: a unit LayerNorm scale and
-      # an identity projection leave s unchanged.
-      'single_cond_embedding_norm/scale': np.ones((dims['c_diff'],), np.float32),
-      'single_cond_embedding_projection/weights': np.eye(dims['c_diff'], dtype=np.float32),
+      # ESMFold2's token_norm, NOT an identity: the previous mapping asserted
+      # `a` needed no output normalisation and dropped both its scale and its
+      # bias.
+      'output_norm/scale': _arr(sd[SH + '.token_norm.weight']),
+      'output_norm/offset': _arr(sd[SH + '.token_norm.bias']),
+      # AF3 re-embeds the conditioned single before the token stack, which is
+      # exactly ESMFold2's `a += s_to_token(LN(s))` -- s_step_norm carries a
+      # BIAS, so this is not the identity the earlier mapping assumed.
+      'single_cond_embedding_norm/scale': _arr(sd[SH + '.s_step_norm.weight']),
+      'single_cond_embedding_norm/offset': _arr(sd[SH + '.s_step_norm.bias']),
+      'single_cond_embedding_projection/weights': t(sd[SH + '.s_to_token.weight']),
   })
   # the token stack's SHARED pair LayerNorm is identity: ESMFold2's per-block
   # pair LN scales are folded into pair_logits_projection instead (its offsets

@@ -172,6 +172,10 @@ SWA_ROPE_ATOM_ATTENTION = ('esmfold2',)
 # built from s_inputs alone rather than from [single_embedding, target_feat].
 PAIR_ONLY_TRUNK = ('esmfold2',)
 
+# Models whose sampler rigid-aligns the noisy coordinates onto the denoised
+# prediction before the Euler step. See diffusion_head._kabsch.
+REALIGN_SAMPLER = ('esmfold2',)
+
 
 # Models that LayerNorm the summed per-atom reference features. AF3 sums
 # bias-free per-feature Linears and leaves the result unnormalised.

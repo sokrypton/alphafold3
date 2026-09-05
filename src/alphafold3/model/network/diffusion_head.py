@@ -35,6 +35,7 @@ from . import noise_level_embeddings
 import haiku as hk
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 
 # Carefully measured by averaging multimer training set.
@@ -129,6 +130,11 @@ class SampleConfig(base_config.BaseConfig):
   sigma_min: float = 0.0004
   sigma_max: float = 160.0
   rho: float = 7.0
+  # ESMFold2 CLIPS the schedule: it drops every sigma above max_inference_sigma
+  # and starts from that value instead. With sigma_data 16 and smax 160 the EDM
+  # schedule opens at 2560, so a clip at 256 is a tenfold cut in initial noise
+  # -- not a detail, and there is no field for it in stock AF3. 0 = no clip.
+  max_sigma: float = 0.0
 
 
 class DiffusionHead(hk.Module):
@@ -270,6 +276,20 @@ class DiffusionHead(hk.Module):
           ],
           axis=-1,
       )
+    if self.global_config.model in model_config.PAIR_ONLY_TRUNK:
+      # ESMFold2's s_inputs carries 33-class restype and profile blocks where
+      # AF3's carry 31 (ESM reserves two classes AF3 has no input for). Four
+      # dead columns -- and everywhere else in the port they are simply dropped
+      # from the weights, because a zero input column contributes nothing to a
+      # bias-free Linear. Here they cannot be: the LayerNorm below divides by
+      # the width and subtracts the mean over it, so normalising 447 channels
+      # instead of 451 rescales the ENTIRE diffusion conditioning. Same trap as
+      # OpenFold3's UNK_DNA columns above. The converter's weight rows are in
+      # this padded order to match.
+      n = residue_names.POLYMER_TYPES_NUM_WITH_UNKNOWN_AND_GAP
+      pad = jnp.zeros_like(features_1d[..., :2])
+      features_1d = jnp.concatenate(
+          [pad, features_1d[..., :n], pad, features_1d[..., n:]], axis=-1)
     single_cond = hm.LayerNorm(
         use_fast_variance=False,
         # chai is AFFINE here (token_pair_proj.0 / token_in_proj.0 /
@@ -412,7 +432,8 @@ class DiffusionHead(hk.Module):
       if self.global_config.model != 'chai1':
         _s_cond_in = hm.LayerNorm(
             use_fast_variance=False,
-            create_offset=self.global_config.model in ('boltz2', 'rosettafold3'),
+            create_offset=self.global_config.model in ('boltz2', 'rosettafold3',
+                                                       'esmfold2'),
             name='single_cond_embedding_norm',
         )(trunk_single_cond)
       act += hm.Linear(
@@ -441,7 +462,8 @@ class DiffusionHead(hk.Module):
       )
       act = hm.LayerNorm(
           use_fast_variance=False,
-          create_offset=self.global_config.model in ('boltz2', 'rosettafold3', 'chai1'),
+          create_offset=self.global_config.model in ('boltz2', 'rosettafold3',
+                                                     'chai1', 'esmfold2'),
           name='output_norm'
       )(act)
       # (n_tokens, per_token_channels)
@@ -466,6 +488,18 @@ class DiffusionHead(hk.Module):
     return (
         skip_scaling * positions_noisy + out_scaling * position_update
     ) * atom_mask[..., None]
+
+
+def _kabsch(mob, ref, w):
+  """Weighted rigid align of `mob` onto `ref`, over the dense atom layout."""
+  wm = w[..., None].astype(mob.dtype)
+  mc = (mob * wm).sum((-3, -2), keepdims=True) / wm.sum((-3, -2), keepdims=True)
+  rc = (ref * wm).sum((-3, -2), keepdims=True) / wm.sum((-3, -2), keepdims=True)
+  a, b = (mob - mc).reshape(-1, 3), (ref - rc).reshape(-1, 3)
+  u, _, vt = jnp.linalg.svd((a * wm.reshape(-1, 1)).T @ b)
+  d = jnp.sign(jnp.linalg.det(u @ vt))
+  rot = u @ jnp.diag(jnp.array([1.0, 1.0, d], dtype=mob.dtype)) @ vt
+  return ((mob - mc).reshape(-1, 3) @ rot).reshape(mob.shape) + rc
 
 
 def sample(
@@ -538,6 +572,14 @@ def sample(
     positions_noisy = positions + noise
 
     positions_denoised = denoising_step(positions_noisy, t_hat)
+    if global_config is not None and global_config.model in model_config.REALIGN_SAMPLER:
+      # ESMFold2 rigid-aligns the NOISY coords onto the denoised prediction
+      # before taking the Euler step. It augments (rotates and translates) the
+      # state every step, and its denoiser is not equivariant -- it reads a
+      # fixed reference conformer through rotary position embeddings -- so the
+      # prediction comes back in its own frame. Differencing across the two
+      # frames makes `grad` a rotation as much as a gradient.
+      positions_noisy = _kabsch(positions_noisy, positions_denoised, mask)
     grad = (positions_noisy - positions_denoised) / t_hat
 
     d_t = noise_level - t_hat
@@ -566,11 +608,17 @@ def sample(
     # chai evaluates the schedule at MIDPOINTS -- linspace(0, 1, 2N+1)[1::2] --
     # where AF3 uses the N+1 endpoints. So it never samples sigma=0 exactly, and
     # every sigma sits half a step inside AF3's.
-    times = jnp.linspace(0.0, 1.0, 2 * config.steps + 1)[1::2]
+    times = np.linspace(0.0, 1.0, 2 * config.steps + 1)[1::2]
   else:
-    times = jnp.linspace(0, 1, config.steps + 1)
-  noise_levels = noise_schedule(
-      times, smin=config.sigma_min, smax=config.sigma_max, p=config.rho)
+    times = np.linspace(0, 1, config.steps + 1)
+  # numpy, not jnp: the schedule is a compile-time constant, and the clip below
+  # is a boolean mask that a traced array cannot take.
+  noise_levels = np.asarray(noise_schedule(
+      times, smin=config.sigma_min, smax=config.sigma_max, p=config.rho))
+  if getattr(config, 'max_sigma', 0.0):
+    noise_levels = np.concatenate(
+        [[config.max_sigma], noise_levels[noise_levels <= config.max_sigma]])
+  noise_levels = jnp.asarray(noise_levels, jnp.float32)
 
   key, noise_key = jax.random.split(key)
   positions = jax.random.normal(noise_key, (num_samples,) + mask.shape + (3,))

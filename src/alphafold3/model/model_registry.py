@@ -404,6 +404,11 @@ _SAMPLER_CONSTANTS = {
     'protenix_tiny': dict(gamma_0=0.0, step_scale=1.0, steps=5),
     'boltz2': dict(gamma_0=0.605, gamma_min=1.107, noise_scale=0.901,
                    step_scale=1.638, rho=8.0, sigma_min=0.0004, sigma_max=160.0),
+    # ESMFold2 samples in FOURTEEN steps, not 200, and clips the schedule at
+    # sigma 256 -- the EDM schedule opens at sigma_data * smax = 2560, so
+    # running AF3's constants starts the trajectory with ten times the noise the
+    # model was trained to undo, and then anneals it fourteen times too slowly.
+    'esmfold2': dict(steps=14, max_sigma=256.0),
 }
 
 

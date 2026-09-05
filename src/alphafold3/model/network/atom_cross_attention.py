@@ -712,7 +712,7 @@ def atom_cross_att_decoder(
       use_fast_variance=False,
       # chai's to_pos_updates starts with an AFFINE LayerNorm
       create_offset=global_config.model in ('boltz2', 'chai1',
-                                                  'rosettafold3'),
+                                            'rosettafold3', 'esmfold2'),
       name=f'{name}_atom_features_layer_norm',
   )(queries_act)
   queries_position_update = hm.Linear(
