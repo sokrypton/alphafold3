@@ -814,3 +814,43 @@ def af3_diffusion_transformer(sd, prefix, n_blocks, n_super, c_token, num_head, 
   pl = np.stack([b['__pair_logits'] for b in blocks], 0)          # (n, c_z, H)
   pl = pl.reshape(n_super, inner, c_z, num_head).transpose(0, 2, 1, 3)
   return out, pl
+
+
+def af3_diffusion_conditioning(sd, prefix):
+  """ESMFold2's DiffusionConditioning onto AF3's diffusion-head scopes.
+
+  Every piece has a home already; the only reason this needs anything from the
+  graph is three LayerNorm OFFSETS, which AF3 creates only for the models that
+  have them (boltz2, rosettafold3, chai1, and now esmfold2).
+
+      z_input_norm / z_proj   -> pair_cond_initial_norm / _projection
+      z_transitions x2        -> pair_transition_{0,1}
+      s_input_norm / s_proj   -> single_cond_initial_norm / _projection
+      s_transitions x2        -> single_cond transitions
+      fourier.w / .b          -> fourier_embedding_weight / _bias (trained_fourier)
+      noise_norm / noise_proj -> noise_embedding_initial_norm / _projection
+
+  AF3's noise embedding is already ESMFold2's: (1/4)*log(sigma/sigma_data), then
+  t*w + b, then the cosine -- the trained_fourier path that of3 and if2 use.
+  """
+  g = lambda leaf: sd['%s.%s' % (prefix, leaf)]
+  d = DIALECT_ESMFOLD2_DIFF
+  out = {
+      'pair_cond_initial_norm/scale': _arr(g('z_input_norm.weight')),
+      'pair_cond_initial_norm/offset': _arr(g('z_input_norm.bias')),
+      'pair_cond_initial_projection/weights': t(g('z_proj.weight')),
+      'single_cond_initial_norm/scale': _arr(g('s_input_norm.weight')),
+      'single_cond_initial_norm/offset': _arr(g('s_input_norm.bias')),
+      'single_cond_initial_projection/weights': t(g('s_proj.weight')),
+      'fourier_embedding_weight': _arr(g('fourier.w')),
+      'fourier_embedding_bias': _arr(g('fourier.b')),
+      'noise_embedding_initial_norm/scale': _arr(g('noise_norm.weight')),
+      'noise_embedding_initial_norm/offset': _arr(g('noise_norm.bias')),
+      'noise_embedding_initial_projection/weights': t(g('noise_proj.weight')),
+  }
+  for i in range(2):
+    out.update(nest('pair_transition_%d' % i,
+                    common.transition(sd, '%s.z_transitions.%d' % (prefix, i), d)))
+    out.update(nest('single_transition_%d' % i,
+                    common.transition(sd, '%s.s_transitions.%d' % (prefix, i), d)))
+  return out

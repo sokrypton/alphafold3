@@ -28,6 +28,7 @@ from alphafold3.model.components import haiku_modules as hm
 import haiku as hk
 import jax
 from jax import numpy as jnp
+import numpy as np
 import tokamax
 
 # Diagnostic tap for the chai1 port (default OFF, same pattern as the diffusion
@@ -179,6 +180,28 @@ def transition_block(
   return output
 
 
+def _rms_norm(x):
+  """Affine-free RMSNorm. torch's F.rms_norm(eps=None) uses finfo(dtype).eps,
+  not the 1e-5 every LayerNorm in this graph uses."""
+  eps = float(np.finfo(np.float32).eps)
+  return x * jax.lax.rsqrt(jnp.mean(x * x, axis=-1, keepdims=True) + eps)
+
+
+def _apply_rope(x, cos, sin):
+  """Rotary embedding with TILED cos/sin -- [c|c], not interleaved.
+
+  The tiling pairs with rotate_half's split-into-halves. Interleaving instead
+  reads corr 0.88 on the atom encoder: high enough to look like noise, low
+  enough to ruin the fold.
+  """
+  ro = cos.shape[-1] * 2
+  c = jnp.concatenate([cos, cos], -1)[..., None, :]
+  s = jnp.concatenate([sin, sin], -1)[..., None, :]
+  a, b = jnp.split(x[..., :ro], 2, axis=-1)
+  rot = jnp.concatenate([-b, a], -1)
+  return jnp.concatenate([x[..., :ro] * c + rot * s, x[..., ro:]], -1)
+
+
 class SelfAttentionConfig(base_config.BaseConfig):
   num_head: int = 16
   key_dim: int | None = None
@@ -197,6 +220,7 @@ def self_attention(
     gate_bias: float = 0.0,
     use_gating_query: bool = True,
     project_output: bool = True,
+    rope: tuple[jnp.ndarray, jnp.ndarray] | None = None,
 ) -> jnp.ndarray:
   """Multihead self-attention.
 
@@ -238,6 +262,16 @@ def self_attention(
         q.reshape(q.shape[:-2] + (qk_flat,))).reshape(q.shape)
     k = hm.LayerNorm(name=f'{name}key_layer_norm', use_fast_variance=False)(
         k.reshape(k.shape[:-2] + (qk_flat,))).reshape(k.shape)
+
+  if rope is not None:
+    # ESMFold2's atom attention carries NO pair bias and no learned positional
+    # term at all: its entire positional signal is a 3D rotary embedding built
+    # from the reference conformer, preceded by an affine-free RMSNorm on q and
+    # k. Neither is expressible as a weight, so it enters here -- and only here;
+    # the sliding window itself needs nothing new, because it is an additive
+    # mask and `bias` already carries one. `rope` is None for every other model.
+    q = _apply_rope(_rms_norm(q), *rope)
+    k = _apply_rope(_rms_norm(k), *rope)
 
   # In some situations the gradient norms can blow up without running this
   # einsum in float32.

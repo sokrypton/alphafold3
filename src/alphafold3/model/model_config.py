@@ -169,7 +169,7 @@ NO_MSA_ROW_UPDATE = ('protenix_mini', 'protenix_tiny')
 # [z_trunk(c_z), relpe(c_z)] -> 2*c_z, so getting the membership wrong is a shape
 # error at load (267 vs 256) rather than a silent one -- which is why this list
 # was the third and last of the protenix_mini omissions to surface.
-DIFFUSION_PROJECTED_RELPOS = ('boltz2', 'rosettafold3') + PROTENIX_FAMILY
+DIFFUSION_PROJECTED_RELPOS = ('boltz2', 'rosettafold3', 'esmfold2') + PROTENIX_FAMILY
 
 
 # Models that compute the column-attention pair bias from the TRANSPOSED pair
