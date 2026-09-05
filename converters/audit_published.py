@@ -103,7 +103,14 @@ def main(argv=None):
                                             r['missing'], r['stamp'], r['sha']))
     if a.apply and r.get('applies') is not True:
       print('    apply -> %s' % r['applies'])
-  bad = [r['model'] for r in rows if r['missing'] > 0 or not r['sorted']]
+  # `applies` counts. A blob that does not fit the graph was being printed on a
+  # side line and still passing: chai1 and protenix2 shipped a diffusion
+  # conditioning at the wrong width for two commits because the verdict only
+  # looked at the manifest, which is a converter-vs-blob check and cannot see
+  # what the GRAPH asks for.
+  bad = [r['model'] for r in rows
+         if r['missing'] > 0 or not r['sorted']
+         or (a.apply and r.get('applies') is not True)]
   print('\nNOT SAFE TO PUBLISH: %s' % (bad or 'none'))
   return 1 if bad else 0
 
