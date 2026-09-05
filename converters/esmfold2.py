@@ -65,7 +65,9 @@ def derive_dims(sd):
         idx.add(int(k[len(prefix) + 8:].split('.')[0]))
     return len(idx)
 
-  c_z = sd['parcae_log_a'].shape[0]
+  # c_z off z_init_1, which every release has -- parcae_log_a does not exist on
+  # the experimental line.
+  c_z = sd['z_init_1.weight'].shape[0]
   s_inputs = sd['z_init_1.weight'].shape[1]
   d = dict(
       c_z=c_z,
@@ -75,6 +77,15 @@ def derive_dims(sd):
       n_lm_encoder=n_blocks('lm_encoder'),
       n_coda=n_blocks('parcae_coda'),
       n_msa=n_blocks('msa_encoder'),
+      # msa_encoder.msa_head_width: 16 on the released models, 32 on the
+      # experimental line. Wv is (msa_heads * width, c_m), so the width falls
+      # out of its size -- the alternative, c_m // msa_heads, is only right for
+      # the first of those.
+      msa_head_width=(
+          sd['msa_encoder.blocks.0.msa_pair_weighted_averaging.Wv.weight']
+          .shape[0] // 8
+          if 'msa_encoder.blocks.0.msa_pair_weighted_averaging.Wv.weight' in sd
+          else 0),
       n_conf=n_blocks('confidence_head.folding_trunk'),
       num_bins=sd['distogram_head.weight'].shape[0],
       lm_layers=sd['language_model.base_z_combine'].shape[0],
@@ -122,6 +133,16 @@ def pair_only_stack(sd, prefix, n):
 # ---------------------------------------------------------------------------
 # parcae: fold the static SSM dynamics into plain arrays
 # ---------------------------------------------------------------------------
+
+def has_parcae(sd):
+  """True where the checkpoint recycles through the parcae SSM.
+
+  Told apart by a TENSOR, not a version string or a repo name -- the artefact
+  survives a rename and a formula does not, which is the same rule the
+  OpenFold3 release detector follows.
+  """
+  return 'parcae_log_a' in sd
+
 
 def parcae_dynamics(sd):
   """Return (a, b_T) with a=(c,) decay and b_T=(c,c) haiku-oriented input map.
@@ -726,6 +747,20 @@ def map_esmfold2_af3(sd, dims=None, num_head=4):
           for k, v in p.items()}
 
 
+def _drops_msa_update(sd, i):
+  """Does block `i` omit the MSA update (row attention + transition)?
+
+  The released models drop it on the LAST block -- protenix's MSABlock builds
+  msa_stack only `if not is_last_block` -- but the EXPERIMENTAL line keeps it on
+  all four (35 leaves per block against the base model's 35/35/35/23). So this
+  is read off the checkpoint rather than inferred from the index; assuming
+  `i == n_msa - 1` stacks blocks of two different shapes and fails with
+  "all input arrays must have the same shape".
+  """
+  return ('msa_encoder.blocks.%d.msa_pair_weighted_averaging.Wv.weight' % i
+          not in sd)
+
+
 def af3_msa_block(sd, prefix, c_z, num_head, is_final, c_m, msa_heads=8,
                   c_hidden=32, msa_head_width=None):
   """One ESMFold2 MSA block as an AF3 EvoformerIteration.
@@ -1054,15 +1089,32 @@ def map_esmfold2_to_af3_graph(sd, dims=None):
       flat['%s/%s' % (scope, k) if scope else k] = v
 
   # ── trunk inputs, recycling, distogram ────────────────────────────────────
-  a_vec, b_T = parcae_dynamics(sd)
+  # Two recycles in this family, told apart by a tensor rather than by a name:
+  # the released models carry parcae (a diagonal SSM over the loop axis), the
+  # EXPERIMENTAL line carries `pair_loop_proj`, which is a LayerNorm(c_z) and a
+  # Linear(c_z, c_z) -- exactly AF3's own prev_embedding_layer_norm +
+  # prev_embedding. So the experimental models revert to stock recycling, and
+  # `recycle_decay` (and the readout and coda that go with parcae) simply are
+  # not there.
+  if has_parcae(sd):
+    a_vec, b_T = parcae_dynamics(sd)
+    recycle = {
+        'prev_embedding/weights': b_T,
+        'prev_embedding_layer_norm/scale': _arr(sd['parcae_input_norm.weight']),
+        'prev_embedding_layer_norm/offset': _arr(sd['parcae_input_norm.bias']),
+        'recycle_decay': a_vec,
+    }
+  else:
+    recycle = {
+        'prev_embedding/weights': t(sd['pair_loop_proj.1.weight']),
+        'prev_embedding_layer_norm/scale': _arr(sd['pair_loop_proj.0.weight']),
+        'prev_embedding_layer_norm/offset': _arr(sd['pair_loop_proj.0.bias']),
+    }
   put(P, {
       'left_single/weights': remap_s_inputs(t(sd['z_init_1.weight'])),
       'right_single/weights': remap_s_inputs(t(sd['z_init_2.weight'])),
       'bond_embedding/weights': t(sd['token_bonds.weight']),
-      'prev_embedding/weights': b_T,
-      'prev_embedding_layer_norm/scale': _arr(sd['parcae_input_norm.weight']),
-      'prev_embedding_layer_norm/offset': _arr(sd['parcae_input_norm.bias']),
-      'recycle_decay': a_vec,
+      **recycle,
       '~_relative_encoding/position_activations/weights': t(sd['rel_pos.embed.weight']),
       **({'msa_activations/weights':
               remap_msa_feat(t(sd['msa_encoder.embed.weight'])),
@@ -1104,15 +1156,18 @@ def map_esmfold2_to_af3_graph(sd, dims=None):
   put(P, af3_pair_stack(sd, 'folding_trunk', dims['n_trunk'], c_z, pair_head,
                         '%s/trunk_pairformer' % stack_at(i_trunk)))
 
-  # scope diff asked for these until the graph gained them
-  put(P, {'parcae_readout/weights': t(sd['parcae_readout.weight'])})
-  put(P, af3_pair_stack(sd, 'parcae_coda', dims['n_coda'], c_z, pair_head,
-                        '%s/trunk_coda' % stack_at(i_trunk + 1)))
+  # the post-trunk readout + coda: parcae only, so absent from the experimental
+  # line entirely
+  if dims['n_coda']:
+    put(P, {'parcae_readout/weights': t(sd['parcae_readout.weight'])})
+    put(P, af3_pair_stack(sd, 'parcae_coda', dims['n_coda'], c_z, pair_head,
+                          '%s/trunk_coda' % stack_at(i_trunk + 1)))
   n_msa = dims['n_msa']
   if n_msa:
     msa = stack_blocks(
         lambda i: af3_msa_block(sd, 'msa_encoder.blocks.%d' % i, c_z, pair_head,
-                                i == n_msa - 1, c_m), n_msa)
+                                _drops_msa_update(sd, i), c_m,
+                                msa_head_width=dims['msa_head_width']), n_msa)
     put(P, nest('__layer_stack_no_per_layer/msa_stack', msa))
 
   # ── diffusion ─────────────────────────────────────────────────────────────

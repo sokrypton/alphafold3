@@ -431,19 +431,22 @@ _SAMPLER_CONSTANTS = {
 #   coda     parcae.coda_n_layers, 0 without parcae
 #   lm_enc   lm_encoder.n_layers, 0 where the release has no lm_encoder
 #   msa_w    msa_encoder.msa_head_width
+#   bins     distogram_head bins (the TRUNK head, not confidence)
 ESMFOLD2_VARIANTS = {
-    'esmfold2': dict(hub='ESMFold2', trunk=48, msa=4, coda=2, lm_enc=4, msa_w=16),
+    'esmfold2': dict(hub='ESMFold2', trunk=48, msa=4, coda=2, lm_enc=4,
+                     msa_w=16, bins=64),
     'esmfold2_fast': dict(hub='ESMFold2-Fast', trunk=24, msa=0, coda=2, lm_enc=4,
-                          msa_w=32),
+                          msa_w=32, bins=64),
     'esmfold2_exp': dict(hub='ESMFold2-Experimental', trunk=48, msa=4, coda=0,
-                         lm_enc=0, msa_w=32),
+                         lm_enc=0, msa_w=32, bins=128),
     'esmfold2_exp_fast': dict(hub='ESMFold2-Experimental-Fast', trunk=24, msa=4,
-                              coda=0, lm_enc=0, msa_w=32),
+                              coda=0, lm_enc=0, msa_w=32, bins=128),
     'esmfold2_exp_cutoff2025': dict(hub='ESMFold2-Experimental-Cutoff2025',
-                                    trunk=48, msa=4, coda=0, lm_enc=0, msa_w=32),
+                                    trunk=48, msa=4, coda=0, lm_enc=0, msa_w=32,
+                                    bins=128),
     'esmfold2_exp_fast_cutoff2025': dict(
         hub='ESMFold2-Experimental-Fast-Cutoff2025', trunk=24, msa=4, coda=0,
-        lm_enc=0, msa_w=32),
+        lm_enc=0, msa_w=32, bins=128),
 }
 
 ESMFOLD2_HUB_IDS = {m: v['hub'] for m, v in ESMFOLD2_VARIANTS.items()}
@@ -480,6 +483,7 @@ def _widen_esmfold2(name):
         ('evoformer.coda.num_layer', v['coda']),
         ('evoformer.lm_encoder.num_layer', v['lm_enc']),
         ('evoformer.msa_stack.msa_attention.value_dim', v['msa_w']),
+        ('heads.distogram.num_bins', v['bins']),
     ), name)
   return widen
 
