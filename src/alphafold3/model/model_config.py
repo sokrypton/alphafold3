@@ -117,6 +117,42 @@ NO_HEAD_NORM = {'boltz2': ('*',),
 # so it rides in ESMFOLD2_VARIANTS as `conf_bins`.
 LEARNED_CONFIDENCE_BINS = ESMFOLD2_FAMILY
 
+
+# Which LayerNorms carry a trained OFFSET, keyed by the norm's own name.
+# AlphaFold 3's are scale-only; several ports made specific ones affine, and
+# each entry here was found the same way -- enumerate the checkpoint's affine
+# LayerNorms and diff against the converter's scale-only scopes.
+#
+# ONE table rather than the eleven inline model-name tuples this replaces. A
+# literal list edited by pattern is exactly how an ESMFold2 width leaked into
+# chai1's and protenix2's settings and broke both for two commits; a new port
+# now fills in rows here instead of hunting for tuples across four files.
+AFFINE_LAYER_NORMS = {
+    # diffusion conditioning
+    'z_trunk_norm': ('boltz2', 'rosettafold3'),
+    'pair_cond_initial_norm': (('boltz2', 'rosettafold3', 'chai1')
+                               + ESMFOLD2_FAMILY),
+    'single_cond_initial_norm': (('boltz2', 'rosettafold3', 'chai1')
+                                 + ESMFOLD2_FAMILY),
+    'noise_embedding_initial_norm': (('boltz2', 'rosettafold3', 'chai1')
+                                     + ESMFOLD2_FAMILY),
+    # the diffusion head's own re-embedding and output
+    'single_cond_embedding_norm': ('boltz2', 'rosettafold3') + ESMFOLD2_FAMILY,
+    'output_norm': ('boltz2', 'rosettafold3', 'chai1') + ESMFOLD2_FAMILY,
+    # atom cross-attention (the names are suffixes: `<name>_lnorm_...`)
+    'lnorm_trunk_single_cond': ('boltz2', 'chai1', 'rosettafold3'),
+    'lnorm_trunk_pair_cond': ('boltz2', 'chai1', 'rosettafold3'),
+    'atom_features_layer_norm': (('boltz2', 'chai1', 'rosettafold3')
+                                 + ESMFOLD2_FAMILY),
+    # the diffusion transformer's shared pair bias norm (both call sites)
+    'pair_input_layer_norm': ('chai1',),
+}
+
+
+def affine_norm(model, name):
+  """Does `model` carry a trained offset on the LayerNorm called `name`?"""
+  return model in AFFINE_LAYER_NORMS.get(name, ())
+
 # Where the MSA encoder sits relative to the recycle. The released line
 # OVERWRITES the injection before it (`msa_encoder_overwrite: true`); the
 # experimental line runs it AFTER, as an addition:

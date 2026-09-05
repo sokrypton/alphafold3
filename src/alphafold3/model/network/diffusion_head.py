@@ -203,7 +203,8 @@ class DiffusionHead(hk.Module):
       # widened concat couples them, so this is a distinct forward path (new params:
       # z_trunk_norm/projection + relpe_projection + the LN/projection at 2*pc).
       z_trunk = hm.Linear(pc, precision='highest', name='z_trunk_projection')(
-          hm.LayerNorm(use_fast_variance=False, create_offset=self.global_config.model in ('boltz2', 'rosettafold3'),
+          hm.LayerNorm(use_fast_variance=False, create_offset=model_config.affine_norm(self.global_config.model,
+                                                             'z_trunk_norm'),
                        name='z_trunk_norm')(pair_embedding))
       relpe = hm.Linear(pc, precision='highest', name='relpe_projection')(rel_features)
       features_2d = jnp.concatenate([z_trunk, relpe], axis=-1)
@@ -238,9 +239,8 @@ class DiffusionHead(hk.Module):
             # fourier_proj.0 all carry a bias). Found by enumerating every
             # affine LayerNorm in the checkpoint and diffing against the
             # converter's scale-only scopes: three showed up, all three real.
-            create_offset=self.global_config.model in (
-                ('boltz2', 'rosettafold3', 'chai1')
-                + model_config.ESMFOLD2_FAMILY),
+            create_offset=model_config.affine_norm(
+                self.global_config.model, 'pair_cond_initial_norm'),
             name='pair_cond_initial_norm',
         )(features_2d)
     )
@@ -307,8 +307,8 @@ class DiffusionHead(hk.Module):
         # fourier_proj.0 all carry a bias). Found by enumerating every
         # affine LayerNorm in the checkpoint and diffing against the
         # converter's scale-only scopes: three showed up, all three real.
-        create_offset=self.global_config.model in (
-            ('boltz2', 'rosettafold3', 'chai1') + model_config.ESMFOLD2_FAMILY),
+        create_offset=model_config.affine_norm(
+            self.global_config.model, 'single_cond_initial_norm'),
         name='single_cond_initial_norm',
     )(features_1d)
     single_cond = hm.Linear(
@@ -369,9 +369,8 @@ class DiffusionHead(hk.Module):
             # fourier_proj.0 all carry a bias). Found by enumerating every
             # affine LayerNorm in the checkpoint and diffing against the
             # converter's scale-only scopes: three showed up, all three real.
-            create_offset=self.global_config.model in (
-                ('boltz2', 'rosettafold3', 'chai1')
-                + model_config.ESMFOLD2_FAMILY),
+            create_offset=model_config.affine_norm(
+                self.global_config.model, 'noise_embedding_initial_norm'),
             name='noise_embedding_initial_norm',
         )(noise_embedding)
     )
@@ -447,8 +446,8 @@ class DiffusionHead(hk.Module):
       if self.global_config.model != 'chai1':
         _s_cond_in = hm.LayerNorm(
             use_fast_variance=False,
-            create_offset=self.global_config.model in (
-                ('boltz2', 'rosettafold3') + model_config.ESMFOLD2_FAMILY),
+            create_offset=model_config.affine_norm(
+                self.global_config.model, 'single_cond_embedding_norm'),
             name='single_cond_embedding_norm',
         )(trunk_single_cond)
       act += hm.Linear(
@@ -478,8 +477,8 @@ class DiffusionHead(hk.Module):
       )
       act = hm.LayerNorm(
           use_fast_variance=False,
-          create_offset=self.global_config.model in (
-              ('boltz2', 'rosettafold3', 'chai1') + model_config.ESMFOLD2_FAMILY),
+          create_offset=model_config.affine_norm(
+              self.global_config.model, 'output_norm'),
           name='output_norm'
       )(act)
       _tap('act_post_transformer', act)

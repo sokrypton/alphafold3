@@ -395,7 +395,8 @@ class Transformer(hk.Module):
             name='pair_input_layer_norm',
             use_fast_variance=False,
             # chai's pair_layer_norm is affine on BOTH scale and offset
-            create_offset=chai,
+            create_offset=model_config.affine_norm(self.global_config.model,
+                                                   'pair_input_layer_norm'),
         )(pair_cond)
         block_pair_logits = hm.Linear(
             self.config.attention.num_head,
@@ -768,7 +769,8 @@ class CrossAttTransformer(hk.Module):
     pair_act = hm.LayerNorm(
         name='pair_input_layer_norm',
         use_fast_variance=False,
-        create_offset=self.global_config.model == 'chai1',
+        create_offset=model_config.affine_norm(self.global_config.model,
+                                               'pair_input_layer_norm'),
     )(pair_cond)
     # (num_subsets, num_queries, num_keys, num_blocks, num_heads)
     pair_logits = hm.Linear(

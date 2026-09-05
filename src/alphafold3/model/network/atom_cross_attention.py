@@ -319,8 +319,8 @@ def atom_cross_att_encoder(
             # offset the bias is silently dropped, which is a pure directional
             # error: it survives the affine-free LN of (a + t2a) downstream, so
             # atom_cond reads rms 1.0000 and corr 0.996 and looks like rounding.
-            create_offset=global_config.model in ('boltz2', 'chai1',
-                                                  'rosettafold3'),
+            create_offset=model_config.affine_norm(
+                global_config.model, 'lnorm_trunk_single_cond'),
             name=f'{name}_lnorm_trunk_single_cond',
         )(trunk_single_cond)
     )
@@ -453,8 +453,8 @@ def atom_cross_att_encoder(
         hm.LayerNorm(
             use_fast_variance=False,
             # same for token_pair_to_atom_pair.0
-            create_offset=global_config.model in ('boltz2', 'chai1',
-                                                  'rosettafold3'),
+            create_offset=model_config.affine_norm(
+                global_config.model, 'lnorm_trunk_pair_cond'),
             name=f'{name}_lnorm_trunk_pair_cond',
         )(trunk_pair_cond)
     )
@@ -733,8 +733,8 @@ def atom_cross_att_decoder(
   queries_act = hm.LayerNorm(
       use_fast_variance=False,
       # chai's to_pos_updates starts with an AFFINE LayerNorm
-      create_offset=global_config.model in (('boltz2', 'chai1', 'rosettafold3')
-                                            + model_config.ESMFOLD2_FAMILY),
+      create_offset=model_config.affine_norm(
+          global_config.model, 'atom_features_layer_norm'),
       name=f'{name}_atom_features_layer_norm',
   )(queries_act)
   queries_position_update = hm.Linear(
