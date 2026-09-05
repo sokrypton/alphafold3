@@ -80,8 +80,12 @@ def derive_dims(sd):
       lm_layers=sd['language_model.base_z_combine'].shape[0],
       lm_width=sd['language_model.base_z_linear.1.weight'].shape[1],
       relpos_in=sd['rel_pos.embed.weight'].shape[1],
-      c_msa=sd['msa_encoder.embed.weight'].shape[0],
-      msa_in=sd['msa_encoder.embed.weight'].shape[1],
+      # ESMFold2-Fast turns the MSA encoder OFF entirely (0 msa_encoder
+      # tensors), so these are absent rather than zero-sized.
+      c_msa=(sd['msa_encoder.embed.weight'].shape[0]
+             if 'msa_encoder.embed.weight' in sd else 0),
+      msa_in=(sd['msa_encoder.embed.weight'].shape[1]
+              if 'msa_encoder.embed.weight' in sd else 0),
       c_atom=sd['inputs_embedder.atom_attention_encoder.atom_linear.weight'].shape[0],
       atom_in=sd['inputs_embedder.atom_attention_encoder.atom_linear.weight'].shape[1],
       c_diff=sd['structure_head.diffusion_module.s_to_token.weight'].shape[0],
@@ -566,13 +570,18 @@ def _read_safetensors(paths):
   return out
 
 
-def convert_esmfold2_weights(checkpoint, output_dir):
+def convert_esmfold2_weights(checkpoint, output_dir, model_name='esmfold2'):
   """Convert biohub/ESMFold2 to a loadable AF3-haiku blob dir.
 
-  This covers the 234.8M FOLDING model only.  ESMFold2 additionally requires
-  ESM-C 6B (6.35B params, 25.4 GB fp32) whose hidden states feed the
-  LanguageModelShim; that tower is a separate artifact and is not written here.
+  This covers the FOLDING model only.  ESMFold2 additionally requires ESM-C 6B
+  (6.35B params, 25.4 GB fp32) whose hidden states feed the LanguageModelShim;
+  that tower is a separate artifact (converters/esmc.py) and is not written here.
+
+  model_name selects which variant is being written -- the six releases differ
+  only in the trunk BLOCK COUNT, which derive_dims already reads off the
+  checkpoint, so nothing else here changes.
   """
+  import os
   from pathlib import Path
   sd = load_esmfold2_checkpoint(checkpoint)
   # the GRAPH map, not map_esmfold2_to_af3: the latter keys on the reference
@@ -587,8 +596,13 @@ def convert_esmfold2_weights(checkpoint, output_dir):
   # are 40 MB against the blob's 800 and a fold that skips ESM-C never loads
   # them.
   lm = {k.replace('/', '.'): v for k, v in language_model_shim(sd).items()}
-  np.savez(Path(output_dir) / 'esmfold2.lm.npz', **lm)
-  return Path(common.write_params_blob(output_dir, 'esmfold2.bin.zst',
+  # ONE shim file for the family: every variant here rides the same ESM-C 6B
+  # tower, and the published name is esmfold2.lm.npz whichever variant fetched
+  # it (weights._COMPANIONS).
+  out = Path(os.path.expanduser(str(output_dir)))
+  out.mkdir(parents=True, exist_ok=True)
+  np.savez(out / 'esmfold2.lm.npz', **lm)
+  return Path(common.write_params_blob(output_dir, '%s.bin.zst' % model_name,
                                        params, add_meta=True))
 
 
@@ -1050,9 +1064,11 @@ def map_esmfold2_to_af3_graph(sd, dims=None):
       'prev_embedding_layer_norm/offset': _arr(sd['parcae_input_norm.bias']),
       'recycle_decay': a_vec,
       '~_relative_encoding/position_activations/weights': t(sd['rel_pos.embed.weight']),
-      'msa_activations/weights': remap_msa_feat(t(sd['msa_encoder.embed.weight'])),
-      'extra_msa_target_feat/weights': remap_s_inputs(
-          t(sd['msa_encoder.project_inputs.weight'])),
+      **({'msa_activations/weights':
+              remap_msa_feat(t(sd['msa_encoder.embed.weight'])),
+          'extra_msa_target_feat/weights': remap_s_inputs(
+              t(sd['msa_encoder.project_inputs.weight']))}
+         if dims['n_msa'] else {}),
   })
   # ESMFold2 symmetrises BEFORE the head -- distogram_head(z + z^T) -- while AF3
   # computes half_logits(z) and then half + half^T. For the WEIGHTS those agree
@@ -1073,7 +1089,11 @@ def map_esmfold2_to_af3_graph(sd, dims=None):
   # three, and a blob converted with ESM-C could not be loaded without it.
   lm_n = dims['n_lm_encoder']
   stack_at = lambda i: '__layer_stack_no_per_layer' + ('_%d' % i if i else '')
-  i_trunk = 1
+  # msa_stack is built first when it exists, so the trunk is _1 there and the
+  # bare name otherwise -- ESMFold2-Fast has no MSA encoder at all. Derived,
+  # because a wrong index loads one stack's weights into another and shows up
+  # only as a missing-parameter error naming a module that looks correct.
+  i_trunk = 1 if dims['n_msa'] else 0
   if lm_n:
     # The lm_encoder is four PAIR-ONLY blocks, so it is the same
     # PairFormerIteration-with-zeroed-attention identity the trunk and the coda
@@ -1089,10 +1109,11 @@ def map_esmfold2_to_af3_graph(sd, dims=None):
   put(P, af3_pair_stack(sd, 'parcae_coda', dims['n_coda'], c_z, pair_head,
                         '%s/trunk_coda' % stack_at(i_trunk + 1)))
   n_msa = dims['n_msa']
-  msa = stack_blocks(
-      lambda i: af3_msa_block(sd, 'msa_encoder.blocks.%d' % i, c_z, pair_head,
-                              i == n_msa - 1, c_m), n_msa)
-  put(P, nest('__layer_stack_no_per_layer/msa_stack', msa))
+  if n_msa:
+    msa = stack_blocks(
+        lambda i: af3_msa_block(sd, 'msa_encoder.blocks.%d' % i, c_z, pair_head,
+                                i == n_msa - 1, c_m), n_msa)
+    put(P, nest('__layer_stack_no_per_layer/msa_stack', msa))
 
   # ── diffusion ─────────────────────────────────────────────────────────────
   put(D, af3_diffusion_conditioning(sd, 'structure_head.diffusion_module.conditioning'))

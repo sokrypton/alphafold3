@@ -736,16 +736,22 @@ class Evoformer(hk.Module):
             batch=batch, pair_activations=pair_activations
         )
         _tap('z_init', pair_activations)
-        pair_activations, key = self._embed_process_msa(
-            msa_batch=batch.msa,
-            pair_activations=pair_activations,
-            pair_mask=pair_mask,
-            key=key,
-            target_feat=target_feat,
-            use_dropout=use_dropout,
-            is_ligand=batch.token_features.is_ligand,
-            asym_id=batch.token_features.asym_id,
-        )
+        if self.config.msa_stack.num_layer:
+          # ESMFold2-Fast disables the MSA encoder outright
+          # (msa_encoder.enabled false); it folds from ESM-C alone. Skipping the
+          # CALL, not just the stack, is what keeps msa_activations and
+          # extra_msa_target_feat out of a parameter tree that has no weights
+          # for them.
+          pair_activations, key = self._embed_process_msa(
+              msa_batch=batch.msa,
+              pair_activations=pair_activations,
+              pair_mask=pair_mask,
+              key=key,
+              target_feat=target_feat,
+              use_dropout=use_dropout,
+              is_ligand=batch.token_features.is_ligand,
+              asym_id=batch.token_features.asym_id,
+          )
         pair_activations = self._embed_lm_pair(
             batch=batch, pair_activations=pair_activations,
             pair_mask=pair_mask, key=key, use_dropout=use_dropout)

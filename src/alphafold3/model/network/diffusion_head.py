@@ -239,7 +239,8 @@ class DiffusionHead(hk.Module):
             # affine LayerNorm in the checkpoint and diffing against the
             # converter's scale-only scopes: three showed up, all three real.
             create_offset=self.global_config.model in (
-                'boltz2', 'rosettafold3', 'chai1', 'esmfold2'),
+                ('boltz2', 'rosettafold3', 'chai1')
+                + model_config.ESMFOLD2_FAMILY),
             name='pair_cond_initial_norm',
         )(features_2d)
     )
@@ -307,7 +308,7 @@ class DiffusionHead(hk.Module):
         # affine LayerNorm in the checkpoint and diffing against the
         # converter's scale-only scopes: three showed up, all three real.
         create_offset=self.global_config.model in (
-            'boltz2', 'rosettafold3', 'chai1', 'esmfold2'),
+            ('boltz2', 'rosettafold3', 'chai1') + model_config.ESMFOLD2_FAMILY),
         name='single_cond_initial_norm',
     )(features_1d)
     single_cond = hm.Linear(
@@ -369,7 +370,8 @@ class DiffusionHead(hk.Module):
             # affine LayerNorm in the checkpoint and diffing against the
             # converter's scale-only scopes: three showed up, all three real.
             create_offset=self.global_config.model in (
-                'boltz2', 'rosettafold3', 'chai1', 'esmfold2'),
+                ('boltz2', 'rosettafold3', 'chai1')
+                + model_config.ESMFOLD2_FAMILY),
             name='noise_embedding_initial_norm',
         )(noise_embedding)
     )
@@ -445,8 +447,8 @@ class DiffusionHead(hk.Module):
       if self.global_config.model != 'chai1':
         _s_cond_in = hm.LayerNorm(
             use_fast_variance=False,
-            create_offset=self.global_config.model in ('boltz2', 'rosettafold3',
-                                                       'esmfold2'),
+            create_offset=self.global_config.model in (
+                ('boltz2', 'rosettafold3') + model_config.ESMFOLD2_FAMILY),
             name='single_cond_embedding_norm',
         )(trunk_single_cond)
       act += hm.Linear(
@@ -476,8 +478,8 @@ class DiffusionHead(hk.Module):
       )
       act = hm.LayerNorm(
           use_fast_variance=False,
-          create_offset=self.global_config.model in ('boltz2', 'rosettafold3',
-                                                     'chai1', 'esmfold2'),
+          create_offset=self.global_config.model in (
+              ('boltz2', 'rosettafold3', 'chai1') + model_config.ESMFOLD2_FAMILY),
           name='output_norm'
       )(act)
       _tap('act_post_transformer', act)

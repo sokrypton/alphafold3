@@ -22,6 +22,8 @@ nothing here imports torch or knows what a checkpoint looks like.
 
 from __future__ import annotations
 
+from alphafold3.model import model_config
+
 # IntelliFold-v2's "full_fat" preset: the four channels it widens over stock AF3.
 # (scope, attribute) pairs resolved against model.Model.Config(); everything not
 # listed is byte-identical to public AF3. Values from IntelliFold's own
@@ -404,20 +406,52 @@ _SAMPLER_CONSTANTS = {
     # sigma 256 -- the EDM schedule opens at sigma_data * smax = 2560, so
     # running AF3's constants starts the trajectory with ten times the noise the
     # model was trained to undo, and then anneals it fourteen times too slowly.
-    'esmfold2': dict(steps=14, max_sigma=256.0),
+    # Every ESMFold2 variant samples the same way; only the trunk depth differs.
+    **{m: dict(steps=14, max_sigma=256.0)
+       for m in model_config.ESMFOLD2_FAMILY},
 }
 
 
 
 # Config-shape divergences, one widener per family that has any. A family absent
 # here runs at stock AF3 dimensions.
+# The trunk depth is the ONLY thing that differs across the family: "Fast" is
+# 24 pair-only blocks where the base model is 48. Read off each release's
+# config.json, not guessed.
+# One row per ESMFold2 release, read off its own config.json and confirmed
+# against the tensor inventory -- NOT assumed from the name. "Fast" is not only
+# a shallower trunk: it also turns the MSA encoder OFF (msa_encoder.enabled
+# false, 0 msa_encoder tensors), so it is ESM-C-only. And the EXPERIMENTAL line
+# is a different architecture again: no parcae, no coda, no lm_encoder stack,
+# a wider MSA head and a 128-bin confidence distogram.
+#
+#   hub      the biohub repo it is converted from (all six share ESM-C 6B)
+#   trunk    folding_trunk.n_layers
+#   msa      msa_encoder.n_layers, or 0 where the encoder is disabled
+#   coda     parcae.coda_n_layers, 0 without parcae
+#   lm_enc   lm_encoder.n_layers, 0 where the release has no lm_encoder
+#   msa_w    msa_encoder.msa_head_width
+ESMFOLD2_VARIANTS = {
+    'esmfold2': dict(hub='ESMFold2', trunk=48, msa=4, coda=2, lm_enc=4, msa_w=16),
+    'esmfold2_fast': dict(hub='ESMFold2-Fast', trunk=24, msa=0, coda=2, lm_enc=4,
+                          msa_w=32),
+    'esmfold2_exp': dict(hub='ESMFold2-Experimental', trunk=48, msa=4, coda=0,
+                         lm_enc=0, msa_w=32),
+    'esmfold2_exp_fast': dict(hub='ESMFold2-Experimental-Fast', trunk=24, msa=4,
+                              coda=0, lm_enc=0, msa_w=32),
+    'esmfold2_exp_cutoff2025': dict(hub='ESMFold2-Experimental-Cutoff2025',
+                                    trunk=48, msa=4, coda=0, lm_enc=0, msa_w=32),
+    'esmfold2_exp_fast_cutoff2025': dict(
+        hub='ESMFold2-Experimental-Fast-Cutoff2025', trunk=24, msa=4, coda=0,
+        lm_enc=0, msa_w=32),
+}
+
+ESMFOLD2_HUB_IDS = {m: v['hub'] for m, v in ESMFOLD2_VARIANTS.items()}
+
 ESMFOLD2_SETTINGS = (
-    # trunk: 48 PAIR-ONLY blocks at c_z 256 (AF3 is 128), no templates
+    # trunk: PAIR-ONLY blocks at c_z 256 (AF3 is 128), no templates. The block
+    # COUNT is per-variant, applied after this tuple.
     ('evoformer.pair_channel', 256),
-    ('evoformer.pairformer.num_layer', 48),
-    ('evoformer.coda.num_layer', 2),
-    ('evoformer.lm_encoder.num_layer', 4),
-    ('evoformer.msa_stack.num_layer', 4),
     ('evoformer.msa_channel', 128),
     ('evoformer.template.template_stack.num_layer', 0),
     ('evoformer.per_atom_conditioning.atom_transformer.num_blocks', 3),
@@ -432,12 +466,26 @@ ESMFOLD2_SETTINGS = (
 )
 
 
-def _widen_esmfold2(cfg):
-  _apply_settings(cfg, ESMFOLD2_SETTINGS, 'esmfold2')
+def _widen_esmfold2(name):
+  """-> a widener for one ESMFold2 variant. The family shares every setting
+  except the trunk depth, so the depth rides in as a per-name row rather than as
+  six near-identical tuples."""
+  v = ESMFOLD2_VARIANTS[name]
+
+  def widen(cfg):
+    _apply_settings(cfg, ESMFOLD2_SETTINGS, name)
+    _apply_settings(cfg, (
+        ('evoformer.pairformer.num_layer', v['trunk']),
+        ('evoformer.msa_stack.num_layer', v['msa']),
+        ('evoformer.coda.num_layer', v['coda']),
+        ('evoformer.lm_encoder.num_layer', v['lm_enc']),
+        ('evoformer.msa_stack.msa_attention.value_dim', v['msa_w']),
+    ), name)
+  return widen
 
 
 _WIDENERS = {
-    'esmfold2': _widen_esmfold2,
+    **{m: _widen_esmfold2(m) for m in model_config.ESMFOLD2_FAMILY},
     'opendde': _widen_opendde,
     'boltz2': _widen_boltz2,
     'protenix2': _widen_protenix2,
@@ -458,7 +506,8 @@ _FEATURISE = {
     # ESMFold2 attends +/-64 atoms by rank, which needs 32 + 2*64 = 160 keys of
     # context around a query block; AF3's default 128 is too narrow, so widen the
     # key subset and let the exact window ride in as a mask.
-    'esmfold2': dict(atom_keys_subset_size=192, lm_pair=True),
+    **{m: dict(atom_keys_subset_size=192, lm_pair=True)
+       for m in model_config.ESMFOLD2_FAMILY},
     # boltz2 keeps a modified residue as ONE token holding all its atoms
     # (data/tokenize/boltz2.py: standard -> per residue, NONPOLYMER -> per atom,
     # else -> one token, all atoms). AF3 atomises instead, and handing boltz2 ten
@@ -692,8 +741,9 @@ MODEL_SPECS = {
     # ESMFold2 carries a trained Fourier noise embedding like the OF3 lineage,
     # but is not OpenFold-derived, so it is named rather than inherited -- the
     # same reason chai1 is named.
-    'esmfold2': ModelSpec('esmfold2', trained_fourier=True,
-                          weights_source='https://huggingface.co/biohub/ESMFold2'),
+    **{m: ModelSpec(m, trained_fourier=True,
+                    weights_source='https://huggingface.co/biohub/%s' % hub)
+       for m, hub in ESMFOLD2_HUB_IDS.items()},
 }
 
 # Historical / abbreviated spellings, kept working.

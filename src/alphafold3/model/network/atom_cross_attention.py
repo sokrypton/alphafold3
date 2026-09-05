@@ -87,7 +87,8 @@ def _per_atom_conditioning(
   # arcsinh(charge). Identical at charge 0, so a neutral-only test would never
   # see it -- 6MRR has 17 charged atoms out of 574.
   charge = batch.ref_structure.charge
-  if global_config is not None and global_config.model not in ('chai1', 'esmfold2'):
+  if (global_config is not None and global_config.model != 'chai1'
+      and global_config.model not in model_config.ESMFOLD2_FAMILY):
     charge = jnp.arcsinh(charge)
   act += hm.Linear(c.per_atom_channels, name=f'{name}_embed_ref_charge')(
       charge[:, :, None]
@@ -732,8 +733,8 @@ def atom_cross_att_decoder(
   queries_act = hm.LayerNorm(
       use_fast_variance=False,
       # chai's to_pos_updates starts with an AFFINE LayerNorm
-      create_offset=global_config.model in ('boltz2', 'chai1',
-                                            'rosettafold3', 'esmfold2'),
+      create_offset=global_config.model in (('boltz2', 'chai1', 'rosettafold3')
+                                            + model_config.ESMFOLD2_FAMILY),
       name=f'{name}_atom_features_layer_norm',
   )(queries_act)
   queries_position_update = hm.Linear(

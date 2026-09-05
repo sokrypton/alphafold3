@@ -13,6 +13,12 @@ _ENTRY_POINTS = {
     # same module: the two OpenFold3 releases share a converter, which
     # refuses a checkpoint that does not match the name asked for.
     'openbind0': ('openfold3', 'convert_openbind0_weights'),
+    # the ESMFold2 family: one converter, the variant named through
+    # `model_name` (they differ only in trunk depth, which derive_dims reads).
+    **{m: ('esmfold2', 'convert_esmfold2_weights')
+       for m in ('esmfold2', 'esmfold2_fast', 'esmfold2_exp',
+                 'esmfold2_exp_fast', 'esmfold2_exp_cutoff2025',
+                 'esmfold2_exp_fast_cutoff2025')},
     'intellifold2': ('intellifold2', 'convert_intellifold2_weights'),
     'opendde': ('opendde', 'convert_opendde_weights'),
     'boltz2': ('boltz2', 'convert_boltz2_weights'),

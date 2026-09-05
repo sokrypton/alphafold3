@@ -63,7 +63,33 @@ MODELS = (
     # SSM recycle, a clamped OPM norm and a rotary atom window -- see
     # SSM_RECYCLE, CLAMPED_OPM_NORM, SWA_ROPE_ATOM_ATTENTION.
     'esmfold2',
+    # ...and its released variants. "Fast" halves the folding trunk (24 blocks
+    # against 48) and keeps the same ESM-C 6B tower; "Experimental" and
+    # "Cutoff2025" are separate trainings at the same two depths. Every forward
+    # branch below is shared, so they are one family.
+    'esmfold2_fast',
+    'esmfold2_exp',
+    'esmfold2_exp_fast',
+    'esmfold2_exp_cutoff2025',
+    'esmfold2_exp_fast_cutoff2025',
 )
+
+
+# The ESMFold2 family. Like PROTENIX_FAMILY, the members differ only in COUNTS
+# -- 24 or 48 trunk blocks -- so every forward branch one takes, all take.
+# Naming the membership once is the whole point: `esmfold2` alone appeared in
+# thirteen places in this file and eight more in the graph, and a variant added
+# to twelve of them would fail as a shape error that names nothing.
+ESMFOLD2_FAMILY = ('esmfold2', 'esmfold2_fast', 'esmfold2_exp',
+                   'esmfold2_exp_fast', 'esmfold2_exp_cutoff2025',
+                   'esmfold2_exp_fast_cutoff2025')
+
+# ...with one real architectural split inside it. The two RELEASED models recycle
+# through the parcae SSM; the four EXPERIMENTAL ones carry `pair_loop_proj`
+# instead -- a LayerNorm(256) and a Linear(256, 256), which is exactly AF3's own
+# `prev_embedding_layer_norm` + `prev_embedding`. So the experimental line reverts
+# to stock recycling, and drops the parcae readout and coda with it.
+ESMFOLD2_SSM_RECYCLE = ('esmfold2', 'esmfold2_fast')
 
 # The Protenix family. Its model types differ from one another ONLY in counts
 # and widths (converters/protenix2.derive_dims reads both off the checkpoint), so
@@ -146,13 +172,13 @@ KEY_MASKED_ATOM_ATTENTION = ('rosettafold3', 'opendde') + PROTENIX_FAMILY
 # fold to plain arrays at conversion time. Everything else here recycles with
 # z = z_inject + prev_embedding(norm(z_prev)), which is the same expression at
 # a = 1 with the operands the other way round.
-SSM_RECYCLE = ('esmfold2',)
+SSM_RECYCLE = ESMFOLD2_SSM_RECYCLE
 
 
 # Models whose OuterProductMean divides by max(pair_count, 1) rather than by
 # AF3's 1e-3 + pair_count. A scale, not an offset, and worth 1e-03 at MSA depth
 # 1 -- which is the depth ESMFold2 runs at by default.
-CLAMPED_OPM_NORM = ('esmfold2',)
+CLAMPED_OPM_NORM = ESMFOLD2_FAMILY
 
 
 # Models whose ATOM attention is a sliding window with 3D rotary positions
@@ -164,29 +190,29 @@ CLAMPED_OPM_NORM = ('esmfold2',)
 # BLOCK-aligned (query i sees [32b-48, 32b+79]), so the two are different masks
 # even at the same width; the exact window rides in as an additive pair_mask and
 # the key subset is widened to cover it (see ATOM_KEYS_SUBSET_SIZE).
-SWA_ROPE_ATOM_ATTENTION = ('esmfold2',)
+SWA_ROPE_ATOM_ATTENTION = ESMFOLD2_FAMILY
 
 
 # Models whose TRUNK carries no single track: 48 pair-only blocks, and the
 # structure head is handed s_trunk=None. Their diffusion single conditioning is
 # built from s_inputs alone rather than from [single_embedding, target_feat].
-PAIR_ONLY_TRUNK = ('esmfold2',)
+PAIR_ONLY_TRUNK = ESMFOLD2_FAMILY
 
 # ESMFold2 keeps dropout on the LM pair representation at INFERENCE, resampled
 # every recycle pass (config.lm_encoder.per_loop_lm_dropout; the top-level config
 # says 0.0 and is overridden). It is not optional polish -- disabling it costs
 # ~18 A on 6MRR.
-LM_PAIR_DROPOUT = {'esmfold2': 0.25}
+LM_PAIR_DROPOUT = {m: 0.25 for m in ESMFOLD2_FAMILY}
 
 
 # Models whose sampler rigid-aligns the noisy coordinates onto the denoised
 # prediction before the Euler step. See diffusion_head._kabsch.
-REALIGN_SAMPLER = ('esmfold2',)
+REALIGN_SAMPLER = ESMFOLD2_FAMILY
 
 
 # Models that LayerNorm the summed per-atom reference features. AF3 sums
 # bias-free per-feature Linears and leaves the result unnormalised.
-NORMED_ATOM_FEATURES = ('esmfold2',)
+NORMED_ATOM_FEATURES = ESMFOLD2_FAMILY
 
 
 # Models whose confidence head RE-EMBEDS the pair from s_inputs rather than
@@ -194,13 +220,14 @@ NORMED_ATOM_FEATURES = ('esmfold2',)
 # and an outer PRODUCT of s_inputs, plus a distance-bin embedding of the
 # PREDICTED coordinates. boltz2 established the path; ESMFold2 builds the same
 # thing, which is why it reuses it rather than adding a second one.
-REEMBED_CONFIDENCE_PAIR = ('boltz2', 'esmfold2')
+REEMBED_CONFIDENCE_PAIR = ('boltz2',) + ESMFOLD2_FAMILY
 ATOM_ROPE_HALF_WINDOW = 64
 # 32 queries + 2*64 of context needs 160; the next power-of-two multiple that
 # AF3's gather machinery is happy with is 192.
-ATOM_KEYS_SUBSET_SIZE = {'esmfold2': 192}
-ATOM_ROPE = {'esmfold2': dict(n_spatial=2, n_uid=10,
-                              spatial_base=20.0, uid_base=10000.0)}
+ATOM_KEYS_SUBSET_SIZE = {m: 192 for m in ESMFOLD2_FAMILY}
+ATOM_ROPE = {m: dict(n_spatial=2, n_uid=10,
+                     spatial_base=20.0, uid_base=10000.0)
+             for m in ESMFOLD2_FAMILY}
 
 
 # Models whose MSA stack does NOT update the MSA representation at all: their
@@ -222,7 +249,8 @@ NO_MSA_ROW_UPDATE = ('protenix_mini', 'protenix_tiny')
 # [z_trunk(c_z), relpe(c_z)] -> 2*c_z, so getting the membership wrong is a shape
 # error at load (267 vs 256) rather than a silent one -- which is why this list
 # was the third and last of the protenix_mini omissions to surface.
-DIFFUSION_PROJECTED_RELPOS = ('boltz2', 'rosettafold3', 'esmfold2') + PROTENIX_FAMILY
+DIFFUSION_PROJECTED_RELPOS = (('boltz2', 'rosettafold3') + ESMFOLD2_FAMILY
+                              + PROTENIX_FAMILY)
 
 
 # Models that compute the column-attention pair bias from the TRANSPOSED pair
@@ -267,7 +295,8 @@ PER_BLOCK_ATOM_PAIR_LAYER_NORM = ('opendde', 'rosettafold3') + PROTENIX_FAMILY
 #
 # Reading the tensor name alone would have got two of the four wrong. The halving
 # lives in the converters, as a weight transform, so there is no forward branch.
-DISTOGRAM_BIAS = ('opendde', 'rosettafold3', 'boltz2', 'esmfold2') + PROTENIX_FAMILY
+DISTOGRAM_BIAS = (('opendde', 'rosettafold3', 'boltz2') + ESMFOLD2_FAMILY
+                  + PROTENIX_FAMILY)
 
 
 class GlobalConfig(base_config.BaseConfig):
