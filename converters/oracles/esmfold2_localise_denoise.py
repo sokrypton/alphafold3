@@ -33,6 +33,11 @@ if spec.featurise:
                                  has_msa=False, fold_input=fi)
 cfg = af3_model.Model.Config(); cfg.global_config.flash_attention_implementation = 'xla'
 cfg.global_config.bfloat16 = 'none'; spec.configure(cfg)
+# NB lets the atom stack be truncated to N blocks on both sides, to see whether
+# the divergence appears in one block or accumulates over three.
+NB = int(os.environ.get('NB', '0'))
+if NB:
+    cfg.heads.diffusion.atom_transformer.num_blocks = NB
 
 S = '/tmp/claude-1000/-home-ubuntu-ColabDesign2/77aa66c7-a908-4cb6-bf0e-1ff700d68150/scratchpad/'
 sd = dict(np.load(S + 'esmfold2_sd.npz')); dims = CV.derive_dims(sd); dims['n_input_atom'] = 3
@@ -48,6 +53,8 @@ zr, s_in, _ = R.trunk(f, None, pref, dims, n_loops=3, key=jax.random.PRNGKey(0),
 rp = jnp.asarray(R.rel_pos_features(
     f['residue_index'].astype(int), f['asym_id'].astype(int), f['sym_id'].astype(int),
     f['entity_id'].astype(int), f['token_index'].astype(int))) @ pref['rel_pos/weights']
+if NB:
+    dims = dict(dims); dims['n_diff_atom'] = NB
 x_ref = np.asarray(R.denoise(jnp.asarray(x_flat), T_HAT, f, s_in, zr, rp, pref, dims))[rmask]
 
 N_PASSES = 4
@@ -98,13 +105,69 @@ for name in ('single_cond', 'pair_cond', 'token_act', 'act_pre_transformer',
         x = np.asarray(gt[name][0]); y = np.asarray(R.TAPS[name][0])
         if name == 'r_update':                     # dense vs flat atom layout
             x = x[gmask][:n]; y = y[rmask][:n]
+            globals()['r_ref_own'] = y
         if x.shape != y.shape:
             print('   %-20s SHAPE %s vs %s' % (name, x.shape, y.shape)); continue
         print('   %-20s corr %.6f  std %.4f vs %.4f'
               % (name, np.corrcoef(x.ravel(), y.ravel())[0, 1], x.std(), y.std()))
+
+from alphafold3.model.network import atom_cross_attention as aca
+nk = np.asarray(aca.ATOM_TAPS['diffusion_swa_nkeys'][0]).ravel()
+qr = np.asarray(aca.ATOM_TAPS['diffusion_q_rank'][0]).ravel()
+real = np.asarray(aca.ATOM_TAPS['diffusion_qmask'][0]).ravel().astype(bool)
+nr = nk[real]
+print('   swa keys per query: min %d  median %d  max %d over %d real queries'
+      ' (ideal 129 in the interior)' % (nr.min(), int(np.median(nr)), nr.max(), real.sum()))
+import collections
+print('   histogram', sorted(collections.Counter(nr.tolist()).items())[:6], '...',
+      sorted(collections.Counter(nr.tolist()).items())[-4:])
+# WHICH flat order is the queries layout? Compare the per-atom features, whose
+# value is fixed by the element and atom name, under both readings: dense
+# (token, slot) flattened, or the compact atom list.
+xa = np.asarray(aca.ATOM_TAPS['diffusion_atom_features'][0])
+ya = np.asarray(R.TAPS['atom_features'][0])[:n]
+for how, v in (('dense[gmask]', xa.reshape(-1, xa.shape[-1])[np.asarray(gmask).ravel()][:n]),
+               ('flat[:n]', xa.reshape(-1, xa.shape[-1])[:n])):
+    print('   atom_features %-14s corr %.6f' % (how, np.corrcoef(v.ravel(), ya.ravel())[0, 1]))
+
+for gname, rname in (('diffusion_enc_queries_in', 'enc_queries_in'),
+                     ('diffusion_enc_queries', 'enc_queries'),
+                     ('diffusion_dec_queries', 'dec_queries')):
+    if gname in aca.ATOM_TAPS and rname in R.TAPS:
+        x = np.asarray(aca.ATOM_TAPS[gname][0])
+        y = np.asarray(R.TAPS[rname][0])
+        # the queries layout is the FLAT atom list in blocks of 32, not the
+        # per-token dense layout gmask indexes -- reshaping and masking with
+        # gmask would compare different atoms.
+        x = x.reshape(-1, x.shape[-1])
+        print('     (%s shapes %s vs %s; ref mask trailing=%s)'
+              % (rname, x.shape, y.shape, bool(rmask[:int(rmask.sum())].all())))
+        x, y = x[:n], y[:n]
+        print('   %-20s corr %.6f  std %.4f vs %.4f'
+              % (rname, np.corrcoef(x.ravel(), y.ravel())[0, 1], x.std(), y.std()))
 
 a, c = x_graph.ravel(), x_ref[:n].ravel()
 print('x_denoised  GRAPH vs REFERENCE   (t_hat = %.3g, %d atoms)' % (T_HAT, n))
 print('   corr %.6f   rms diff %.4f A' % (np.corrcoef(a, c)[0, 1],
                                           np.sqrt(((x_graph - x_ref[:n]) ** 2).sum(-1).mean())))
 print('   graph std %.4f   ref std %.4f' % (x_graph.std(), x_ref[:n].std()))
+
+# How much of the residual is simply a DIFFERENT REFERENCE CONFORMER? Our
+# featuriser builds ref_pos from the CCD/RDKit ideal, ESMFold2's dump carries
+# its own, and the atom blocks read ref_pos through rotary embeddings -- so the
+# atom path is the one place a conformer difference is not cosmetic. Re-run the
+# reference denoise with OUR conformer substituted and see how far r_update
+# moves on its own.
+import copy
+f2 = dict(f)
+sub = np.asarray(f['ref_pos']).copy()
+gpos_dense = np.asarray(fb0.ref_structure.positions)
+gmask_ref = np.asarray(fb0.ref_structure.mask).astype(bool)
+gflat = gpos_dense[gmask_ref]
+sub[rmask] = gflat[:int(rmask.sum())]
+f2['ref_pos'] = jnp.asarray(sub)
+R.TAPS.clear()
+R.denoise(jnp.asarray(x_flat), T_HAT, f2, s_in, zr, rp, pref, dims)
+r_swap = np.asarray(R.TAPS['r_update'][0])[rmask][:n]
+print('reference r_update, OUR conformer vs ITS own: corr %.6f'
+      % np.corrcoef(r_swap.ravel(), np.asarray(r_ref_own).ravel())[0, 1])

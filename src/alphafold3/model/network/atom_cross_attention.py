@@ -29,6 +29,7 @@ from alphafold3.model.components import utils
 from . import diffusion_transformer
 import haiku as hk
 import numpy as np
+import os
 import jax
 import jax.numpy as jnp
 
@@ -40,6 +41,18 @@ class AtomCrossAttEncoderConfig(base_config.BaseConfig):
       base_config.autocreate(num_intermediate_factor=2, num_blocks=3)
   )
   per_atom_pair_channels: int = 16
+
+
+# Atom-level stage taps, default OFF. `a` is pooled over each token's atoms, so
+# a token-level correlation can look healthy while the atom stream underneath it
+# is not; these compare the stream itself. Keyed by module name, so the trunk's
+# encoder and the diffusion encoder/decoder are separate entries.
+ATOM_TAPS = {}
+
+
+def _tap(name, value):
+  if os.environ.get('ESM_DIFF_TAP') == '1':
+    ATOM_TAPS.setdefault(name, []).append(value)
 
 
 def _per_atom_conditioning(
@@ -115,6 +128,7 @@ def _per_atom_conditioning(
     # the LayerNorm is data-dependent and cannot be folded into any of them.
     act = hm.LayerNorm(name=f'{name}_atom_features_norm')(act)
   act *= batch.ref_structure.mask.astype(jnp.float32)[:, :, None]
+  _tap('%s_atom_features' % name, act)
 
   # Compute pair conditioning
   # shape (num_tokens, num_dense, num_dense, channels)
@@ -509,6 +523,9 @@ def atom_cross_att_encoder(
     swa_mask = jnp.abs(q_rank[:, :, None] - k_rank[:, None, :]) <= half
     swa_mask = swa_mask & queries_mask[:, :, None].astype(jnp.bool_)
     swa_mask = swa_mask & keys_mask[:, None, :].astype(jnp.bool_)
+    _tap('%s_swa_nkeys' % name, swa_mask.sum(-1))
+    _tap('%s_q_rank' % name, q_rank)
+    _tap('%s_qmask' % name, queries_mask)
 
   offsets_valid = (
       queries_ref_space_uid[:, :, None] == keys_ref_space_uid[:, None, :]
@@ -604,6 +621,7 @@ def atom_cross_att_encoder(
         name=f'{name}_pair_mlp_3',
     )(jax.nn.relu(pair_act2))
 
+  _tap('%s_enc_queries_in' % name, queries_act)
   # Run the atom cross attention transformer.
   queries_act = diffusion_transformer.CrossAttTransformer(
       c.atom_transformer, global_config, name=f'{name}_atom_transformer_encoder'
@@ -620,6 +638,7 @@ def atom_cross_att_encoder(
       rope_k=rope_k,
   )
   queries_act *= queries_mask[..., None]
+  _tap('%s_enc_queries' % name, queries_act)
   skip_connection = queries_act
 
   # Convert back to token-atom layout and aggregate to tokens
@@ -694,6 +713,7 @@ def atom_cross_att_decoder(
                         name=f'{name}_post_atom_cond_layer_norm')
     q_cond, k_cond = post(q_cond), post(k_cond)
 
+  _tap('%s_enc_queries_in' % name, queries_act)
   # Run the atom cross attention transformer.
   queries_act = diffusion_transformer.CrossAttTransformer(
       c.atom_transformer, global_config, name=f'{name}_atom_transformer_decoder'
@@ -708,6 +728,7 @@ def atom_cross_att_decoder(
       pair_mask=enc.same_token_mask,
   )
   queries_act *= enc.queries_mask[..., None]
+  _tap('%s_dec_queries' % name, queries_act)
   queries_act = hm.LayerNorm(
       use_fast_variance=False,
       # chai's to_pos_updates starts with an AFFINE LayerNorm

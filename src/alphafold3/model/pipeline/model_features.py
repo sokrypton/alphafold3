@@ -259,6 +259,42 @@ def _attach_esm(batch, esm):
   return batch
 
 
+def _wide_key_window(batch, k_size, prefix=''):
+  """Rebuild the atom-attention key window at a WIDER size than AF3's 128.
+
+  AF3 gives each block of 32 queries 128 keys, which is a +/-48 window. ESMFold2
+  attends +/-64, so 128 keys cannot hold its window however they are centred:
+  the graph masks to +/-64 by rank, but a query can only see keys the SUBSET
+  contains, and the subset was ten short of the window for a typical interior
+  query (129 keys wanted, 119 median seen). Silent -- attention over a truncated
+  key set is still well-formed attention.
+
+  Rewritten on the finished batch, like _circular_key_window: the key gathers
+  are index arrays over the flat queries layout, so the window is the only thing
+  that changes.
+  """
+  q_idxs = np.asarray(batch[f'{prefix}token_atoms_to_queries:gather_idxs'])
+  q_mask = np.asarray(batch[f'{prefix}token_atoms_to_queries:gather_mask'])
+  num_subsets, q_size = q_idxs.shape
+  n_padded = num_subsets * q_size
+  if k_size > n_padded:            # tiny input: the window is the whole list
+    k_size = n_padded
+  starts = np.arange(num_subsets) * q_size + (q_size - k_size) // 2
+  starts = np.clip(starts, 0, n_padded - k_size)     # AF3 slides in-bounds
+  window = starts[:, None] + np.arange(k_size)[None, :]
+
+  flat_mask = q_mask.reshape(-1)
+  kk = f'{prefix}queries_to_keys:gather_idxs'
+  batch[kk] = window.astype(np.asarray(batch[kk]).dtype)
+  batch[f'{prefix}queries_to_keys:gather_mask'] = flat_mask[window]
+  tok = np.asarray(batch[f'{prefix}tokens_to_queries:gather_idxs']).reshape(-1)
+  tk = f'{prefix}tokens_to_keys:gather_idxs'
+  batch[tk] = tok[window].astype(np.asarray(batch[tk]).dtype)
+  batch[f'{prefix}tokens_to_keys:gather_mask'] = np.asarray(
+      batch[f'{prefix}tokens_to_queries:gather_mask']).reshape(-1)[window]
+  return batch
+
+
 def apply(batch, spec, *, refeaturise=None, model_dir=None, esm=None,
           has_msa=True, fold_input=None, cyclic=None):
   """Apply `spec`'s featurisation conventions to a featurised batch, in place.
@@ -315,6 +351,8 @@ def apply(batch, spec, *, refeaturise=None, model_dir=None, esm=None,
         batch, load_chai_conformers(
             os.path.join(os.path.expanduser(str(model_dir)),
                          knobs['std_conformers'])))
+  if knobs.get('atom_keys_subset_size'):
+    _wide_key_window(batch, knobs['atom_keys_subset_size'])
   if knobs.get('circular_keys'):
     _circular_key_window(batch)
   if knobs.get('padded_keys'):

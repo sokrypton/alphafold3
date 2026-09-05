@@ -999,12 +999,12 @@ def af3_atom_block(sd, prefix, c_atom, num_head):
       'qsingle_cond_scale/weights': sc_a,
       'ksingle_cond_bias/weights': sh_a,
       'ksingle_cond_scale/weights': sc_a,
+      # no bias: for these blocks the graph takes the gate RAW, so there is no
+      # sigmoid to offset and no bias slot to fill
       'adaptive_zero_cond/weights': g_a,
-      'adaptive_zero_cond/bias': np.zeros((c_atom,), np.float32),
       'ffw_single_cond_bias/weights': sh_f,
       'ffw_single_cond_scale/weights': sc_f,
       'ffw_adaptive_zero_cond/weights': g_f,
-      'ffw_adaptive_zero_cond/bias': np.zeros((c_atom,), np.float32),
       'q_projection/weights': t(g('attn.Wqkv.weight'))[:, :c_atom].reshape(
           c_atom, num_head, d_head),
       'q_projection/bias': np.zeros((num_head, d_head), np.float32),

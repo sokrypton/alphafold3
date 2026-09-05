@@ -104,7 +104,7 @@ def adaptive_layernorm(x, single_cond, name, global_config=None, atom=False):
 
 def adaptive_zero_init(
     x, num_channels, single_cond, global_config: model_config.GlobalConfig, name,
-    project=True,
+    project=True, atom=False,
 ):
   """Adaptive zero init, from AdaLN-zero.
 
@@ -123,12 +123,29 @@ def adaptive_zero_init(
         name=f'{name}adaptive_zero_cond',
     )(single_cond)
     return jax.nn.sigmoid(cond) * x
+  esm = (atom and global_config is not None
+         and global_config.model in model_config.SWA_ROPE_ATOM_ATTENTION)
   if single_cond is None:
     output = hm.Linear(
         num_channels,
         initializer=global_config.final_init,
         name=f'{name}transition2',
     )(x)
+  elif esm:
+    # ESMFold2's atom block is `x + g * f(x)` with g taken RAW from its fused
+    # adaln_modulation over silu(c) -- no sigmoid and no bias. AF3 squashes the
+    # gate through sigmoid and offsets it by -2, neither of which any weight can
+    # undo: sigmoid is not linear, so the converter cannot fold it away. The
+    # same fused projection supplies the scale and shift in adaptive_layernorm
+    # above, which is why only the gate slot needed the branch.
+    output = hm.Linear(num_channels, name=f'{name}transition2')(x)
+    cond = hm.Linear(
+        output.shape[-1],
+        initializer='zeros',
+        use_bias=False,
+        name=f'{name}adaptive_zero_cond',
+    )(jax.nn.silu(single_cond))
+    output = cond * output
   else:
     output = hm.Linear(num_channels, name=f'{name}transition2')(x)
     # Init to a small gain, sigmoid(-2) ~ 0.1
@@ -194,7 +211,7 @@ def transition_block(
     c = c * a_to_b
 
   output = adaptive_zero_init(
-      c, num_channels, single_cond, global_config, f'{name}ffw_'
+      c, num_channels, single_cond, global_config, f'{name}ffw_', atom=atom
   )
   return output
 
@@ -615,7 +632,7 @@ def cross_attention(
 
   output = adaptive_zero_init(
       weighted_avg, x_q.shape[-1], single_cond_q, global_config, name,
-      project=not chai,
+      project=not chai, atom=True,
   )
   return output
 

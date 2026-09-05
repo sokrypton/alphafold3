@@ -405,10 +405,13 @@ def denoise(x_noisy, t_hat, f, s_inputs, z_trunk, rel_pos, p, dims, n_heads=16):
   ae = {k[len('atom_encoder/'):]: v for k, v in d.items() if k.startswith('atom_encoder/')}
   c0 = layer_norm(atom_features(f, mask) @ ae['atom_linear/weights'],
                   ae['atom_norm/scale'], ae['atom_norm/offset'])
+  TAPS.setdefault('atom_features', []).append(c0)
   cos, sin = build_rope(f['ref_pos'], f['ref_space_uid'], c0.shape[-1] // 4)
   r_noisy = x_noisy / jnp.sqrt(t_hat ** 2 + SIGMA_DATA ** 2)            # c_in
   q = c0 + jnp.concatenate([r_noisy, jnp.zeros_like(r_noisy)], -1) @ ae['coords_linear/weights']
+  TAPS.setdefault('enc_queries_in', []).append(q)
   q = atom_stack(q, c0, ae, 'blocks/', dims['n_diff_atom'], cos, sin, mask)
+  TAPS.setdefault('enc_queries', []).append(q)
   a = scatter_mean(jax.nn.relu(q @ ae['atom_to_token/weights']), a2t, L, mask)
 
   TAPS.setdefault('token_act', []).append(a)
@@ -425,6 +428,7 @@ def denoise(x_noisy, t_hat, f, s_inputs, z_trunk, rel_pos, p, dims, n_heads=16):
   ad = {k[len('atom_decoder/'):]: v for k, v in d.items() if k.startswith('atom_decoder/')}
   qd = q + (a @ ad['token_to_atom/weights'])[a2t]
   qd = atom_stack(qd, c0, ad, 'blocks/', dims['n_diff_atom'], cos, sin, mask)
+  TAPS.setdefault('dec_queries', []).append(qd)
   r_update = layer_norm(qd, ad['norm/scale'], ad['norm/offset']) @ ad['output/weights']
   TAPS.setdefault('r_update', []).append(r_update)
 
