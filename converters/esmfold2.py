@@ -524,12 +524,46 @@ def load_esmfold2_checkpoint(checkpoint):
     hits = sorted(glob.glob(os.path.join(path, '*.safetensors')))
     if not hits:
       raise FileNotFoundError('no .safetensors under %s' % path)
-    path = hits[0]
+    return _read_safetensors(hits)          # ESM-C ships 6 shards, ESMFold2 one
   if path.endswith('.npz'):
     return {k: v for k, v in np.load(path).items()}
-  from safetensors import safe_open
-  with safe_open(path, 'numpy') as f:
-    return {k: f.get_tensor(k) for k in f.keys() if not k.endswith('_extra_state')}
+  return _read_safetensors([path])
+
+
+_ST_DTYPES = {'F64': '<f8', 'F32': '<f4', 'F16': '<f2', 'I64': '<i8', 'I32': '<i4',
+              'I16': '<i2', 'I8': 'i1', 'U8': 'u1', 'BOOL': '?'}
+
+
+def _read_safetensors(paths):
+  """Minimal pure-numpy safetensors reader.
+
+  The `safetensors` package is not in every venv here and this repo's GPU venv
+  must not grow dependencies, so read the container directly: 8-byte
+  little-endian header length, then a JSON header mapping name ->
+  {dtype, shape, data_offsets}, then the raw buffers.  BF16 is returned as
+  float32 (numpy has no bfloat16) by widening the 16-bit pattern.
+  """
+  import json
+  out = {}
+  for path in paths:
+    with open(path, 'rb') as fh:
+      n = int.from_bytes(fh.read(8), 'little')
+      header = json.loads(fh.read(n))
+      base = 8 + n
+      for key, meta in header.items():
+        if key == '__metadata__' or key.endswith('_extra_state'):
+          continue
+        start, end = meta['data_offsets']
+        fh.seek(base + start)
+        raw = fh.read(end - start)
+        if meta['dtype'] == 'BF16':
+          u16 = np.frombuffer(raw, dtype='<u2').astype(np.uint32) << 16
+          arr = u16.view(np.float32) if u16.dtype == np.uint32 else u16.astype(np.float32)
+          arr = u16.astype(np.uint32).view(np.float32)
+        else:
+          arr = np.frombuffer(raw, dtype=_ST_DTYPES[meta['dtype']])
+        out[key] = arr.reshape(meta['shape'])
+  return out
 
 
 def convert_esmfold2_weights(checkpoint, output_dir):

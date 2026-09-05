@@ -169,6 +169,56 @@ def lm_shim(hidden, p):
   return layer_norm(z, p['language_model/pair_norm/scale'], p['language_model/pair_norm/offset'])
 
 
+# ── the ESM-C 6B tower ──────────────────────────────────────────────────────
+#
+# 80 pre-norm blocks, d_model 2560 / 40 heads / head_dim 64, ESM3 residual
+# scaling by sqrt(n_layers/36).  ESMFold2 consumes all 81 hidden states, and
+# HF's LAST one is POST the stack's final LayerNorm while the other 80 are the
+# raw residual stream -- using the pre-norm value there reads corr 0.909 against
+# 0.9998 everywhere else.
+#
+# Gated vs torch ESM-C: all 81 layers, corr 0.99985508 (the residual is native
+# running bf16 against our fp32).
+
+def _rope(x, pos, base=10000.0):
+  d = x.shape[-1]
+  inv = 1.0 / (base ** (np.arange(0, d, 2, dtype=np.float32) / d))
+  fr = pos[:, None] * inv[None, :]
+  c, sn = jnp.cos(fr)[:, None], jnp.sin(fr)[:, None]
+  x1, x2 = x[..., :d//2], x[..., d//2:]
+  return jnp.concatenate([x1 * c - x2 * sn, x1 * sn + x2 * c], -1)
+
+
+def esmc_hidden_states(ids, p, dims):
+  """[L] token ids (already BOS/EOS wrapped) -> [n_layers+1, L, d_model]."""
+  L = ids.shape[0]
+  H = dims['n_heads']
+  dh = dims['d_model'] // H
+  scale = dims['residual_scale']
+  x = jnp.asarray(p['embed/weights'])[ids]
+  states = [x]
+  pos = jnp.arange(L, dtype=jnp.float32)
+  B = {k[len('blocks/'):]: v for k, v in p.items() if k.startswith('blocks/')}
+  for i in range(dims['n_layers']):
+    b = {k: jnp.asarray(v[i]) for k, v in B.items()}
+    h = layer_norm(x, b['attn_norm/scale'], b['attn_norm/offset']) @ b['qkv/weights']
+    q, k, v = jnp.split(h, 3, -1)
+    q = layer_norm(q, b['q_norm/scale'])          # over the FULL d_model, not per head
+    k = layer_norm(k, b['k_norm/scale'])
+    q = _rope(q.reshape(L, H, dh), pos)
+    k = _rope(k.reshape(L, H, dh), pos)
+    v = v.reshape(L, H, dh)
+    logits = jnp.einsum('ihd,jhd->hij', q, k) * dh ** -0.5
+    ctx = jnp.einsum('hij,jhd->ihd', jax.nn.softmax(logits, -1), v).reshape(L, -1)
+    x = x + (ctx @ b['attn_out/weights']) / scale
+    h = layer_norm(x, b['ffn_norm/scale'], b['ffn_norm/offset']) @ b['fc1/weights']
+    n = h.shape[-1] // 2
+    x = x + ((jax.nn.silu(h[..., :n]) * h[..., n:]) @ b['fc2/weights']) / scale
+    states.append(x)
+  states[-1] = layer_norm(states[-1], p['final_norm/scale'])
+  return jnp.stack(states)
+
+
 # ── the MSA encoder ─────────────────────────────────────────────────────────
 #
 # NOT optional.  msa_encoder_overwrite=True means this REPLACES the injected
