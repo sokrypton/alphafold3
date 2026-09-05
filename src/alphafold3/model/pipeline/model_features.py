@@ -22,7 +22,74 @@ from __future__ import annotations
 import numpy as np
 
 
-def _circular_key_window(batch):
+def _key_window(batch, policy, k_size=None, prefix=''):
+  """Rewrite the atom-attention key window on a FINISHED batch.
+
+  Three models needed three windows and got three near-identical functions. The
+  arithmetic is the same in all of them -- each block of `q_size` queries takes
+  `k_size` keys centred on it, starting at `block_start - (k_size - q_size)//2`,
+  and the same four gather arrays are rewritten -- so what actually differs is
+  the END POLICY, and for ESMFold2 the width:
+
+    'slide'  AF3's own (features.py AtomCrossAtt, "Shift subsets with
+             out-of-bound indices"): shift an out-of-range window bodily back
+             inside the real atom count, so every block keeps k_size valid keys.
+    'wrap'   chai-1: the window modulo the padded atom count (`% num_atoms` in
+             its traced graph), so the first block's leading keys land in
+             padding and are masked out -- its end blocks genuinely see fewer
+             real neighbours.
+    'pad'    opendde/protenix (rearrange_qk_to_dense_trunk): clip and mask, so
+             edge blocks see fewer neighbours AND the ones they see sit at
+             DIFFERENT key slots, which misaligns the per-slot pair bias too.
+
+  Rewritten on the finished batch rather than threaded through AF3's
+  featurisation: the key gathers are plain index arrays over the flat queries
+  layout, so the window is the only thing that has to change and the rest of the
+  layout machinery stays untouched.
+  """
+  q_mask = np.asarray(batch[f'{prefix}token_atoms_to_queries:gather_mask'])
+  num_subsets, q_size = np.asarray(
+      batch[f'{prefix}token_atoms_to_queries:gather_idxs']).shape
+  n_padded = num_subsets * q_size
+  kk = f'{prefix}queries_to_keys:gather_idxs'
+  if k_size is None:
+    k_size = np.asarray(batch[kk]).shape[1]
+  else:
+    # only when a width is REQUESTED: a tiny input cannot hold it, and the
+    # window is then the whole list. Taking this on the width read back from the
+    # batch would silently reshape arrays the other two policies keep.
+    k_size = min(k_size, n_padded)
+  starts = np.arange(num_subsets) * q_size + (q_size - k_size) // 2
+  if policy == 'slide':
+    starts = np.clip(starts, 0, n_padded - k_size)
+  window = starts[:, None] + np.arange(k_size)[None, :]
+
+  flat_mask = q_mask.reshape(-1)
+  if policy == 'wrap':
+    window = window % n_padded
+    keep = flat_mask[window]
+  elif policy == 'pad':
+    in_bounds = (window >= 0) & (window < n_padded)
+    window = np.clip(window, 0, n_padded - 1)
+    keep = in_bounds & flat_mask[window]
+  elif policy == 'slide':
+    keep = flat_mask[window]
+  else:
+    raise ValueError(f'unknown key-window policy {policy!r}')
+
+  batch[kk] = window.astype(np.asarray(batch[kk]).dtype)
+  batch[f'{prefix}queries_to_keys:gather_mask'] = keep
+  tok = np.asarray(batch[f'{prefix}tokens_to_queries:gather_idxs']).reshape(-1)
+  tk = f'{prefix}tokens_to_keys:gather_idxs'
+  batch[tk] = tok[window].astype(np.asarray(batch[tk]).dtype)
+  tok_mask = np.asarray(
+      batch[f'{prefix}tokens_to_queries:gather_mask']).reshape(-1)[window]
+  batch[f'{prefix}tokens_to_keys:gather_mask'] = (
+      keep if policy == 'pad' else tok_mask)
+  return batch
+
+
+def _circular_key_window(batch, prefix=''):
   """chai-1's atom-attention key window wraps; AF3's is shifted in-bounds.
 
   Both models give each block of 32 queries a 128-key window centred on it, and
@@ -38,27 +105,7 @@ def _circular_key_window(batch):
   queries layout, so the window is the only thing that has to change and the
   rest of the layout machinery stays untouched.
   """
-  q_idxs = np.asarray(batch['token_atoms_to_queries:gather_idxs'])
-  q_mask = np.asarray(batch['token_atoms_to_queries:gather_mask'])
-  num_subsets, q_size = q_idxs.shape
-  n_padded = num_subsets * q_size
-  k_size = np.asarray(batch['queries_to_keys:gather_idxs']).shape[1]
-
-  starts = (np.arange(num_subsets) * q_size)[:, None]
-  window = (starts + (q_size - k_size) // 2 + np.arange(k_size)[None, :]) % n_padded
-
-  flat_mask = q_mask.reshape(-1)
-  batch['queries_to_keys:gather_idxs'] = window.astype(
-      np.asarray(batch['queries_to_keys:gather_idxs']).dtype)
-  batch['queries_to_keys:gather_mask'] = flat_mask[window]
-
-  tok = np.asarray(batch['tokens_to_queries:gather_idxs']).reshape(-1)
-  batch['tokens_to_keys:gather_idxs'] = tok[window].astype(
-      np.asarray(batch['tokens_to_keys:gather_idxs']).dtype)
-  batch['tokens_to_keys:gather_mask'] = np.asarray(
-      batch['tokens_to_queries:gather_mask']).reshape(-1)[window]
-  return batch
-
+  return _key_window(batch, 'wrap', prefix=prefix)
 
 def _padded_key_window(batch, prefix=''):
   """opendde/protenix zero-PAD the atom-attention key window; AF3 slides it.
@@ -82,29 +129,7 @@ def _padded_key_window(batch, prefix=''):
   large one of a short chain: 4 of 51 query blocks for 1EHZ's 1626 atoms against
   4 of 18 for 6MRR's 574.
   """
-  q_idxs = np.asarray(batch[f'{prefix}token_atoms_to_queries:gather_idxs'])
-  q_mask = np.asarray(batch[f'{prefix}token_atoms_to_queries:gather_mask'])
-  num_subsets, q_size = q_idxs.shape
-  n_padded = num_subsets * q_size
-  k_size = np.asarray(batch[f'{prefix}queries_to_keys:gather_idxs']).shape[1]
-
-  starts = (np.arange(num_subsets) * q_size)[:, None]
-  window = starts + (q_size - k_size) // 2 + np.arange(k_size)[None, :]
-  in_bounds = (window >= 0) & (window < n_padded)
-  clipped = np.clip(window, 0, n_padded - 1)
-
-  flat_mask = q_mask.reshape(-1)
-  keep = in_bounds & flat_mask[clipped]
-  batch[f'{prefix}queries_to_keys:gather_idxs'] = clipped.astype(
-      np.asarray(batch[f'{prefix}queries_to_keys:gather_idxs']).dtype)
-  batch[f'{prefix}queries_to_keys:gather_mask'] = keep
-
-  tok = np.asarray(batch[f'{prefix}tokens_to_queries:gather_idxs']).reshape(-1)
-  batch[f'{prefix}tokens_to_keys:gather_idxs'] = tok[clipped].astype(
-      np.asarray(batch[f'{prefix}tokens_to_keys:gather_idxs']).dtype)
-  batch[f'{prefix}tokens_to_keys:gather_mask'] = keep
-  return batch
-
+  return _key_window(batch, 'pad', prefix=prefix)
 
 def _drop_atoms_by_name(batch, names):
   """Mask out atoms another model's tokenizer does not create.
@@ -273,27 +298,7 @@ def _wide_key_window(batch, k_size, prefix=''):
   are index arrays over the flat queries layout, so the window is the only thing
   that changes.
   """
-  q_idxs = np.asarray(batch[f'{prefix}token_atoms_to_queries:gather_idxs'])
-  q_mask = np.asarray(batch[f'{prefix}token_atoms_to_queries:gather_mask'])
-  num_subsets, q_size = q_idxs.shape
-  n_padded = num_subsets * q_size
-  if k_size > n_padded:            # tiny input: the window is the whole list
-    k_size = n_padded
-  starts = np.arange(num_subsets) * q_size + (q_size - k_size) // 2
-  starts = np.clip(starts, 0, n_padded - k_size)     # AF3 slides in-bounds
-  window = starts[:, None] + np.arange(k_size)[None, :]
-
-  flat_mask = q_mask.reshape(-1)
-  kk = f'{prefix}queries_to_keys:gather_idxs'
-  batch[kk] = window.astype(np.asarray(batch[kk]).dtype)
-  batch[f'{prefix}queries_to_keys:gather_mask'] = flat_mask[window]
-  tok = np.asarray(batch[f'{prefix}tokens_to_queries:gather_idxs']).reshape(-1)
-  tk = f'{prefix}tokens_to_keys:gather_idxs'
-  batch[tk] = tok[window].astype(np.asarray(batch[tk]).dtype)
-  batch[f'{prefix}tokens_to_keys:gather_mask'] = np.asarray(
-      batch[f'{prefix}tokens_to_queries:gather_mask']).reshape(-1)[window]
-  return batch
-
+  return _key_window(batch, 'slide', k_size=k_size, prefix=prefix)
 
 def _attach_lm_pair(batch, lm_pair):
   """ESMFold2's language-model PAIR representation, from converters.esmfold2_lm.
