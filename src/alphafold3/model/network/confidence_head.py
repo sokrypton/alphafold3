@@ -21,6 +21,8 @@
 
 from alphafold3.common import base_config
 from alphafold3.model import model_config
+from alphafold3.model.network import evoformer
+from alphafold3.model.network import featurization
 from alphafold3.model.atom_layout import atom_layout
 from alphafold3.constants import atom_types
 from alphafold3.model.components import haiku_modules as hm
@@ -97,76 +99,38 @@ class ConfidenceHead(hk.Module):
 
   @hk.transparent
   def _boltz2_rel_pos(self, tf, num_channels, dtype):
-    """Boltz-2's RelativePositionEncoder, as instantiated in the confidence module.
+    """Boltz-2's RelativePositionEncoder, which is AF3's own encoding exactly.
 
-    Verified bit-exact (max|d| 0.0) against the module's own output on all four oracle
-    cases -- monomer, contact-constrained, homodimer and covalently bonded.
+    This used to be forty lines of hand-written bucketing. Every term matches
+    `featurization.create_relative_encoding` bucket for bucket -- the clipped
+    residue offset with an out-of-chain sentinel, the token offset with an
+    out-of-residue sentinel, the same-entity column, and the symmetry-class
+    chain offset with an out-of-entity sentinel, concatenated in that order --
+    at r_max 32 / s_max 2, which are also AF3's config defaults. Verified
+    bit-exact (max|d| 0.0) against boltz's own module on all four oracle cases
+    before it was replaced, and against the hand-written version after.
 
-    Two flags of the checkpoint's instantiation are NOT the signature defaults, and
-    reading them off the source signature rather than the loaded model is what made an
-    earlier attempt at this term make the residual worse:
-      * fix_sym_check=True  -- the chain-offset sentinel is applied where the two tokens
-        are of DIFFERENT entities, not where they share a chain. Copying the `False`
-        branch inverts the mask on every cross-chain pair.
-      * cyclic_pos_enc=True -- but it is a no-op unless a token carries a nonzero
-        cyclic_period, which our featuriser has no field for yet, so the residue offset
-        is left unwrapped here. See memory `cyclic-period-feature`: exposing it is a
-        cross-model feature (cyclic peptides, circular permutants), not a boltz2 patch.
+    Reusing AF3's also picks up cyclic_period, which the hand-written copy
+    explicitly did not wrap: a cyclic peptide's termini now read as adjacent
+    here as they already did in the trunk.
     """
-    r_max, s_max = 32, 2
-    same_chain = tf.asym_id[:, None] == tf.asym_id[None]
-    same_res = tf.residue_index[:, None] == tf.residue_index[None]
-    same_entity = tf.entity_id[:, None] == tf.entity_id[None]
-
-    d_res = jnp.clip(tf.residue_index[:, None] - tf.residue_index[None] + r_max,
-                     0, 2 * r_max)
-    d_res = jnp.where(same_chain, d_res, 2 * r_max + 1)
-    d_tok = jnp.clip(tf.token_index[:, None] - tf.token_index[None] + r_max,
-                     0, 2 * r_max)
-    d_tok = jnp.where(same_chain & same_res, d_tok, 2 * r_max + 1)
-    d_chain = jnp.clip(tf.sym_id[:, None] - tf.sym_id[None] + s_max, 0, 2 * s_max)
-    d_chain = jnp.where(~same_entity, 2 * s_max + 1, d_chain)
-
-    feat = jnp.concatenate([
-        jax.nn.one_hot(d_res, 2 * r_max + 2),
-        jax.nn.one_hot(d_tok, 2 * r_max + 2),
-        same_entity[..., None].astype(jnp.float32),
-        jax.nn.one_hot(d_chain, 2 * s_max + 2),
-    ], axis=-1)
+    feat = featurization.create_relative_encoding(
+        seq_features=tf, max_relative_idx=32, max_relative_chain=2)
     return hm.Linear(num_channels, name='rel_pos_project')(feat.astype(dtype))
 
   @hk.transparent
   def _boltz2_contact_conditioning(self, contact, threshold, num_channels, dtype):
-    """Boltz-2's ContactConditioning: user distance restraints, embedded into z.
+    """Boltz-2's ContactConditioning -- the evoformer's, called from here.
 
-    `contact` is a one-hot over (UNSPECIFIED, UNSELECTED, <3 restraint classes>) and
-    `threshold` the restraint distance in Angstrom. The first two classes bypass the
-    encoder entirely and contribute a learned constant, which is why an unconstrained
-    input still gets a nonzero term: every pair is UNSPECIFIED, so every pair receives
-    `encoding_unspecified`.
-
-    The encoder runs even when nothing is selected (it is multiplied by zero). That is
-    deliberate: it keeps the restraint weights in the parameter tree and converted, so
-    wiring real restraints later is a featurisation change rather than a graph change.
+    It used to be a verbatim copy, justified on the grounds that the two sites
+    hold DIFFERENT weights (model.contact_conditioning vs
+    confidence_module.contact_conditioning). They do, and that is not a reason
+    to duplicate the body: haiku names parameters by the module stack at CALL
+    time, so one function called from two places already produces two separate
+    sets. The copy bought nothing and had to be kept in step by hand.
     """
-    cutoff_min, cutoff_max = 4.0, 20.0
-    tn = (threshold - cutoff_min) / (cutoff_max - cutoff_min)
-    # FourierEmbedding: cos(2*pi*Linear(1->c)(t)), with a FROZEN random projection --
-    # a trained parameter in the checkpoint only in the sense that it was stored.
-    fourier = jnp.cos(2 * jnp.pi * hm.Linear(
-        num_channels, use_bias=True, name='contact_fourier')(
-            tn[..., None].astype(dtype)))
-    x = jnp.concatenate(
-        [contact[..., 2:].astype(dtype), tn[..., None].astype(dtype), fourier], -1)
-    enc = hm.Linear(num_channels, use_bias=True, name='contact_encoder')(x)
-    unspecified = hk.get_parameter('contact_encoding_unspecified', [num_channels],
-                                   dtype, init=jnp.zeros)
-    unselected = hk.get_parameter('contact_encoding_unselected', [num_channels],
-                                  dtype, init=jnp.zeros)
-    selected = contact[..., 0:2].sum(-1, keepdims=True).astype(dtype)
-    return (enc * (1 - selected)
-            + unspecified * contact[..., 0:1].astype(dtype)
-            + unselected * contact[..., 1:2].astype(dtype))
+    return evoformer.boltz2_contact_conditioning(
+        contact, threshold, num_channels, dtype)
 
   @hk.transparent
   def _boltz2_split_heads(self, z, asym_id, num_bins, intra_name, inter_name):

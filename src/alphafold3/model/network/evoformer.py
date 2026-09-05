@@ -160,13 +160,14 @@ def token_bond_type_matrix(batch, symmetrize: bool = False) -> jnp.ndarray:
   return type_matrix.at[0, 0].set(0)
 
 
-def _boltz2_contact_conditioning(contact, threshold, num_channels, dtype):
-  """Boltz-2's ContactConditioning for the TRUNK z-init.
+def boltz2_contact_conditioning(contact, threshold, num_channels, dtype):
+  """Boltz-2's ContactConditioning. Shared with the confidence head.
 
-  Deliberately a separate copy of ConfidenceHead._boltz2_contact_conditioning rather
-  than a shared call: these are different weights (model.contact_conditioning vs
-  confidence_module.contact_conditioning), and the confidence head's version sits
-  behind a passing injection gate that a refactor would move param scopes under.
+  The two sites hold DIFFERENT weights (model.contact_conditioning vs
+  confidence_module.contact_conditioning) and still share this body: haiku names
+  parameters by the module stack at CALL time, so calling one function from two
+  places already gives two separate sets. It was a verbatim copy until that was
+  noticed.
 
   `contact` one-hots (UNSPECIFIED, UNSELECTED, <3 restraint classes>); the first two
   bypass the encoder and contribute a learned constant, which is why an unconstrained
@@ -392,7 +393,7 @@ class Evoformer(hk.Module):
               ),
               7,
           ).astype(dtype))
-      pair_activations += _boltz2_contact_conditioning(
+      pair_activations += boltz2_contact_conditioning(
           jax.nn.one_hot(jnp.zeros((n, n), jnp.int32), 5),
           jnp.zeros((n, n), jnp.float32), c, dtype)
     return pair_activations
