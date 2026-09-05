@@ -62,9 +62,20 @@ def canonical_batch(model_name, model_dir=None):
       # change the parameter tree, only its presence and width can.
       n = int(np.asarray(batch['is_protein']).sum())
       esm = np.zeros((n, 2560), np.float32)
+    lm_pair = None
+    if spec.featurise.get('lm_pair'):
+      # ESMFold2's language-model pair representation. Like chai's ESM block,
+      # only its PRESENCE and width matter here -- but presence matters a lot:
+      # without it the graph never builds the lm_encoder and the audit reports
+      # its 36 stacked parameters as extra.
+      from alphafold3.model import model as _af3_model
+      cfg = _af3_model.Model.Config()
+      spec.configure(cfg)
+      n = int(np.asarray(batch['token_index']).shape[-1])
+      lm_pair = np.zeros((n, n, cfg.evoformer.pair_channel), np.float32)
     batch = model_features.apply(
         batch, spec, refeaturise=featurise, model_dir=model_dir, esm=esm,
-        has_msa=False, fold_input=fold_input)
+        has_msa=False, fold_input=fold_input, lm_pair=lm_pair)
   return batch
 
 
