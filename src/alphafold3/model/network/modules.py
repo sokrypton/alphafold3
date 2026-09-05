@@ -552,8 +552,14 @@ class OuterProductMean(hk.Module):
         output_subbatch_dim=0,
     )
 
-    epsilon = 1e-3
     norm = jnp.einsum('abc,adc->bdc', mask, mask)
+    if self.global_config.model in model_config.CLAMPED_OPM_NORM:
+      # ESMFold2 clamps the pair count at 1 instead of adding AF3's 1e-3. The
+      # two agree to 1/(1 + eps/n), which is 3.3e-04 at depth 3 and 1e-03 at
+      # DEPTH 1 -- and depth 1 is where ESMFold2 normally runs, so this is a
+      # systematic 0.1% scale on the entire OPM contribution rather than noise.
+      return act / jnp.maximum(norm, 1.0)
+    epsilon = 1e-3
     return act / (epsilon + norm)
 
   @hk.transparent

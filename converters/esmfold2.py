@@ -675,3 +675,67 @@ def map_esmfold2_af3(sd, dims=None, num_head=4):
                           '__layer_stack_no_per_layer_1/trunk_pairformer'))
   return {AF3_TRUNK + '/' + k if '/' in k else AF3_TRUNK + '/' + k: v
           for k, v in p.items()}
+
+
+def af3_msa_block(sd, prefix, c_z, num_head, is_final, c_m, msa_heads=8,
+                  c_hidden=32, msa_head_width=None):
+  """One ESMFold2 MSA block as an AF3 EvoformerIteration.
+
+  The leaf names line up without moving anything:
+      norm_single      -> msa_attention1/act_norm
+      compute_bias.0/1 -> msa_attention1/pair_norm, pair_logits
+      Wv / Wgate / Wout-> v_projection, gating_query, output_projection
+      OPM norm/W/Wout  -> layer_norm_input, left+right_projection, output_w/b
+  Two zero-fills: the pair attentions (ESMFold2 has none), and on the LAST block
+  the whole MSA update -- protenix's MSABlock builds msa_stack only
+  `if not is_last_block`, and ESMFold2's final block is the same shape. Zero is
+  exactly equivalent to skipping for a residual.
+  """
+  # AF3 states the MSA value width as c_m // num_head rather than carrying it in
+  # the config, and v_projection is (c_m, num_head, value_dim).
+  msa_head_width = msa_head_width or c_m // msa_heads
+  d = DIALECT_ESMFOLD2
+  out = {}
+  g = lambda leaf: sd['%s.outer_product_mean.%s' % (prefix, leaf)]
+  w = _arr(g('W.weight'))
+  h = w.shape[0] // 2
+  out['outer_product_mean/layer_norm_input/scale'] = _arr(g('norm.weight'))
+  out['outer_product_mean/layer_norm_input/offset'] = _arr(g('norm.bias'))
+  out['outer_product_mean/left_projection/weights'] = t(w[:h])
+  out['outer_product_mean/right_projection/weights'] = t(w[h:])
+  # AF3 keeps the OPM output as (c_hidden, c_hidden, c_z) rather than a flat
+  # (c_hidden^2, c_z) linear -- the opm_out_direct convention.
+  out['outer_product_mean/output_w'] = _arr(g('Wout.weight')).T.reshape(
+      c_hidden, c_hidden, c_z)
+  out['outer_product_mean/output_b'] = _arr(g('Wout.bias'))
+
+  if is_final:
+    dh = msa_head_width
+    out['msa_attention1/act_norm/scale'] = np.zeros((c_m,), np.float32)
+    out['msa_attention1/act_norm/offset'] = np.zeros((c_m,), np.float32)
+    out['msa_attention1/pair_norm/scale'] = np.zeros((c_z,), np.float32)
+    out['msa_attention1/pair_norm/offset'] = np.zeros((c_z,), np.float32)
+    out['msa_attention1/pair_logits/weights'] = np.zeros((c_z, msa_heads), np.float32)
+    out['msa_attention1/v_projection/weights'] = np.zeros((c_m, msa_heads, dh), np.float32)
+    out['msa_attention1/gating_query/weights'] = np.zeros((c_m, c_m), np.float32)
+    out['msa_attention1/output_projection/weights'] = np.zeros((c_m, c_m), np.float32)
+    for leaf, shape in (('input_layer_norm/scale', (c_m,)),
+                        ('input_layer_norm/offset', (c_m,)),
+                        ('transition1/weights', (c_m, 8 * c_m)),
+                        ('transition2/weights', (4 * c_m, c_m))):
+      out['msa_transition/%s' % leaf] = np.zeros(shape, np.float32)
+  else:
+    m = lambda leaf: sd['%s.msa_pair_weighted_averaging.%s' % (prefix, leaf)]
+    out['msa_attention1/act_norm/scale'] = _arr(m('norm_single.weight'))
+    out['msa_attention1/act_norm/offset'] = _arr(m('norm_single.bias'))
+    out['msa_attention1/pair_norm/scale'] = _arr(m('compute_bias.0.weight'))
+    out['msa_attention1/pair_norm/offset'] = _arr(m('compute_bias.0.bias'))
+    out['msa_attention1/pair_logits/weights'] = t(m('compute_bias.1.weight'))
+    out['msa_attention1/v_projection/weights'] = _arr(m('Wv.weight')).T.reshape(
+        c_m, msa_heads, msa_head_width)
+    out['msa_attention1/gating_query/weights'] = t(m('Wgate.weight'))
+    out['msa_attention1/output_projection/weights'] = t(m('Wout.weight'))
+    out.update(nest('msa_transition',
+                    common.transition(sd, prefix + '.msa_transition', d)))
+  out.update(zero_pair_attention(pair_only_block(sd, prefix), c_z, num_head))
+  return out

@@ -144,6 +144,12 @@ KEY_MASKED_ATOM_ATTENTION = ('rosettafold3', 'opendde') + PROTENIX_FAMILY
 SSM_RECYCLE = ('esmfold2',)
 
 
+# Models whose OuterProductMean divides by max(pair_count, 1) rather than by
+# AF3's 1e-3 + pair_count. A scale, not an offset, and worth 1e-03 at MSA depth
+# 1 -- which is the depth ESMFold2 runs at by default.
+CLAMPED_OPM_NORM = ('esmfold2',)
+
+
 # Models whose MSA stack does NOT update the MSA representation at all: their
 # msa_module block is OuterProductMean + a pair stack, and there is no MSA row
 # attention and no MSA transition anywhere in the checkpoint.
