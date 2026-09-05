@@ -624,13 +624,18 @@ def sample(
     # chai evaluates the schedule at MIDPOINTS -- linspace(0, 1, 2N+1)[1::2] --
     # where AF3 uses the N+1 endpoints. So it never samples sigma=0 exactly, and
     # every sigma sits half a step inside AF3's.
-    times = np.linspace(0.0, 1.0, 2 * config.steps + 1)[1::2]
+    times = np.linspace(0.0, 1.0, 2 * config.steps + 1, dtype=np.float32)[1::2]
   else:
-    times = np.linspace(0, 1, config.steps + 1)
+    times = np.linspace(0, 1, config.steps + 1, dtype=np.float32)
   # numpy, not jnp: the schedule is a compile-time constant, and the clip below
-  # is a boolean mask that a traced array cannot take.
+  # is a boolean mask that a traced array cannot take. float32 explicitly --
+  # numpy would default to float64 here and hand every model a schedule that
+  # differs from the traced one in the last bits, which is a silent change to
+  # the sampling trajectory of thirteen models that have nothing to do with the
+  # clip this was added for.
   noise_levels = np.asarray(noise_schedule(
-      times, smin=config.sigma_min, smax=config.sigma_max, p=config.rho))
+      times, smin=config.sigma_min, smax=config.sigma_max, p=config.rho),
+      dtype=np.float32)
   if getattr(config, 'max_sigma', 0.0):
     noise_levels = np.concatenate(
         [[config.max_sigma], noise_levels[noise_levels <= config.max_sigma]])
