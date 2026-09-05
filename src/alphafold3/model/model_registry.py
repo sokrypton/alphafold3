@@ -423,7 +423,9 @@ _SAMPLER_CONSTANTS = {
 # a shallower trunk: it also turns the MSA encoder OFF (msa_encoder.enabled
 # false, 0 msa_encoder tensors), so it is ESM-C-only. And the EXPERIMENTAL line
 # is a different architecture again: no parcae, no coda, no lm_encoder stack,
-# a wider MSA head and a 128-bin confidence distogram.
+# a wider MSA head and a 128-bin confidence distogram. "Fast" ALWAYS means no
+# MSA encoder, on both lines -- convert_esmfold2_weights asserts every row here
+# against the checkpoint, because this table was wrong twice before it did.
 #
 #   hub      the biohub repo it is converted from (all six share ESM-C 6B)
 #   trunk    folding_trunk.n_layers
@@ -432,21 +434,23 @@ _SAMPLER_CONSTANTS = {
 #   lm_enc   lm_encoder.n_layers, 0 where the release has no lm_encoder
 #   msa_w    msa_encoder.msa_head_width
 #   bins     distogram_head bins (the TRUNK head, not confidence)
+#   conf_bins classes in the confidence re-embedding distance one-hot
+#            (its trained `boundaries` has one fewer)
 ESMFOLD2_VARIANTS = {
     'esmfold2': dict(hub='ESMFold2', trunk=48, msa=4, coda=2, lm_enc=4,
-                     msa_w=16, bins=64),
+                     msa_w=16, bins=64, conf_bins=39),
     'esmfold2_fast': dict(hub='ESMFold2-Fast', trunk=24, msa=0, coda=2, lm_enc=4,
-                          msa_w=32, bins=64),
+                          msa_w=0, bins=64, conf_bins=39),
     'esmfold2_exp': dict(hub='ESMFold2-Experimental', trunk=48, msa=4, coda=0,
-                         lm_enc=0, msa_w=32, bins=128),
-    'esmfold2_exp_fast': dict(hub='ESMFold2-Experimental-Fast', trunk=24, msa=4,
-                              coda=0, lm_enc=0, msa_w=32, bins=128),
+                         lm_enc=0, msa_w=32, bins=128, conf_bins=128),
+    'esmfold2_exp_fast': dict(hub='ESMFold2-Experimental-Fast', trunk=24, msa=0,
+                              coda=0, lm_enc=0, msa_w=0, bins=128, conf_bins=128),
     'esmfold2_exp_cutoff2025': dict(hub='ESMFold2-Experimental-Cutoff2025',
                                     trunk=48, msa=4, coda=0, lm_enc=0, msa_w=32,
-                                    bins=128),
+                                    bins=128, conf_bins=128),
     'esmfold2_exp_fast_cutoff2025': dict(
-        hub='ESMFold2-Experimental-Fast-Cutoff2025', trunk=24, msa=4, coda=0,
-        lm_enc=0, msa_w=32, bins=128),
+        hub='ESMFold2-Experimental-Fast-Cutoff2025', trunk=24, msa=0, coda=0,
+        lm_enc=0, msa_w=0, bins=128, conf_bins=128),
 }
 
 ESMFOLD2_HUB_IDS = {m: v['hub'] for m, v in ESMFOLD2_VARIANTS.items()}
@@ -484,6 +488,7 @@ def _widen_esmfold2(name):
         ('evoformer.lm_encoder.num_layer', v['lm_enc']),
         ('evoformer.msa_stack.msa_attention.value_dim', v['msa_w']),
         ('heads.distogram.num_bins', v['bins']),
+        ('heads.confidence.reembed_dist_bins', v['conf_bins']),
     ), name)
   return widen
 

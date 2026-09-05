@@ -41,6 +41,9 @@ class ConfidenceHead(hk.Module):
 
   class PAEConfig(base_config.BaseConfig):
     max_error_bin: float = 31.0
+    # Classes in the confidence re-embedding's distance one-hot. boltz2's 64 is
+    # the default; ESMFold2 sets its own (see LEARNED_CONFIDENCE_BINS).
+    reembed_dist_bins: int = 64
     num_bins: int = 64
 
   class Config(base_config.BaseConfig):
@@ -52,6 +55,9 @@ class ConfidenceHead(hk.Module):
         num_layer=4,
     )
     max_error_bin: float = 31.0
+    # Classes in the confidence re-embedding's distance one-hot. boltz2's 64 is
+    # the default; ESMFold2 sets its own (see LEARNED_CONFIDENCE_BINS).
+    reembed_dist_bins: int = 64
     num_plddt_bins: int = 50
     num_bins: int = 64
     no_embedding_prob: float = 0.2
@@ -222,10 +228,22 @@ class ConfidenceHead(hk.Module):
     z += hm.Linear(c, name='s_to_z_prod_out')(prod)
 
     # Boltz embeds representative-atom distance into 64 bins (63 edges, 2..22 A) with an
-    # nn.Embedding, not AF3's 39-bin projection.
+    # nn.Embedding, not AF3's 39-bin projection. ESMFold2 shares the module but
+    # NOT the binning: it trains its own `boundaries`, 38 edges over 3.25..50.75
+    # (127 on the experimental line). Those were converted into the reference
+    # map and never into the graph, so its embedding rows -- padded out to
+    # boltz2's 64 to fit -- were being selected by boltz2's bins. Nothing about
+    # a fold depends on this, which is why it survived every fold gate.
     d = jnp.sqrt(jnp.sum((positions[:, None] - positions[None]) ** 2, -1) + 1e-10)
-    bnd = jnp.linspace(2.0, 22.0, 63)
-    dgram = jax.nn.one_hot((d[..., None] > bnd).sum(-1), 64).astype(dtype)
+    if self.global_config.model in model_config.LEARNED_CONFIDENCE_BINS:
+      num_bins = self.config.reembed_dist_bins
+      bnd = hk.get_parameter('distogram_boundaries', [num_bins - 1],
+                             dtype=jnp.float32, init=jnp.zeros)
+    else:
+      num_bins = 64
+      bnd = jnp.linspace(2.0, 22.0, 63)
+    dgram = jax.nn.one_hot(
+        (d[..., None] > bnd.astype(d.dtype)).sum(-1), num_bins).astype(dtype)
     z += hm.Linear(c, name='distogram_feat_project')(dgram * pair_mask[..., None])
     return z, single_act
 

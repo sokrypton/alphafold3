@@ -591,6 +591,34 @@ def _read_safetensors(paths):
   return out
 
 
+def check_variant_table(sd, model_name):
+  """Refuse a checkpoint that disagrees with the registry's row for it.
+
+  The counts live in model_registry.ESMFOLD2_VARIANTS because a Haiku config is
+  built before any checkpoint is read, so they cannot simply be derived. That
+  makes them a second source of truth, and it was wrong twice: "Fast" turns out
+  to mean NO MSA encoder on the experimental line as well as the released one,
+  and both experimental-fast rows claimed four MSA blocks. Neither showed up as
+  a bad number -- the first said "cannot reshape", the second said
+  `msa_activations` was missing. So the converter checks.
+  """
+  from alphafold3.model import model_registry
+  want = model_registry.ESMFOLD2_VARIANTS.get(model_name)
+  if want is None:
+    return
+  d = derive_dims(sd)
+  got = dict(trunk=d['n_trunk'], msa=d['n_msa'], coda=d['n_coda'],
+             lm_enc=d['n_lm_encoder'], msa_w=d['msa_head_width'],
+             bins=d['num_bins'],
+             conf_bins=int(sd['confidence_head.boundaries'].shape[0]) + 1)
+  bad = {k: (want[k], v) for k, v in got.items() if want.get(k) != v}
+  if bad:
+    raise ValueError(
+        'checkpoint disagrees with ESMFOLD2_VARIANTS[%r]: %s (registry, '
+        'checkpoint). Fix the registry row -- the graph is built from it.'
+        % (model_name, bad))
+
+
 def convert_esmfold2_weights(checkpoint, output_dir, model_name='esmfold2'):
   """Convert biohub/ESMFold2 to a loadable AF3-haiku blob dir.
 
@@ -605,6 +633,7 @@ def convert_esmfold2_weights(checkpoint, output_dir, model_name='esmfold2'):
   import os
   from pathlib import Path
   sd = load_esmfold2_checkpoint(checkpoint)
+  check_variant_table(sd, model_name)
   # the GRAPH map, not map_esmfold2_to_af3: the latter keys on the reference
   # implementation's own scopes and is the oracle's input, not the model's.
   flat = map_esmfold2_to_af3_graph(sd)
@@ -1284,11 +1313,13 @@ def map_esmfold2_to_af3_graph(sd, dims=None):
       'rel_pos_project/weights': t(sd['rel_pos.embed.weight']),
       'token_bonds_project/weights': t(sd['token_bonds.weight'])[:1],
       # ESMFold2's distance-bin EMBEDDING is a Linear on the one-hot, so it maps
-      # straight across -- but AF3 allots 64 bins where ESMFold2 trains 39, so the
-      # tail is zero: a bin the model never learned contributes nothing.
-      'distogram_feat_project/weights': np.concatenate([
+      # straight across -- at its OWN width. It used to be padded to boltz2's 64
+      # so it would fit a graph that binned distances over boltz2's 2..22 A;
+      # the embedding was then indexed by bins its weights had never seen.
+      # `boundaries` is the model's own binning and now travels with it.
+      'distogram_feat_project/weights':
           _arr(sd['%s.dist_bin_pairwise_embed.weight' % ch]),
-          np.zeros((64 - 39, c_z), np.float32)], 0),
+
       # boltz2's contact conditioning; ESMFold2 has none
       'contact_encoder/weights': np.zeros((260, c_z), np.float32),
       'contact_encoder/bias': np.zeros((c_z,), np.float32),
@@ -1296,25 +1327,43 @@ def map_esmfold2_to_af3_graph(sd, dims=None):
       'contact_fourier/bias': np.zeros((c_z,), np.float32),
       'token_bonds_type_embed/weights': np.zeros((7, c_z), np.float32),
   })
-  put(CH, {
+  # Which confidence heads this release has. The experimental line keeps pLDDT
+  # and PAE but has no pae_ln, no PDE and no experimentally-resolved -- read off
+  # the checkpoint, since the two lines share every name they do share.
+  have = lambda leaf: '%s.%s' % (ch, leaf) in sd
+  conf_head = {
+      # a BARE hk.get_parameter inside a @hk.transparent method attaches to the
+      # enclosing module, not to `~_boltz2_reembed` where that method's
+      # sub-MODULES land -- so this one sits at the confidence head itself.
+      'distogram_boundaries': _arr(sd['%s.boundaries' % ch]),
       'contact_encoding_unselected': np.zeros((c_z,), np.float32),
       'contact_encoding_unspecified': np.zeros((c_z,), np.float32),
       'row_pool_attn/weights': t(sd['%s.row_attention_pooling.attn_proj.weight' % ch]),
       'row_pool_out/weights': t(sd['%s.row_attention_pooling.out_proj.weight' % ch]),
-      'pae_logits_ln/scale': _arr(sd['%s.pae_ln.weight' % ch]),
-      'pae_logits_ln/offset': _arr(sd['%s.pae_ln.bias' % ch]),
       'pae_logits/weights': t(sd['%s.pae_head.weight' % ch]),
-      'logits_ln/scale': _arr(sd['%s.pde_ln.weight' % ch]),
-      'logits_ln/offset': _arr(sd['%s.pde_ln.bias' % ch]),
-      'left_half_distance_logits/weights': t(sd['%s.pde_head.weight' % ch]),
       'plddt_logits_ln/scale': _arr(sd['%s.plddt_ln.weight' % ch]),
       'plddt_logits_ln/offset': _arr(sd['%s.plddt_ln.bias' % ch]),
       'plddt_logits/weights': pad_atoms(_arr(sd['%s.plddt_weight' % ch])).transpose(1, 0, 2),
-      'experimentally_resolved_ln/scale': _arr(sd['%s.resolved_ln.weight' % ch]),
-      'experimentally_resolved_ln/offset': _arr(sd['%s.resolved_ln.bias' % ch]),
-      'experimentally_resolved_logits/weights':
-          pad_atoms(_arr(sd['%s.resolved_weight' % ch])).transpose(1, 0, 2),
-  })
+  }
+  if have('pae_ln.weight'):
+    conf_head.update({
+        'pae_logits_ln/scale': _arr(sd['%s.pae_ln.weight' % ch]),
+        'pae_logits_ln/offset': _arr(sd['%s.pae_ln.bias' % ch]),
+    })
+  if have('pde_head.weight'):
+    conf_head.update({
+        'logits_ln/scale': _arr(sd['%s.pde_ln.weight' % ch]),
+        'logits_ln/offset': _arr(sd['%s.pde_ln.bias' % ch]),
+        'left_half_distance_logits/weights': t(sd['%s.pde_head.weight' % ch]),
+    })
+  if have('resolved_weight'):
+    conf_head.update({
+        'experimentally_resolved_ln/scale': _arr(sd['%s.resolved_ln.weight' % ch]),
+        'experimentally_resolved_ln/offset': _arr(sd['%s.resolved_ln.bias' % ch]),
+        'experimentally_resolved_logits/weights':
+            pad_atoms(_arr(sd['%s.resolved_weight' % ch])).transpose(1, 0, 2),
+    })
+  put(CH, conf_head)
   # AF3's confidence pairformer carries a single track; ESMFold2's 4-block
   # confidence trunk is pair-only, so the single leaves are zeros -- a residual
   # with zero weights contributes exactly zero, the same identity the trunk uses.

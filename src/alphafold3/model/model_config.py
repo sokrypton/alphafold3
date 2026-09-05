@@ -108,6 +108,15 @@ NO_RESOLVED_HEAD = ('chai1',) + ESMFOLD2_EXPERIMENTAL
 NO_HEAD_NORM = {'boltz2': ('*',),
                 **{m: ('pae_logits_ln',) for m in ESMFOLD2_EXPERIMENTAL}}
 
+# Models whose confidence re-embedding bins the predicted distances with their
+# OWN trained boundaries rather than boltz2's constant 2..22 A over 63 edges.
+# ESMFold2 trains 38 edges over 3.25..50.75 and its experimental line trains 127
+# -- both of which reached the legacy reference map and NEITHER of which reached
+# the graph, so the embedding was being fed bins its weights never saw. The
+# number of CLASSES is one more than the number of edges and has to be static,
+# so it rides in ESMFOLD2_VARIANTS as `conf_bins`.
+LEARNED_CONFIDENCE_BINS = ESMFOLD2_FAMILY
+
 # The Protenix family. Its model types differ from one another ONLY in counts
 # and widths (converters/protenix2.derive_dims reads both off the checkpoint), so
 # every FORWARD branch that protenix2 takes, mini and tiny take too. Keeping the
