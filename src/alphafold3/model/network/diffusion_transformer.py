@@ -54,17 +54,30 @@ def adaptive_layernorm(x, single_cond, name, global_config=None):
   #     `sigmoid(s) * x`. Both start near the identity at init, so this is
   #     invisible until the trained weights are loaded.
   chai = global_config is not None and global_config.model == 'chai1'
+  # ESMFold2's ATOM blocks share two of chai's three departures -- no LayerNorm
+  # on the conditioning, and an identity-centred (s + 1) scale rather than
+  # sigmoid(s) -- and add two of their own: the activation is normalised with an
+  # affine-free RMSNorm, and the conditioning goes through SiLU before the
+  # modulation projection. Its adaln_modulation is one fused Linear to 6*d; the
+  # converter splits it into the scale/bias/gate slots AF3 keeps separate.
+  esm = global_config is not None and global_config.model in model_config.SWA_ROPE_ATOM_ATTENTION
+  identity_scale = chai or esm
   if single_cond is None:
     x = hm.LayerNorm(name=f'{name}layer_norm', use_fast_variance=False)(x)
   else:
-    x = hm.LayerNorm(
-        name=f'{name}layer_norm',
-        use_fast_variance=False,
-        create_scale=False,
-        create_offset=False,
-        eps=0.1 if chai else 1e-5,
-    )(x)
-    if not chai:
+    if esm:
+      x = _rms_norm(x)
+    else:
+      x = hm.LayerNorm(
+          name=f'{name}layer_norm',
+          use_fast_variance=False,
+          create_scale=False,
+          create_offset=False,
+          eps=0.1 if chai else 1e-5,
+      )(x)
+    if esm:
+      single_cond = jax.nn.silu(single_cond)
+    if not (chai or esm):
       single_cond = hm.LayerNorm(
           name=f'{name}single_cond_layer_norm',
           use_fast_variance=False,
@@ -73,13 +86,13 @@ def adaptive_layernorm(x, single_cond, name, global_config=None):
     single_scale = hm.Linear(
         x.shape[-1],
         initializer='zeros',
-        use_bias=not chai,
+        use_bias=not identity_scale,
         name=f'{name}single_cond_scale',
     )(single_cond)
     single_bias = hm.Linear(
         x.shape[-1], initializer='zeros', name=f'{name}single_cond_bias'
     )(single_cond)
-    gate = (single_scale + 1.0) if chai else jax.nn.sigmoid(single_scale)
+    gate = (single_scale + 1.0) if identity_scale else jax.nn.sigmoid(single_scale)
     x = gate * x + single_bias
   return x
 
