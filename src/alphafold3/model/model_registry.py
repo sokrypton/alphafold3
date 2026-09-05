@@ -183,8 +183,6 @@ PROTENIX2_SETTINGS = (
     # diffusion conditioning pair_channel defaults to 128, so widen it too or the
     # diffusion pair_cond/transition params mis-shape (structural gate caught this).
     ('heads.diffusion.conditioning.pair_channel', 256),
-    # ESMFold2's diffusion single is 768 wide, not AF3's 384
-    ('heads.diffusion.conditioning.seq_channel', 768),
 )
 
 
@@ -343,8 +341,6 @@ CHAI1_SETTINGS = (
     ('evoformer.template.template_stack.pair_attention.qkv_dim', 32),   # 4 heads x 32 at c=64
     ('heads.diffusion.transformer.num_blocks', 16),                     # AF3 has 24
     ('heads.diffusion.conditioning.pair_channel', 256),
-    # ESMFold2's diffusion single is 768 wide, not AF3's 384
-    ('heads.diffusion.conditioning.seq_channel', 768),
     ('heads.confidence.pairformer.pair_transition.num_intermediate_factor', 2),
     ('heads.confidence.pairformer.single_transition.num_intermediate_factor', 2),
     # CONFIDENCE only, not the trunk: chai's confidence triangle attention has a
