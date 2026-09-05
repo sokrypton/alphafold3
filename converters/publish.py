@@ -31,6 +31,11 @@ def _registry():
   return model_registry
 
 
+_COMPANIONS = {
+    'esmfold2': ('esmfold2.lm.npz',),
+}
+
+
 def files_for(model: str, root: pathlib.Path, precisions=('fp32',)):
   """-> [(local path, name in the repo)] for one model, or [] if not converted.
 
@@ -43,7 +48,13 @@ def files_for(model: str, root: pathlib.Path, precisions=('fp32',)):
   """
   registry = _registry()
   directory = root / model
-  spec = registry.get(model) if registry else None
+  # An artifact with no ModelSpec is still publishable: ESM-C is the separate
+  # graph ESMFold2 conditions on, not an AF3 model, and the code below already
+  # has a spec-less path for exactly this.
+  try:
+    spec = registry.get(model) if registry else None
+  except ValueError:
+    spec = None
   weights_file = spec.weights_file if spec else f'{model}.bin.zst'
   wanted = []
   for precision in precisions:
@@ -54,6 +65,13 @@ def files_for(model: str, root: pathlib.Path, precisions=('fp32',)):
     else:
       wanted.append(f"{weights_file.split('.', 1)[0]}.{precision}.bin.zst")
   wanted.append(f'{model}.shapes.json')
+  # Companion artifacts a model cannot be run without. ESMFold2's LM shim turns
+  # ESM-C's 81 hidden states into the pair representation its trunk reads; it is
+  # 3.7 MB, it is converted from the same checkpoint as the blob, and without it
+  # the esmc weights are unusable -- which would leave the published model
+  # single-sequence-or-MSA only. Unlike chai's std_conformers.npz (below) there
+  # is no licence question: it is ours from a checkpoint we already redistribute.
+  wanted.extend(_COMPANIONS.get(model, ()))
   # chai-1's std_conformers.npz is deliberately NOT published. It is derived from
   # chai's own RDKit cache rather than from anything we converted, and chai's
   # weights licence is not established, so redistributing it is a claim we have
