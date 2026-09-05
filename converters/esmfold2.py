@@ -580,3 +580,64 @@ def convert_esmfold2_weights(checkpoint, output_dir):
   common.populate(params, 'esmfold2', flat)
   return Path(common.write_params_blob(output_dir, 'esmfold2.bin.zst',
                                        params, add_meta=True))
+
+
+# ---------------------------------------------------------------------------
+# graph-aligned mapping (network/esmfold2.py scopes)
+# ---------------------------------------------------------------------------
+#
+# map_esmfold2_to_af3 above targets the plain-jnp reference. The haiku graph
+# nests the same leaves under hk scopes, and two shapes of stack prefix occur:
+#
+#   PairStack   <name>/__layer_stack_no_per_layer/esmfold2/<name>/block/...
+#   atom_stack  <parent>/__layer_stack_no_per_layer/blocks/...
+#
+# The PairStack form duplicates the module path because the block is
+# constructed OUTSIDE the layer_stack lambda -- which is deliberate: parcae
+# reuses one trunk across recycles, and building the block inside the lambda
+# gives every recycle its own weights.
+
+TOP = 'esmfold2'
+
+
+def _pair_stack_prefix(name):
+  return '%s/__layer_stack_no_per_layer/%s/%s/block' % (name, TOP, name)
+
+
+def map_esmfold2_graph(sd, dims=None):
+  """-> {scope: {name: array}} keyed exactly as network/esmfold2.py creates them."""
+  dims = dims or derive_dims(sd)
+  flat = {}
+
+  def put(prefix, local):
+    for k, v in local.items():
+      flat['%s/%s' % (prefix, k) if prefix else k] = v
+
+  put('', {
+      'z_init_1/weights': t(sd['z_init_1.weight']),
+      'z_init_2/weights': t(sd['z_init_2.weight']),
+      'rel_pos/weights': t(sd['rel_pos.embed.weight']),
+      'token_bonds/weights': t(sd['token_bonds.weight']),
+      'parcae_input_norm/scale': _arr(sd['parcae_input_norm.weight']),
+      'parcae_input_norm/offset': _arr(sd['parcae_input_norm.bias']),
+      'parcae_readout/weights': t(sd['parcae_readout.weight']),
+      'distogram/weights': t(sd['distogram_head.weight']),
+      'distogram/bias': _arr(sd['distogram_head.bias']),
+  })
+  a_vec, b_T = parcae_dynamics(sd)
+  flat['parcae_a'] = a_vec
+  flat['parcae_b/weights'] = b_T
+  put('language_model', language_model_shim(sd))
+  for name, n in (('lm_encoder', dims['n_lm_encoder']),
+                  ('folding_trunk', dims['n_trunk']),
+                  ('parcae_coda', dims['n_coda'])):
+    put(_pair_stack_prefix(name), pair_only_stack(sd, name, n))
+  ae = atom_encoder(sd, 'inputs_embedder.atom_attention_encoder',
+                    dims.get('n_input_atom', 3))
+  for k, v in ae.items():
+    key = k.replace('blocks/', '__layer_stack_no_per_layer/blocks/', 1)
+    flat['inputs_embedder/%s' % key] = v
+
+  params = {}
+  common.populate(params, TOP, flat)
+  return params
