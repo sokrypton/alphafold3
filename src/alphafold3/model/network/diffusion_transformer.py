@@ -465,6 +465,8 @@ def cross_attention(
     kq_norm: bool = False,
     pair_mask: jnp.ndarray | None = None,  # (..., Q, K)
     keys_from_queries=None,
+    rope_q: tuple[jnp.ndarray, jnp.ndarray] | None = None,
+    rope_k: tuple[jnp.ndarray, jnp.ndarray] | None = None,
 ) -> jnp.ndarray:
   """Multihead self-attention."""
   # chai-1's atom transformers drop BOTH the gating_query and the output
@@ -560,6 +562,17 @@ def cross_attention(
   q = q.astype(jnp.float32)
   k = k.astype(jnp.float32)
   bias = bias.astype(jnp.float32)
+
+  if rope_q is not None:
+    # ESMFold2's atom attention has no pair bias and no learned positional term:
+    # the whole positional signal is a 3D rotary built from the reference
+    # conformer, after an affine-free RMSNorm on q and k. Queries and keys carry
+    # DIFFERENT rotations because they are different atom subsets of the same
+    # flat list -- passing one for both silently rotates the keys as if they sat
+    # at the query positions. None for every other model.
+    q = _apply_rope(_rms_norm(q), *rope_q)
+    k = _apply_rope(_rms_norm(k), *rope_k)
+
   logits = jnp.einsum('...qhc,...khc->...hqk', q * key_dim ** (-0.5), k) + bias
   if pair_logits is not None:
     logits += pair_logits
@@ -616,6 +629,8 @@ class CrossAttTransformer(hk.Module):
       keys_single_cond: jnp.ndarray,  # (num_subsets, num_keys, ch)
       pair_cond: jnp.ndarray,  # (num_subsets, num_queries, num_keys, ch)
       pair_mask: jnp.ndarray | None = None,  # (num_subsets, num_queries, num_keys)
+      rope_q: tuple[jnp.ndarray, jnp.ndarray] | None = None,
+      rope_k: tuple[jnp.ndarray, jnp.ndarray] | None = None,
   ) -> jnp.ndarray:
     chai = self.global_config.model == 'chai1'
 
@@ -651,6 +666,8 @@ class CrossAttTransformer(hk.Module):
           single_cond_k=keys_single_cond,
           name=self.name,
           pair_mask=pair_mask,
+          rope_q=rope_q,
+          rope_k=rope_k,
       )
       trans_in = block_in if chai else (queries_act + attn)
       trans = transition_block(

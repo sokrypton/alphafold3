@@ -28,6 +28,7 @@ from alphafold3.model.components import haiku_modules as hm
 from alphafold3.model.components import utils
 from . import diffusion_transformer
 import haiku as hk
+import numpy as np
 import jax
 import jax.numpy as jnp
 
@@ -204,6 +205,28 @@ def _chiral_position_grads(positions, chirals):
   # RF3 detaches: the chirality gradient is an INPUT FEATURE, not a path for learning.
   grads = jax.grad(dihedral_loss)(jax.lax.stop_gradient(flat))
   return jnp.nan_to_num(grads).reshape(positions.shape)
+
+
+def _build_atom_rope(ref_pos, ref_space_uid, head_dim, cfg):
+  """3D rotary from the reference conformer, in whatever layout it is handed.
+
+  ESMFold2 packs 3 spatial axes x n_spatial pairs plus n_uid pairs of
+  ref_space_uid, which for its 4-head/32-channel atom attention is
+  3*2 + 10 = 16 = head_dim/2 exactly. Queries and keys must be built separately:
+  they are different subsets of the same flat atom list, so one rotation does
+  not serve both.
+  """
+  inv = lambda n, base: (1.0 / (base ** (np.arange(n, dtype=np.float32) / n)))
+  sp = jnp.asarray(inv(cfg['n_spatial'], cfg['spatial_base']))
+  ui = jnp.asarray(inv(cfg['n_uid'], cfg['uid_base']))
+  fs = (ref_pos[..., None] * sp).reshape(ref_pos.shape[:-1] + (-1,))
+  fu = ref_space_uid[..., None] * ui
+  fr = jnp.concatenate([fs, fu], -1)
+  half = head_dim // 2
+  if fr.shape[-1] < half:
+    pad = jnp.zeros(fr.shape[:-1] + (half - fr.shape[-1],), fr.dtype)
+    fr = jnp.concatenate([fr, pad], -1)
+  return jnp.cos(fr), jnp.sin(fr)
 
 
 def atom_cross_att_encoder(
@@ -458,6 +481,26 @@ def atom_cross_att_encoder(
       layout_axes=(-2, -1),
   )
 
+  swa_rope = global_config.model in model_config.SWA_ROPE_ATOM_ATTENTION
+  rope_q = rope_k = None
+  swa_mask = None
+  if swa_rope:
+    cfg = model_config.ATOM_ROPE[global_config.model]
+    head_dim = (c.atom_transformer.attention.key_dim
+                or c.per_atom_channels) // c.atom_transformer.attention.num_head
+    rope_q = _build_atom_rope(queries_ref_pos, queries_ref_space_uid, head_dim, cfg)
+    rope_k = _build_atom_rope(keys_ref_pos, keys_ref_space_uid, head_dim, cfg)
+    # The exact +/-64 window by RANK among valid atoms. AF3's key subset is only
+    # block-aligned, so this is what actually defines ESMFold2's window; the
+    # subset is merely wide enough to contain it.
+    q_rank = jnp.cumsum(queries_mask.reshape(-1)) - 1
+    q_rank = q_rank.reshape(queries_mask.shape)
+    k_rank = atom_layout.convert(queries_to_keys, q_rank, layout_axes=(-2, -1))
+    half = model_config.ATOM_ROPE_HALF_WINDOW
+    swa_mask = jnp.abs(q_rank[:, :, None] - k_rank[:, None, :]) <= half
+    swa_mask = swa_mask & queries_mask[:, :, None].astype(jnp.bool_)
+    swa_mask = swa_mask & keys_mask[:, None, :].astype(jnp.bool_)
+
   offsets_valid = (
       queries_ref_space_uid[:, :, None] == keys_ref_space_uid[:, None, :]
   )
@@ -563,7 +606,9 @@ def atom_cross_att_encoder(
       queries_single_cond=queries_single_cond,
       keys_single_cond=keys_single_cond,
       pair_cond=pair_act,
-      pair_mask=same_token_mask,
+      pair_mask=swa_mask if swa_rope else same_token_mask,
+      rope_q=rope_q,
+      rope_k=rope_k,
   )
   queries_act *= queries_mask[..., None]
   skip_connection = queries_act

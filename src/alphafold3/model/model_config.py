@@ -150,6 +150,24 @@ SSM_RECYCLE = ('esmfold2',)
 CLAMPED_OPM_NORM = ('esmfold2',)
 
 
+# Models whose ATOM attention is a sliding window with 3D rotary positions
+# instead of AF3's windowed pair bias.
+#
+# ESMFold2 gives each atom a window of +/-`ATOM_ROPE_HALF_WINDOW` by RANK among
+# valid atoms, and its entire positional signal is a rotary embedding built from
+# ref_pos and ref_space_uid -- there is no pair bias at all. AF3's window is
+# BLOCK-aligned (query i sees [32b-48, 32b+79]), so the two are different masks
+# even at the same width; the exact window rides in as an additive pair_mask and
+# the key subset is widened to cover it (see ATOM_KEYS_SUBSET_SIZE).
+SWA_ROPE_ATOM_ATTENTION = ('esmfold2',)
+ATOM_ROPE_HALF_WINDOW = 64
+# 32 queries + 2*64 of context needs 160; the next power-of-two multiple that
+# AF3's gather machinery is happy with is 192.
+ATOM_KEYS_SUBSET_SIZE = {'esmfold2': 192}
+ATOM_ROPE = {'esmfold2': dict(n_spatial=2, n_uid=10,
+                              spatial_base=20.0, uid_base=10000.0)}
+
+
 # Models whose MSA stack does NOT update the MSA representation at all: their
 # msa_module block is OuterProductMean + a pair stack, and there is no MSA row
 # attention and no MSA transition anywhere in the checkpoint.
