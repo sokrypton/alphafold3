@@ -5,6 +5,8 @@
 
 """Tests for the per-model settings registry."""
 
+import pathlib
+
 from absl.testing import absltest
 from absl.testing import parameterized
 from alphafold3.model import model as af3_model
@@ -132,6 +134,33 @@ class RegistryTest(parameterized.TestCase):
               if model_registry.get(n).featurise.get('padded_keys')}
     self.assertContainsSubset(padded,
                               model_config.KEY_MASKED_ATOM_ATTENTION)
+
+  def test_every_featurise_knob_is_actually_consumed(self):
+    """A declared knob that nothing reads is a silent no-op.
+
+    `atom_keys_subset_size` sat in the registry unread for the whole of the
+    ESMFold2 port. The model was declaring a 192-key atom window and getting
+    AF3's 128, so its +/-64 attention window could not fit however it was
+    centred -- an interior query wanted 129 keys and saw a median of 119.
+    Nothing errored: attention over a truncated key set is still well-formed
+    attention, and every fold gate passed.
+
+    A static check, deliberately: it fails for a knob that is declared and
+    never read even if no model currently sets it to anything interesting.
+    """
+    import re
+    from alphafold3.model.pipeline import model_features
+    source = pathlib.Path(model_features.__file__).read_text()
+    read = {a or b for a, b in
+            re.findall(r"knobs\.get\('(\w+)'\)|knobs\['(\w+)'\]", source)}
+    declared = set()
+    for name in model_registry.MODEL_SPECS:
+      declared |= set(model_registry.get(name).featurise or {})
+    unconsumed = sorted(declared - read)
+    self.assertEmpty(
+        unconsumed,
+        'featurise knobs declared in the registry that model_features.apply '
+        'never reads: %s' % unconsumed)
 
   def test_output_terms_never_claim_a_licence_we_have_not_established(self):
     for name in model_registry.MODEL_SPECS:
