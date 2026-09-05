@@ -295,8 +295,25 @@ def _wide_key_window(batch, k_size, prefix=''):
   return batch
 
 
+def _attach_lm_pair(batch, lm_pair):
+  """ESMFold2's language-model PAIR representation, from converters.esmfold2_lm.
+
+  (num_tokens, num_tokens, c_z), built outside the fold from ESM-C's hidden
+  states. Attached verbatim: unlike the ESM2 token embeddings, this is already
+  in the trunk's own pair layout, so there is no scatter onto protein tokens to
+  get wrong -- but it does have to be the SAME token order the featuriser laid
+  out, which is why it is keyed to the batch rather than to the input JSON.
+  """
+  lm = np.asarray(lm_pair, np.float32)
+  n = np.asarray(batch['token_index']).shape[-1]
+  if lm.shape[:2] != (n, n):
+    raise ValueError(f'lm_pair is {lm.shape[:2]} but the batch has {n} tokens')
+  batch['lm_pair'] = lm
+  return batch
+
+
 def apply(batch, spec, *, refeaturise=None, model_dir=None, esm=None,
-          has_msa=True, fold_input=None, cyclic=None):
+          has_msa=True, fold_input=None, cyclic=None, lm_pair=None):
   """Apply `spec`'s featurisation conventions to a featurised batch, in place.
 
   spec is a model_registry.ModelSpec; the work is driven by spec.featurise.
@@ -362,6 +379,8 @@ def apply(batch, spec, *, refeaturise=None, model_dir=None, esm=None,
     chiral_features.attach_chiral_features(batch)
   if knobs.get('zero_msa_without_alignment') and not has_msa:
     _zero_msa(batch)
+  if knobs.get('lm_pair') and lm_pair is not None:
+    _attach_lm_pair(batch, lm_pair)
   if knobs.get('esm') and esm is not None:
     _attach_esm(batch, esm)
 

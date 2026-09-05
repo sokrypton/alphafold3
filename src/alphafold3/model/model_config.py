@@ -172,6 +172,13 @@ SWA_ROPE_ATOM_ATTENTION = ('esmfold2',)
 # built from s_inputs alone rather than from [single_embedding, target_feat].
 PAIR_ONLY_TRUNK = ('esmfold2',)
 
+# ESMFold2 keeps dropout on the LM pair representation at INFERENCE, resampled
+# every recycle pass (config.lm_encoder.per_loop_lm_dropout; the top-level config
+# says 0.0 and is overridden). It is not optional polish -- disabling it costs
+# ~18 A on 6MRR.
+LM_PAIR_DROPOUT = {'esmfold2': 0.25}
+
+
 # Models whose sampler rigid-aligns the noisy coordinates onto the denoised
 # prediction before the Euler step. See diffusion_head._kabsch.
 REALIGN_SAMPLER = ('esmfold2',)

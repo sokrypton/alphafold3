@@ -416,6 +416,7 @@ ESMFOLD2_SETTINGS = (
     ('evoformer.pair_channel', 256),
     ('evoformer.pairformer.num_layer', 48),
     ('evoformer.coda.num_layer', 2),
+    ('evoformer.lm_encoder.num_layer', 4),
     ('evoformer.msa_stack.num_layer', 4),
     ('evoformer.msa_channel', 128),
     ('evoformer.template.template_stack.num_layer', 0),
@@ -457,7 +458,7 @@ _FEATURISE = {
     # ESMFold2 attends +/-64 atoms by rank, which needs 32 + 2*64 = 160 keys of
     # context around a query block; AF3's default 128 is too narrow, so widen the
     # key subset and let the exact window ride in as a mask.
-    'esmfold2': dict(atom_keys_subset_size=192),
+    'esmfold2': dict(atom_keys_subset_size=192, lm_pair=True),
     # boltz2 keeps a modified residue as ONE token holding all its atoms
     # (data/tokenize/boltz2.py: standard -> per residue, NONPOLYMER -> per atom,
     # else -> one token, all atoms). AF3 atomises instead, and handing boltz2 ten

@@ -242,6 +242,13 @@ class Evoformer(hk.Module):
     # (num_layer 0); ESMFold2's "parcae coda" is two blocks.
     coda: modules.PairFormerIteration.Config = base_config.autocreate(num_layer=0)
 
+    # ESMFold2's lm_encoder: four pair-only blocks over the language-model pair
+    # representation, run INSIDE the recycle loop (its input is re-dropped every
+    # pass). Count only -- the blocks themselves take config.pairformer, like the
+    # coda. 0 everywhere else, which is also what ESMFold2 runs without ESM-C.
+    lm_encoder: modules.PairFormerIteration.Config = base_config.autocreate(
+        num_layer=0)
+
   def __init__(
       self,
       config: Config,
@@ -452,6 +459,46 @@ class Evoformer(hk.Module):
         padding_mask_2d=pair_mask,
     )
     return pair_activations + template_act, key
+
+  # deliberately NOT @hk.transparent, unlike its neighbours. layer_stack scope
+  # names are positional within their enclosing scope, so a transparent optional
+  # stack RENUMBERS the trunk and the coda -- and then a blob converted with
+  # ESM-C cannot be loaded without it, and vice versa. Keeping the method scope
+  # puts this stack in its own namespace, so the parameter tree of everything
+  # else is identical whether or not the language model is in play.
+  def _embed_lm_pair(self, *, batch, pair_activations, pair_mask, key,
+                     use_dropout=False):
+    """Add ESMFold2's language-model pair representation to the injection.
+
+    The shim that turns ESM-C's 81 hidden states into this pair rep is a
+    SEPARATE graph (converters/esmfold2_lm.py) and hands its output in on the
+    batch; ESM-C itself is a 6.35B-parameter artifact that a fold does not
+    otherwise load. What is left here needs no new machinery: the lm_encoder is
+    four PAIR-ONLY blocks, the same PairFormerIteration-with-zeroed-attention
+    identity the trunk and the coda already ride.
+
+    The dropout is the part that cannot move outside. ESMFold2 keeps 25% dropout
+    on this tensor at INFERENCE and resamples it every recycle pass, so it has
+    to sit inside the loop -- precomputing one masked copy per pass would mean
+    carrying n_pass pair tensors instead of one.
+    """
+    lm = batch.lm_pair
+    if lm is None or not self.config.lm_encoder.num_layer:
+      return pair_activations
+    lm = lm.astype(pair_activations.dtype)
+    rate = model_config.LM_PAIR_DROPOUT.get(self.global_config.model, 0.0)
+    if rate:
+      keep = jax.random.bernoulli(key, 1.0 - rate, lm.shape)
+      lm = lm * keep.astype(lm.dtype) / (1.0 - rate)
+
+    def lm_fn(z):
+      return modules.PairFormerIteration(
+          self.config.pairformer, self.global_config, with_single=False,
+          name='lm_encoder')(act=z, pair_mask=pair_mask, use_dropout=use_dropout)
+
+    lm = _stack(self.config.lm_encoder.num_layer, lm_fn,
+                self.config.pairformer.block_remat)(lm)
+    return pair_activations + lm
 
   @hk.transparent
   def _embed_process_msa(
@@ -699,6 +746,9 @@ class Evoformer(hk.Module):
             is_ligand=batch.token_features.is_ligand,
             asym_id=batch.token_features.asym_id,
         )
+        pair_activations = self._embed_lm_pair(
+            batch=batch, pair_activations=pair_activations,
+            pair_mask=pair_mask, key=key, use_dropout=use_dropout)
         _tap('z_inject', pair_activations)
         pair_activations = _add_prev(pair_activations, None)
         _tap('z_parcae', pair_activations)

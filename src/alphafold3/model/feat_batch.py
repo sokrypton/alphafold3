@@ -44,6 +44,14 @@ class Batch:
   # pipeline) predates this field, and only RF3 populates it.
   chirals: features.Chirals = dataclasses.field(
       default_factory=features.Chirals.empty)
+  # ESMFold2 only: (num_tokens, num_tokens, c_z), the pair representation its
+  # LanguageModelShim builds from ESM-C's hidden states. It rides the batch
+  # rather than the graph because the shim is a SEPARATE graph -- ESM-C is a
+  # 6.35B-parameter artifact of its own, and the shim is the last few layers of
+  # that tower, not part of AF3's. What the AF3 graph does with it (the per-loop
+  # dropout and the 4-block lm_encoder) is ordinary pair-stack work and stays
+  # here. None for every other model, and for ESMFold2 run without ESM-C.
+  lm_pair: features.xnp_ndarray | None = None
 
   @property
   def num_res(self) -> int:
@@ -71,6 +79,7 @@ class Batch:
         convert_model_output=features.ConvertModelOutput.from_data_dict(batch),
         frames=features.Frames.from_data_dict(batch),
         chirals=features.Chirals.from_data_dict(batch),
+        lm_pair=batch.get('lm_pair'),
     )
 
   def as_data_dict(self) -> features.BatchDict:
@@ -88,6 +97,8 @@ class Batch:
         **self.convert_model_output.as_data_dict(),
         **self.frames.as_data_dict(),
     }
+    if self.lm_pair is not None:
+      output['lm_pair'] = self.lm_pair
     return output
 
 

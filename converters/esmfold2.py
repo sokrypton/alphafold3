@@ -582,6 +582,12 @@ def convert_esmfold2_weights(checkpoint, output_dir):
   for key, arr in flat.items():
     scope, name = key.rsplit('/', 1)
     params.setdefault(scope, {})[name] = arr
+  # The LanguageModelShim runs as a SEPARATE graph (converters/esmfold2_lm.py),
+  # so its weights are their own artifact rather than records in the blob. They
+  # are 40 MB against the blob's 800 and a fold that skips ESM-C never loads
+  # them.
+  lm = {k.replace('/', '.'): v for k, v in language_model_shim(sd).items()}
+  np.savez(Path(output_dir) / 'esmfold2.lm.npz', **lm)
   return Path(common.write_params_blob(output_dir, 'esmfold2.bin.zst',
                                        params, add_meta=True))
 
@@ -1058,14 +1064,30 @@ def map_esmfold2_to_af3_graph(sd, dims=None):
   flat['diffuser/distogram_head/half_logits/weights'] = t(sd['distogram_head.weight'])
   flat['diffuser/distogram_head/half_logits/bias'] = _arr(sd['distogram_head.bias']) / 2.0
 
-  # ── trunk pairformer and MSA stack ────────────────────────────────────────
+  # ── the evoformer's pair stacks ───────────────────────────────────────────
+  # layer_stack scope names are POSITIONAL within their enclosing scope: the
+  # first stack built takes the bare name and the rest are numbered in
+  # CONSTRUCTION order. msa_stack, trunk_pairformer and trunk_coda share the
+  # evoformer's scope and so are bare, _1, _2. The lm_encoder deliberately sits
+  # inside its method's own scope instead -- otherwise it would renumber those
+  # three, and a blob converted with ESM-C could not be loaded without it.
+  lm_n = dims['n_lm_encoder']
+  stack_at = lambda i: '__layer_stack_no_per_layer' + ('_%d' % i if i else '')
+  i_trunk = 1
+  if lm_n:
+    # The lm_encoder is four PAIR-ONLY blocks, so it is the same
+    # PairFormerIteration-with-zeroed-attention identity the trunk and the coda
+    # already ride -- a third stack, no new graph machinery. Only the shim that
+    # feeds it is a separate graph (converters/esmfold2_lm.py).
+    put(P, af3_pair_stack(sd, 'lm_encoder', lm_n, c_z, pair_head,
+                          '~_embed_lm_pair/__layer_stack_no_per_layer/lm_encoder'))
   put(P, af3_pair_stack(sd, 'folding_trunk', dims['n_trunk'], c_z, pair_head,
-                        '__layer_stack_no_per_layer_1/trunk_pairformer'))
-  # the post-trunk readout + coda: AF3 has no such stage, so nothing in the
+                        '%s/trunk_pairformer' % stack_at(i_trunk)))
+
   # scope diff asked for these until the graph gained them
   put(P, {'parcae_readout/weights': t(sd['parcae_readout.weight'])})
   put(P, af3_pair_stack(sd, 'parcae_coda', dims['n_coda'], c_z, pair_head,
-                        '__layer_stack_no_per_layer_2/trunk_coda'))
+                        '%s/trunk_coda' % stack_at(i_trunk + 1)))
   n_msa = dims['n_msa']
   msa = stack_blocks(
       lambda i: af3_msa_block(sd, 'msa_encoder.blocks.%d' % i, c_z, pair_head,

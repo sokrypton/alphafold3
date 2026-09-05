@@ -25,6 +25,15 @@ if spec.featurise:
                                  has_msa=False, fold_input=fi)
 cfg = af3_model.Model.Config(); cfg.global_config.flash_attention_implementation='xla'
 cfg.global_config.bfloat16='none'; spec.configure(cfg)
+# LM=1 runs the ESM-C branch on BOTH sides. The dropout is switched off in both:
+# it is resampled every pass from a key the two implementations do not share, so
+# leaving it on would compare two different random maskings, not two trunks.
+from alphafold3.model import model_config as _mc
+USE_LM = os.environ.get('LM') == '1'
+if USE_LM:
+    _mc.LM_PAIR_DROPOUT['esmfold2'] = 0.0
+else:
+    cfg.evoformer.lm_encoder.num_layer = 0
 # tap the TRUNK, not the distogram: the previous run compared distogram outputs,
 # which include the head, so a broken head masqueraded as a broken trunk.
 from alphafold3.model.network import evoformer as ev
@@ -53,6 +62,15 @@ def fwd(b):
         prev = {**prev, **{k: v.astype(jnp.float32)
                            for k, v in emb.items() if k in prev}}
     return emb
+S0='/tmp/claude-1000/-home-ubuntu-ColabDesign2/77aa66c7-a908-4cb6-bf0e-1ff700d68150/scratchpad/'
+_dd = dict(np.load(S0 + 'esmfold2_6mrr68.npz'))
+lm_hidden = jnp.asarray(_dd['lm_hidden'][0]) if USE_LM else None
+if USE_LM:
+    from converters import esmfold2_lm
+    from alphafold3.model.pipeline import model_features as _mf
+    _mf._attach_lm_pair(batch, esmfold2_lm.shim(
+        np.asarray(lm_hidden), esmfold2_lm.load_params(d)))
+
 b = jax.tree_util.tree_map(jnp.asarray, utils.remove_invalidly_typed_feats(batch))
 # calling Evoformer directly drops the Model's own `diffuser/` scope prefix
 _p = afp.get_model_haiku_params(model_dir=d)
@@ -66,7 +84,7 @@ dd=dict(np.load(S+'esmfold2_6mrr68.npz'))
 f={k[5:]: jnp.asarray(v[0]) for k,v in dd.items() if k.startswith('feat.')}
 pref={k: jnp.asarray(v) for k,v in CV.map_esmfold2_to_af3(sd).items()}
 msa=R.self_msa(f)
-z,_,_ = R.trunk(f, None, pref, dims, n_loops=3, key=jax.random.PRNGKey(0),
+z,_,_ = R.trunk(f, lm_hidden, pref, dims, n_loops=3, key=jax.random.PRNGKey(0),
                 lm_dropout=0.0, msa=msa)
 zr = np.asarray(z)
 # stage-by-stage, pass 0: which of z_init / z_inject / z_parcae first diverges
@@ -98,7 +116,8 @@ print('     profile     corr %.6f   equal %s' % (np.corrcoef(gp.ravel(), rp_.rav
                                                  np.allclose(gp, rp_)))
 
 a, c = z_graph.ravel(), zr.ravel()
-print('GRAPH trunk pair vs REFERENCE trunk pair (both no-LM, self-MSA):')
+print('GRAPH trunk pair vs REFERENCE trunk pair (LM %s, self-MSA):'
+      % ('ON' if USE_LM else 'off'))
 print('   shapes %s vs %s' % (z_graph.shape, zr.shape))
 print('   corr %.6f   relerr %.3e' % (np.corrcoef(a, c)[0,1],
                                       np.abs(a-c).max()/max(np.abs(c).max(),1e-9)))

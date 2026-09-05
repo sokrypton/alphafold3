@@ -70,10 +70,18 @@ def fold(model_name, seq, model_dir=None, seed=0, templates=None):
   featurise = lambda **kw: featurisation.featurise_input(
       fold_input=fold_input, ccd=ccd, buckets=None, **kw)
   batch = featurise()[0]
+  # ESMFold2 folds from ESM-C's hidden states. LM_PAIR names an npz written by
+  # converters.esmfold2_lm; without it the model still folds, just without its
+  # language model (natively 1.719 A on 6MRR against 1.7 with it).
+  lm_pair = None
+  lm_npz = os.environ.get('LM_PAIR')
+  if lm_npz:
+    z = np.load(os.path.expanduser(lm_npz))
+    lm_pair = z['lm_pair'] if hasattr(z, 'files') else z
   if spec.featurise:
     batch = model_features.apply(batch, spec, refeaturise=featurise,
                                  model_dir=model_dir, esm=None, has_msa=False,
-                                 fold_input=fold_input)
+                                 fold_input=fold_input, lm_pair=lm_pair)
   cfg = af3_model.Model.Config()
   cfg.global_config.flash_attention_implementation = 'xla'
   spec.configure(cfg)
