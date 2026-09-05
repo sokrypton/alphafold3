@@ -58,6 +58,16 @@ def _download(url: str, dst: str, log=print) -> None:
   os.replace(tmp, dst)
 
 
+# Companion artifacts a model needs beside its blob. ESMFold2's LM shim turns
+# ESM-C's hidden states into the pair representation its trunk reads; it is
+# 3.7 MB, and without it the ESM-C path raises on the first fold. The tower
+# ITSELF is fetched on demand by converters.esmc_embed, because it is 5.5 GB and
+# ESMFold2 also runs from an MSA.
+_COMPANIONS = {
+    'esmfold2': ('esmfold2.lm.npz',),
+}
+
+
 def ensure_weights(model_name: str, model_dir=None, *, download=True,
                    precision='fp32', log=print) -> str:
   """Make `model_name`'s converted weights exist on disk; return their directory.
@@ -107,4 +117,12 @@ def ensure_weights(model_name: str, model_dir=None, *, download=True,
               os.path.join(model_dir, manifest), log=log)
   except Exception as err:  # pylint: disable=broad-except
     log(f'note: no shape manifest published for {spec.name} ({err})')
+  for extra in _COMPANIONS.get(spec.name, ()):
+    dst = os.path.join(model_dir, extra)
+    if os.path.exists(dst):
+      continue
+    try:
+      _download(_HF_URL.format(repo=spec.weights_repo, file=extra), dst, log=log)
+    except Exception as err:  # pylint: disable=broad-except
+      log(f'note: could not fetch {extra} for {spec.name} ({err})')
   return model_dir

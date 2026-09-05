@@ -122,6 +122,15 @@ def load(model_dir='~/ported/esmc'):
   from converters.common import read_blob
 
   path = os.path.join(os.path.expanduser(str(model_dir)), 'esmc.bin.zst')
+  if not os.path.exists(path):
+    # ESM-C has no ModelSpec -- it is a separate graph, not an AF3 model -- so
+    # ensure_weights does not know about it. Fetch it here, on demand: 5.5 GB is
+    # not something to pull for a run that folds from an MSA instead.
+    from alphafold3.model import model_registry, weights
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    weights._download(
+        weights._HF_URL.format(repo=model_registry.get('esmfold2').weights_repo,
+                               file='esmc.bin.zst'), path)
   per_block = collections.defaultdict(dict)
   p = {}
   for scope, name, arr in read_blob(path):
