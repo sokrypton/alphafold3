@@ -400,6 +400,8 @@ def denoise(x_noisy, t_hat, f, s_inputs, z_trunk, rel_pos, p, dims, n_heads=16):
   a2t = jnp.asarray(f['atom_to_token'].astype(int) * mask.astype(int))
   L = s_inputs.shape[0]
 
+  TAPS.setdefault('single_cond', []).append(s)
+  TAPS.setdefault('pair_cond', []).append(z)
   ae = {k[len('atom_encoder/'):]: v for k, v in d.items() if k.startswith('atom_encoder/')}
   c0 = layer_norm(atom_features(f, mask) @ ae['atom_linear/weights'],
                   ae['atom_norm/scale'], ae['atom_norm/offset'])
@@ -409,18 +411,22 @@ def denoise(x_noisy, t_hat, f, s_inputs, z_trunk, rel_pos, p, dims, n_heads=16):
   q = atom_stack(q, c0, ae, 'blocks/', dims['n_diff_atom'], cos, sin, mask)
   a = scatter_mean(jax.nn.relu(q @ ae['atom_to_token/weights']), a2t, L, mask)
 
+  TAPS.setdefault('token_act', []).append(a)
   a = a + layer_norm(s, d['s_step_norm/scale'], d['s_step_norm/offset']) @ d['s_to_token/weights']
+  TAPS.setdefault('act_pre_transformer', []).append(a)
   ta = {k[len('token_attn/'):]: v for k, v in d.items() if k.startswith('token_attn/')}
   tt = {k[len('token_transition/'):]: v for k, v in d.items() if k.startswith('token_transition/')}
   for i in range(ta['q/weights'].shape[0]):
     a = a + token_attn(a, s, z, {k: v[i] for k, v in ta.items()}, n_heads)
     a = a + token_transition(a, s, {k: v[i] for k, v in tt.items()})
   a = layer_norm(a, d['token_norm/scale'], d['token_norm/offset'])
+  TAPS.setdefault('act_post_transformer', []).append(a)
 
   ad = {k[len('atom_decoder/'):]: v for k, v in d.items() if k.startswith('atom_decoder/')}
   qd = q + (a @ ad['token_to_atom/weights'])[a2t]
   qd = atom_stack(qd, c0, ad, 'blocks/', dims['n_diff_atom'], cos, sin, mask)
   r_update = layer_norm(qd, ad['norm/scale'], ad['norm/offset']) @ ad['output/weights']
+  TAPS.setdefault('r_update', []).append(r_update)
 
   s2, t2 = SIGMA_DATA ** 2, t_hat ** 2
   return (s2 / (s2 + t2)) * x_noisy + (SIGMA_DATA * t_hat / jnp.sqrt(s2 + t2)) * r_update

@@ -91,6 +91,18 @@ def _strip(k):
 _p = {_strip(k): v for k, v in _p.items()}
 out = np.asarray(fwd.apply(_p, jax.random.PRNGKey(0), b, jnp.asarray(dense)))
 x_graph = out[gmask][:n]
+gt = dh.DIFF_TAPS
+for name in ('single_cond', 'pair_cond', 'token_act', 'act_pre_transformer',
+             'act_post_transformer', 'r_update'):
+    if name in gt and name in R.TAPS:
+        x = np.asarray(gt[name][0]); y = np.asarray(R.TAPS[name][0])
+        if name == 'r_update':                     # dense vs flat atom layout
+            x = x[gmask][:n]; y = y[rmask][:n]
+        if x.shape != y.shape:
+            print('   %-20s SHAPE %s vs %s' % (name, x.shape, y.shape)); continue
+        print('   %-20s corr %.6f  std %.4f vs %.4f'
+              % (name, np.corrcoef(x.ravel(), y.ravel())[0, 1], x.std(), y.std()))
+
 a, c = x_graph.ravel(), x_ref[:n].ravel()
 print('x_denoised  GRAPH vs REFERENCE   (t_hat = %.3g, %d atoms)' % (T_HAT, n))
 print('   corr %.6f   rms diff %.4f A' % (np.corrcoef(a, c)[0, 1],
