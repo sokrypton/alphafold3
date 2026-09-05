@@ -91,6 +91,23 @@ ESMFOLD2_FAMILY = ('esmfold2', 'esmfold2_fast', 'esmfold2_exp',
 # to stock recycling, and drops the parcae readout and coda with it.
 ESMFOLD2_SSM_RECYCLE = ('esmfold2', 'esmfold2_fast')
 
+# The experimental line, which is also where the confidence head changes: it
+# keeps pLDDT and PAE, drops the PAE LayerNorm, and drops the PDE and
+# experimentally-resolved heads outright (93 confidence tensors against 101).
+ESMFOLD2_EXPERIMENTAL = tuple(m for m in ESMFOLD2_FAMILY
+                              if m not in ESMFOLD2_SSM_RECYCLE)
+
+# Confidence heads a model does not have. Building one anyway leaves its
+# parameters at random init and emits a prediction that looks like a prediction
+# and is noise -- which is what happened to chai1's experimentally-resolved.
+NO_PDE_HEAD = ESMFOLD2_EXPERIMENTAL
+NO_RESOLVED_HEAD = ('chai1',) + ESMFOLD2_EXPERIMENTAL
+# ...and the LayerNorms they do not have. boltz2 has none before ANY head;
+# ESMFold2's experimental line keeps plddt_ln but not pae_ln, so this is keyed
+# by head, not by model.
+NO_HEAD_NORM = {'boltz2': ('*',),
+                **{m: ('pae_logits_ln',) for m in ESMFOLD2_EXPERIMENTAL}}
+
 # The Protenix family. Its model types differ from one another ONLY in counts
 # and widths (converters/protenix2.derive_dims reads both off the checkpoint), so
 # every FORWARD branch that protenix2 takes, mini and tiny take too. Keeping the

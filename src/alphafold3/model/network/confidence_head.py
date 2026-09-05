@@ -84,7 +84,8 @@ class ConfidenceHead(hk.Module):
     `<head>/~_head_norm/logits_ln` and every already-converted model (of3/if2/rf3/
     protenix) silently loses 8 parameters to init. Caught by the structural gate.
     """
-    if self.global_config.model == 'boltz2':
+    skip = model_config.NO_HEAD_NORM.get(self.global_config.model, ())
+    if '*' in skip or name in skip:
       return x
     return hm.LayerNorm(name=name)(x)
 
@@ -407,9 +408,18 @@ class ConfidenceHead(hk.Module):
 
       # Produce logits to predict a distogram of pairwise distance errors
       # between the input prediction and the ground truth.
+      pred_distance_error = None
+      average_pred_distance_error = None
+      no_pde = self.global_config.model in model_config.NO_PDE_HEAD
 
       # Shape (num_res, num_res, num_bins)
-      if self.global_config.model == 'boltz2':
+      if no_pde:
+        # ESMFold2's experimental line has no PDE head at all -- no pde_head and
+        # no pde_ln. Same reasoning as the missing resolved head below: building
+        # it would leave three parameters at random init and emit a `full_pde`
+        # that reads like a prediction.
+        pass
+      elif self.global_config.model == 'boltz2':
         # boltz2 has use_separate_heads=True: SEPARATE intra- and inter-chain heads for
         # both PDE and PAE, each hard-masked to its half of the pair matrix. On a
         # monomer the inter head never fires, which is why the intra head alone was
@@ -442,14 +452,15 @@ class ConfidenceHead(hk.Module):
           [bin_centers, bin_centers[-1:] + step], axis=0
       )
 
-      distance_probs = jax.nn.softmax(distance_logits, axis=-1)
+      if not no_pde:
+        distance_probs = jax.nn.softmax(distance_logits, axis=-1)
 
-      pred_distance_error = (
-          jnp.sum(distance_probs * bin_centers, axis=-1) * pair_mask
-      )
-      average_pred_distance_error = jnp.sum(
-          pred_distance_error, axis=[-2, -1]
-      ) / jnp.sum(pair_mask, axis=[-2, -1])
+        pred_distance_error = (
+            jnp.sum(distance_probs * bin_centers, axis=-1) * pair_mask
+        )
+        average_pred_distance_error = jnp.sum(
+            pred_distance_error, axis=[-2, -1]
+        ) / jnp.sum(pair_mask, axis=[-2, -1])
 
       # Predicted aligned error
       pae_outputs = {}
@@ -549,8 +560,8 @@ class ConfidenceHead(hk.Module):
     # prediction and was noise. Don't create it; the key is simply absent for
     # chai1, which is honest and also what makes the converter's coverage exact.
     experimentally_resolved_logits = None
-    if self.global_config.model == 'chai1':
-      pass          # no such head in chai; nothing to build
+    if self.global_config.model in model_config.NO_RESOLVED_HEAD:
+      pass          # no such head here; nothing to build
     else:
       experimentally_resolved_logits = hm.Linear(
           (_n_atom, 2),
@@ -570,8 +581,10 @@ class ConfidenceHead(hk.Module):
 
     out = {
         'predicted_lddt': predicted_lddt,
-        'full_pde': pred_distance_error,
-        'average_pde': average_pred_distance_error,
+        **({} if pred_distance_error is None else {
+            'full_pde': pred_distance_error,
+            'average_pde': average_pred_distance_error,
+        }),
         **pae_outputs,
     }
     if predicted_experimentally_resolved is not None:
