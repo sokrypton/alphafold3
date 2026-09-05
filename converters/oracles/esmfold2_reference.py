@@ -300,7 +300,10 @@ def trunk(f, lm_hidden, p, dims, n_loops=3, key=None, lm_dropout=0.25, msa=None)
             + rp + f['token_bonds'] @ p['token_bonds/weights'])
 
   pm = jnp.ones((L, L))
-  lm_z = lm_shim(lm_hidden, p)
+  # lm_hidden=None reproduces native's no-LM path exactly: `lm_z is None` means
+  # refined_lm_z is never computed and z_inject is z_init alone. Passing zeros
+  # instead would NOT be equivalent -- the shim's biases make lm_shim(0) nonzero.
+  lm_z = None if lm_hidden is None else lm_shim(lm_hidden, p)
 
   key = jax.random.PRNGKey(0) if key is None else key
   key, k_init = jax.random.split(key)

@@ -1016,6 +1016,11 @@ def map_esmfold2_to_af3_graph(sd, dims=None):
   # ── trunk pairformer and MSA stack ────────────────────────────────────────
   put(P, af3_pair_stack(sd, 'folding_trunk', dims['n_trunk'], c_z, pair_head,
                         '__layer_stack_no_per_layer_1/trunk_pairformer'))
+  # the post-trunk readout + coda: AF3 has no such stage, so nothing in the
+  # scope diff asked for these until the graph gained them
+  put(P, {'parcae_readout/weights': t(sd['parcae_readout.weight'])})
+  put(P, af3_pair_stack(sd, 'parcae_coda', dims['n_coda'], c_z, pair_head,
+                        '__layer_stack_no_per_layer_2/trunk_coda'))
   n_msa = dims['n_msa']
   msa = stack_blocks(
       lambda i: af3_msa_block(sd, 'msa_encoder.blocks.%d' % i, c_z, pair_head,

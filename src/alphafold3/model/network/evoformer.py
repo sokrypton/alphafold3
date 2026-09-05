@@ -227,6 +227,9 @@ class Evoformer(hk.Module):
         base_config.autocreate()
     )
     msa_stack: modules.EvoformerIteration.Config = base_config.autocreate()
+    # A post-trunk pair stage, run once after the recycle loop. AF3 has none
+    # (num_layer 0); ESMFold2's "parcae coda" is two blocks.
+    coda: modules.PairFormerIteration.Config = base_config.autocreate(num_layer=0)
 
   def __init__(
       self,
@@ -607,6 +610,7 @@ class Evoformer(hk.Module):
       # addition, so applying the relative encoding first and capturing before
       # the recycle add gives an identical activation and a clean z_init.
       chai = self.global_config.model == 'chai1'
+      pair_only = self.global_config.model in model_config.PAIR_ONLY_TRUNK
       pair_init = None
 
       # chai seeds its recycle carry with the INITIAL representations, not with
@@ -648,7 +652,17 @@ class Evoformer(hk.Module):
             hm.LayerNorm(name='prev_embedding_layer_norm')(z_prev)
         )
 
-      if chai:
+      if pair_only:
+        # ESMFold2's z_init ALREADY contains the relative encoding -- parcae
+        # injects `norm(z_init + ...)`, so the encoding has to be in `act` before
+        # the recycle reads it. AF3 adds it afterwards, which would leave the SSM
+        # injecting a z_init with no positional term at all. `pair_init` stays
+        # unset: that is chai's separate business (it seeds its recycle carry
+        # with the initial representation), and setting it here would add a
+        # fourth entry to the scan carry and break the loop.
+        pair_activations = self._relative_encoding(batch, pair_activations)
+        pair_activations = _add_prev(pair_activations, None)
+      elif chai:
         pair_activations = self._relative_encoding(batch, pair_activations)
         pair_init = pair_activations
         pair_activations = _add_prev(pair_activations, pair_init)
@@ -719,8 +733,6 @@ class Evoformer(hk.Module):
       # zeroing it would still carry the single through unchanged (it is a
       # residual) and would create parameters no checkpoint can fill, so the
       # track is not built.
-      pair_only = self.global_config.model in model_config.PAIR_ONLY_TRUNK
-
       def pairformer_fn(x):
         pairformer_iteration = modules.PairFormerIteration(
             self.config.pairformer,
@@ -750,6 +762,25 @@ class Evoformer(hk.Module):
       pair_activations, single_activations = pairformer_stack(
           (pair_activations, single_activations)
       )
+
+      if pair_only and self.config.coda.num_layer:
+        # ESMFold2 finishes the trunk with a readout projection and a short
+        # "coda" of pair blocks, AFTER the recycle loop. AF3 has no post-trunk
+        # pair stage at all, so nothing in the parameter tree asks for these --
+        # which is exactly why a scope diff cannot find them. It compares what
+        # the graph WANTS against what the converter supplies; a stage the graph
+        # never builds is invisible to it, and the model simply runs 50 blocks
+        # short. Found by folding (13.8 A) and reading the reference back.
+        pair_activations = hm.Linear(
+            self.config.pair_channel, name='parcae_readout')(pair_activations)
+
+        def coda_fn(z):
+          return modules.PairFormerIteration(
+              self.config.pairformer, self.global_config, with_single=False,
+              name='trunk_coda')(act=z, pair_mask=pair_mask, use_dropout=use_dropout)
+
+        pair_activations = _stack(self.config.coda.num_layer, coda_fn,
+                                  self.config.pairformer.block_remat)(pair_activations)
 
       assert pair_activations.shape == (
           num_residues,

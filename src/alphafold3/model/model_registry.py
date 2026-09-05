@@ -414,6 +414,7 @@ ESMFOLD2_SETTINGS = (
     # trunk: 48 PAIR-ONLY blocks at c_z 256 (AF3 is 128), no templates
     ('evoformer.pair_channel', 256),
     ('evoformer.pairformer.num_layer', 48),
+    ('evoformer.coda.num_layer', 2),
     ('evoformer.msa_stack.num_layer', 4),
     ('evoformer.msa_channel', 128),
     ('evoformer.template.template_stack.num_layer', 0),
