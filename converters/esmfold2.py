@@ -637,7 +637,49 @@ def map_esmfold2_graph(sd, dims=None):
   for k, v in ae.items():
     key = k.replace('blocks/', '__layer_stack_no_per_layer/blocks/', 1)
     flat['inputs_embedder/%s' % key] = v
+  for k, v in msa_encoder(sd, dims).items():
+    key = k.replace('blocks/', '__layer_stack_no_per_layer/blocks/', 1) \
+        if k.startswith('blocks/') else k
+    flat['msa_encoder/%s' % key] = v
+
+  for k, v in map_diffusion(sd, dims).items():
+    flat['diffusion/%s' % _graph_diffusion_key(k)] = v
+  for k, v in confidence_head(sd, dims).items():
+    if k.startswith('unused_'):
+      # The three dead parameters (s_inputs_to_single, s_input_to_s, s_norm) are
+      # built by native's __init__ and never read by its forward, so the graph
+      # does not create them either. Carried in map_esmfold2_to_af3 to keep
+      # checkpoint coverage honest at 100%; dropped here because a parameter the
+      # graph never asks for would show up as an EXTRA in the audit.
+      continue
+    if k.startswith('folding_trunk/'):
+      k = ('folding_trunk/__layer_stack_no_per_layer/%s/confidence/folding_trunk/block/%s'
+           % (TOP, k[len('folding_trunk/'):]))
+    k = k.replace('dist_bin_embed/weights', 'dist_bin_embed')
+    flat['confidence/%s' % k] = v
 
   params = {}
   common.populate(params, TOP, flat)
   return params
+
+
+def _graph_diffusion_key(k):
+  """Re-key a map_diffusion leaf onto the haiku scopes DiffusionModule creates.
+
+  Three stack shapes appear, and they differ because of WHY each stack exists:
+    conditioning/{z,s}_transitions -> .../__layer_stack_no_per_layer/block/...
+    token_attn | token_transition  -> __layer_stack_no_per_layer/<name>/...
+    atom_{encoder,decoder}/blocks  -> .../__layer_stack_no_per_layer/blocks/...
+  The token transformer is ONE layer_stack carrying both submodules, which is
+  why its prefix sits above the names rather than below.
+  """
+  for stack in ('conditioning/z_transitions/', 'conditioning/s_transitions/'):
+    if k.startswith(stack):
+      return stack + '__layer_stack_no_per_layer/block/' + k[len(stack):]
+  for name in ('token_attn/', 'token_transition/'):
+    if k.startswith(name):
+      return '__layer_stack_no_per_layer/' + k
+  for parent in ('atom_encoder/', 'atom_decoder/'):
+    if k.startswith(parent + 'blocks/'):
+      return parent + '__layer_stack_no_per_layer/blocks/' + k[len(parent) + 7:]
+  return k

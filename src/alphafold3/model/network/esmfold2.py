@@ -447,8 +447,8 @@ class DiffusionConditioning(hk.Module):
     c = self.cfg
     z = jnp.concatenate([z_trunk, rel_pos], -1)
     z = hm.Linear(c['c_z'], name='z_projection')(hm.LayerNorm(name='z_input_norm')(z))
-    for i in range(c['n_z_transitions']):
-      z = z + _block_transition(z, c['c_z'], 'z_transitions', i)
+    z = ConditioningTransitionStack(c['c_z'], c['n_z_transitions'],
+                                    name='z_transitions')(z)
     s = hm.Linear(c['c_token'], name='s_projection')(
         hm.LayerNorm(name='s_input_norm')(s_inputs))
     t_noise = 0.25 * jnp.log(jnp.maximum(t_hat / SIGMA_DATA, 1e-20))
@@ -458,23 +458,31 @@ class DiffusionConditioning(hk.Module):
     n = hm.Linear(c['c_token'], name='noise_projection')(
         hm.LayerNorm(name='noise_norm')(n))
     s = s + n[None]
-    for i in range(c['n_s_transitions']):
-      s = s + _block_transition(s, c['c_token'], 's_transitions', i)
+    s = ConditioningTransitionStack(c['c_token'], c['n_s_transitions'],
+                                    name='s_transitions')(s)
     return s, z
 
 
-def _block_transition(x, c, stack_name, i):
-  """A stacked, unconditioned SwiGLU transition with SEPARATE a/b projections.
+class ConditioningTransitionStack(hk.Module):
+  """Stacked, unconditioned SwiGLU transitions, residual, expansion 2.
 
-  The diffusion conditioning transitions use a_proj/b_proj rather than the
-  trunk's fused ffn.w12, which is why the converter carries a second dialect.
+  The diffusion conditioning transitions use SEPARATE a_proj/b_proj halves
+  rather than the trunk's fused ffn.w12 -- the reason the converter carries a
+  second dialect -- but once concatenated they read the same here.
   """
-  scope = '%s_%d' % (stack_name, i)
-  h = hm.LayerNorm(name='%s/input_layer_norm' % scope)(x)
-  h = hm.Linear(2 * 2 * c, name='%s/transition1' % scope)(h)
-  n = h.shape[-1] // 2
-  return hm.Linear(c, name='%s/transition2' % scope)(
-      jax.nn.silu(h[..., :n]) * h[..., n:])
+
+  def __init__(self, num_channels, num_layer, *, name):
+    super().__init__(name=name)
+    self.c, self.n = num_channels, num_layer
+
+  def __call__(self, x):
+    if not self.n:
+      return x
+    # constructed INSIDE the lambda: this stack is not reused across recycles,
+    # so there is nothing to share and the path stays undoubled
+    def block(y):
+      return y + PairTransition(self.c, expansion=2, name='block')(y)
+    return hk.experimental.layer_stack(self.n)(block)(x)
 
 
 class ConfidenceHead(hk.Module):
@@ -528,6 +536,24 @@ class ConfidenceHead(hk.Module):
     return out
 
 
+class AtomDecoder(hk.Module):
+  """Reuses the encoder's q, c AND rope/attention params as skips.
+
+  The 3D rotary is therefore built once per diffusion step, not twice.
+  """
+
+  def __init__(self, c_atom, num_blocks, num_heads, half_window, *, name='atom_decoder'):
+    super().__init__(name=name)
+    self.c_atom, self.num_blocks = c_atom, num_blocks
+    self.num_heads, self.half_window = num_heads, half_window
+
+  def __call__(self, a, q, c0, cos, sin, mask, a2t):
+    q = q + hm.Linear(self.c_atom, name='token_to_atom')(a)[a2t]
+    q = atom_stack(q, c0, cos, sin, mask, self.c_atom, self.num_heads,
+                   self.half_window, self.num_blocks, 'blocks')
+    return hm.Linear(3, name='output')(hm.LayerNorm(name='norm')(q))
+
+
 class DiffusionModule(hk.Module):
   """One EDM denoise step. Reports r_update so the mix cannot flatter it."""
 
@@ -545,15 +571,16 @@ class DiffusionModule(hk.Module):
     a, q, c0, (cos, sin) = enc(f, mask, a2t, num_tokens, r_noisy=r_noisy)
     a = a + hm.Linear(c['c_token'], name='s_to_token')(
         hm.LayerNorm(name='s_step_norm')(s))
-    for i in range(c['n_token_blocks']):
-      a = a + DiffusionAttention(c['token_heads'], name='token_attn_%d' % i)(a, s, z)
-      a = a + DiffusionTransition(name='token_transition_%d' % i)(a, s)
+    # ONE layer_stack, not 12 named modules: the converter stacks these with a
+    # leading block axis, and a python loop would make 12 independent copies
+    # (309 parameters against the converter's 67).
+    def token_block(x):
+      x = x + DiffusionAttention(c['token_heads'], name='token_attn')(x, s, z)
+      return x + DiffusionTransition(name='token_transition')(x, s)
+    a = hk.experimental.layer_stack(c['n_token_blocks'])(token_block)(a)
     a = hm.LayerNorm(name='token_norm')(a)
-    qd = q + hm.Linear(c['c_atom'], name='atom_decoder/token_to_atom')(a)[a2t]
-    qd = atom_stack(qd, c0, cos, sin, mask, c['c_atom'], c['atom_heads'],
-                    c['half_window'], c['n_atom_blocks'], 'atom_decoder/blocks')
-    r_update = hm.Linear(3, name='atom_decoder/output')(
-        hm.LayerNorm(name='atom_decoder/norm')(qd))
+    r_update = AtomDecoder(c['c_atom'], c['n_atom_blocks'], c['atom_heads'],
+                           c['half_window'])(a, q, c0, cos, sin, mask, a2t)
     s2, t2 = SIGMA_DATA ** 2, t_hat ** 2
     return (s2 / (s2 + t2)) * x_noisy + (SIGMA_DATA * t_hat / jnp.sqrt(s2 + t2)) * r_update
 
