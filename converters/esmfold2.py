@@ -509,3 +509,40 @@ def map_esmfold2_to_af3(sd, **overrides):
   p.update(nest('diffusion', map_diffusion(sd, dims)))
   p.update(nest('confidence', confidence_head(sd, dims)))
   return p
+
+
+# ---------------------------------------------------------------------------
+# entry point
+# ---------------------------------------------------------------------------
+
+def load_esmfold2_checkpoint(checkpoint):
+  """Accept a .safetensors file, a HF snapshot dir, or an .npz of the state dict."""
+  import glob
+  import os
+  path = os.path.expanduser(str(checkpoint))
+  if os.path.isdir(path):
+    hits = sorted(glob.glob(os.path.join(path, '*.safetensors')))
+    if not hits:
+      raise FileNotFoundError('no .safetensors under %s' % path)
+    path = hits[0]
+  if path.endswith('.npz'):
+    return {k: v for k, v in np.load(path).items()}
+  from safetensors import safe_open
+  with safe_open(path, 'numpy') as f:
+    return {k: f.get_tensor(k) for k in f.keys() if not k.endswith('_extra_state')}
+
+
+def convert_esmfold2_weights(checkpoint, output_dir):
+  """Convert biohub/ESMFold2 to a loadable AF3-haiku blob dir.
+
+  This covers the 234.8M FOLDING model only.  ESMFold2 additionally requires
+  ESM-C 6B (6.35B params, 25.4 GB fp32) whose hidden states feed the
+  LanguageModelShim; that tower is a separate artifact and is not written here.
+  """
+  from pathlib import Path
+  sd = load_esmfold2_checkpoint(checkpoint)
+  flat = map_esmfold2_to_af3(sd)
+  params = {}
+  common.populate(params, 'esmfold2', flat)
+  return Path(common.write_params_blob(output_dir, 'esmfold2.bin.zst',
+                                       params, add_meta=True))
