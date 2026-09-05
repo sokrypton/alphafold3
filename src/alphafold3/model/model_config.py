@@ -134,6 +134,19 @@ PER_BLOCK_PAIR_LAYER_NORM = (
 KEY_MASKED_ATOM_ATTENTION = ('rosettafold3', 'opendde') + PROTENIX_FAMILY
 
 
+# Models whose MSA stack does NOT update the MSA representation at all: their
+# msa_module block is OuterProductMean + a pair stack, and there is no MSA row
+# attention and no MSA transition anywhere in the checkpoint.
+#
+# Protenix's mini and tiny distillations drop the whole `msa_stack` submodule
+# that protenix2 carries (`msa_pair_weighted_averaging` + `transition_m`).
+# Building it anyway is not free: `_msa_update` creates 12 parameters per block
+# that no checkpoint can fill, so the conversion reports them missing and the
+# graph REFUSES TO APPLY -- which is how protenix_tiny came to ship a blob that
+# could not be loaded against a batch carrying templates.
+NO_MSA_ROW_UPDATE = ('protenix_mini', 'protenix_tiny')
+
+
 # Models whose diffusion conditioning concatenates a PROJECTED relative-position
 # encoding with the trunk pair, rather than AF3's raw 139-channel features.
 # Widths: AF3 folds [z_trunk(c_z), rel_features(139)] -> c_z, these fold

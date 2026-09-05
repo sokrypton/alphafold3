@@ -858,7 +858,12 @@ class EvoformerIteration(hk.Module):
     # gate on opendde so AF3/OF3/IF2 keep their original ordering byte-for-byte.
     # Boltz-2's MSALayer uses the same update-then-OPM order (boltz2_msa_order gate,
     # separate from opendde so it does NOT pull in the structural-token stage).
-    if self.global_config.model in ('opendde', 'boltz2'):
+    # protenix mini/tiny have no msa_stack at all -- OPM into the pair, and that
+    # is the entire MSA contribution. Building _msa_update for them creates 12
+    # parameters per block that the checkpoint cannot fill.
+    if self.global_config.model in model_config.NO_MSA_ROW_UPDATE:
+      pair_act += _opm()
+    elif self.global_config.model in ('opendde', 'boltz2'):
       msa_act = _msa_update(msa_act)
       pair_act += _opm()
     else:

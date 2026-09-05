@@ -515,8 +515,12 @@ class Boltz2TemplateEmbedding(hk.Module):
         return modules.PairFormerIteration(
             c.template_stack, gc, name='tmpl_pairformer')(
                 act=x, pair_mask=pair_mask, use_dropout=use_dropout)
-      pf = hk.experimental.layer_stack(c.template_stack.num_layer)(block)(v)
-      v = v + pf
+      # num_layer == 0 is a real configuration (protenix's v0.5.0 lineage keeps the
+      # fused embedder but drops the pairformer). hk.layer_stack(0) still TRACES the
+      # block, so it creates every parameter with a leading axis of 0 -- which the
+      # converter then has to invent. Skipping the stack keeps the tree honest.
+      if c.template_stack.num_layer:
+        v = v + hk.experimental.layer_stack(c.template_stack.num_layer)(block)(v)
       return hm.LayerNorm(name='v_norm', use_fast_variance=False)(v)   # (N,N,64)
 
     v_all = hk.vmap(per_template, in_axes=0, out_axes=0,
@@ -701,7 +705,9 @@ class RoseTTAFold3TemplateEmbedding(Boltz2TemplateEmbedding):
 
     # PairFormerIteration returns the UPDATED act (its residuals are internal), so this is
     # RF3's `for block in self.pairformer: _, v_II = block(None, v_II)` -- no `v + stack(v)`.
-    v = hk.experimental.layer_stack(c.template_stack.num_layer)(block)(v)
+    # see the note above: layer_stack(0) still creates 0-leading-axis parameters
+    if c.template_stack.num_layer:
+      v = hk.experimental.layer_stack(c.template_stack.num_layer)(block)(v)
     u = hm.LayerNorm(name='v_norm', use_fast_variance=False)(v)
     out = hm.Linear(z.shape[-1], use_bias=False, name='u_proj')(jax.nn.relu(u))
     return out.astype(dtype)

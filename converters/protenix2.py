@@ -309,10 +309,11 @@ def map_template_embedder(sd, params, n_blocks=2, templ_H=2, templ_D=32):
   _set(params, f'{TE}/z_proj', 'weights', _t(_get(sd, f'{te}.linear_no_bias_z.weight')))
   _set(params, f'{TE}/a_proj', 'weights', _t(_get(sd, f'{te}.linear_no_bias_a.weight')))
   _set(params, f'{TE}/u_proj', 'weights', _t(_get(sd, f'{te}.linear_no_bias_u.weight')))
-  stacked = _stack_blocks(lambda i: {f'tmpl_pairformer/{k}': v for k, v in
-                                     C.pair_block(sd, f'{te}.pairformer_stack.blocks.{i}',
-                                                  D, templ_H, templ_D).items()}, n_blocks)
-  _populate_scope(params, f'{TE}/__layer_stack_no_per_layer', stacked)
+  if n_blocks:
+    stacked = _stack_blocks(lambda i: {f'tmpl_pairformer/{k}': v for k, v in
+                                       C.pair_block(sd, f'{te}.pairformer_stack.blocks.{i}',
+                                                    D, templ_H, templ_D).items()}, n_blocks)
+    _populate_scope(params, f'{TE}/__layer_stack_no_per_layer', stacked)
 
 
 # ─── top-level map ───────────────────────────────────────────────────────────
@@ -367,6 +368,10 @@ def derive_dims(sd):
   if _has(sd, f'{tb}.tri_att_start.linear.weight'):
     dims['templ_H'] = int(_get(sd, f'{tb}.tri_att_start.linear.weight').shape[0])
     dims['templ_hidden'] = int(_get(sd, f'{tb}.tri_mul_out.linear_a_p.weight').shape[0])
+  else:
+    # No template pairformer (the v0.5.0 lineage). The fused embedder is still
+    # present and still has to be converted, so these stay defined but unused.
+    dims['templ_H'] = dims['templ_hidden'] = 0
   return dims
 
 
@@ -389,10 +394,13 @@ def map_protenix2_to_af3(sd, **overrides):
   map_pairformer_stack(sd, params, n_blocks=d['n_pairformer'], pair_H=d['pair_H'])
   map_confidence_head(sd, params, n_layers=d['n_confidence'], pair_H=d['pair_H'])
   map_distogram_head(sd, params)
-  if d['n_template']:
-    # v0.5.0-lineage checkpoints (mini, tiny) are TEMPLATELESS and carry no
-    # template_embedder tensors at all; asking for them raises rather than
-    # silently emitting zeros.
+  if 'template_embedder.layernorm_z.weight' in sd:
+    # CORRECTION: the v0.5.0 lineage (mini, tiny, protenix05) is NOT templateless.
+    # It carries the seven FUSED embedder tensors (layernorm_v/z, linear_no_bias_
+    # a/u/z) and drops only the pairformer_stack. Gating the whole embedder on
+    # n_template shipped three blobs with no template scopes at all, and
+    # protenix_tiny then failed to apply on any batch carrying templates:
+    #   Unable to retrieve parameter 'scale' for module .../template_embedding/z_norm
     map_template_embedder(sd, params, n_blocks=d['n_template'],
                           templ_H=d['templ_H'])
   map_evoformer_conditioning(sd, params, n_atom=d['n_input_atom_enc'])

@@ -50,7 +50,19 @@ def audit(root, do_apply=False):
 
 
 def _applies(model_name, model_dir):
-  """True / False / 'skipped' -- can the shipped params be applied to the graph?"""
+  """True / 'FAILS: ...' -- does the blob supply exactly what the graph asks for?
+
+  Deliberately NOT a full hk.transform(...).apply: a direct apply on a real batch
+  raises a TracerArrayConversionError for EVERY model here (the batch carries
+  non-array fields that AF3Runner.predict handles and a bare apply does not), so
+  that check reports a property of the harness rather than of the blob. Comparing
+  the init-traced parameter tree against the blob is the honest question, and it
+  is what caught protenix_tiny's absent template_embedding/z_norm.
+  """
+  # tokamax parses sys.argv lazily via absl on first import, and aborts on any
+  # flag it does not know ("Unknown command line flag 'dir'"). Same guard as
+  # convert.py: hide our argv from it.
+  saved, sys.argv = sys.argv, sys.argv[:1]
   try:
     import haiku as hk
     import jax
@@ -62,11 +74,18 @@ def _applies(model_name, model_dir):
     model_registry.get(model_name).configure(cfg)
     batch = shapes.canonical_batch(model_name, model_dir=model_dir)
     p = afp.get_model_haiku_params(model_dir=model_dir)
-    hk.transform(lambda b: af3_model.Model(cfg)(b)).apply(
-        p, jax.random.PRNGKey(0), utils.remove_invalidly_typed_feats(batch))
-    return True
+    want = jax.eval_shape(hk.transform(lambda b: af3_model.Model(cfg)(b)).init,
+                          jax.random.PRNGKey(0),
+                          utils.remove_invalidly_typed_feats(batch))
+    w = {'%s/%s' % (s_, n) for s_, l in want.items() for n in l}
+    h = {'%s/%s' % (s_, n) for s_, l in p.items() for n in l if s_ != '__meta__'}
+    if w - h:
+      return 'FAILS: %d wanted but absent, e.g. %s' % (len(w - h), sorted(w - h)[0][-70:])
+    return True if not (h - w) else 'extra: %d in blob the graph never asks for' % len(h - w)
   except Exception as e:                      # noqa: BLE001 - report, don't raise
     return 'FAILS: %s' % str(e)[:90]
+  finally:
+    sys.argv = saved
 
 
 def main(argv=None):
