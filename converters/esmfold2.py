@@ -639,6 +639,31 @@ def zero_pair_attention(block, c_z, num_head, qkv_dim=None):
 AF3_TRUNK = 'diffuser/evoformer'
 
 
+def zero_single_track(block, c_z, c_s, num_head=16, qkv_dim=None):
+  """The single-track leaves an AF3 pairformer has and a pair-only model lacks."""
+  qkv_dim = qkv_dim or c_s // num_head
+  out = dict(block)
+  z = lambda *shape: np.zeros(shape, np.float32)
+  out.update({
+      'single_attention_layer_norm/scale': z(c_s),
+      'single_attention_layer_norm/offset': z(c_s),
+      'single_attention_q_projection/weights': z(c_s, num_head, qkv_dim),
+      'single_attention_q_projection/bias': z(num_head, qkv_dim),
+      'single_attention_k_projection/weights': z(c_s, num_head, qkv_dim),
+      'single_attention_v_projection/weights': z(c_s, num_head, qkv_dim),
+      'single_attention_gating_query/weights': z(c_s, c_s),
+      'single_attention_transition2/weights': z(c_s, c_s),
+      'single_pair_logits_norm/scale': z(c_z),
+      'single_pair_logits_norm/offset': z(c_z),
+      'single_pair_logits_projection/weights': z(c_z, num_head),
+      'single_transition/input_layer_norm/scale': z(c_s),
+      'single_transition/input_layer_norm/offset': z(c_s),
+      'single_transition/transition1/weights': z(c_s, 8 * c_s),
+      'single_transition/transition2/weights': z(4 * c_s, c_s),
+  })
+  return out
+
+
 def af3_pair_stack(sd, prefix, n_blocks, c_z, num_head, scope):
   """One ESMFold2 pair-only stack as an AF3 pairformer stack, attention zeroed."""
   stacked = stack_blocks(
@@ -839,20 +864,29 @@ def af3_diffusion_conditioning(sd, prefix):
       'pair_cond_initial_norm/scale': _arr(g('z_input_norm.weight')),
       'pair_cond_initial_norm/offset': _arr(g('z_input_norm.bias')),
       'pair_cond_initial_projection/weights': t(g('z_proj.weight')),
-      'single_cond_initial_norm/scale': _arr(g('s_input_norm.weight')),
-      'single_cond_initial_norm/offset': _arr(g('s_input_norm.bias')),
-      'single_cond_initial_projection/weights': t(g('s_proj.weight')),
+      # s_inputs enters the diffusion head with the SAME 451 -> 447 remap the
+      # trunk applies; the LayerNorm sits on those columns too, so it is remapped
+      # as a vector rather than copied.
+      'single_cond_initial_norm/scale': _remap_vec(_arr(g('s_input_norm.weight'))),
+      'single_cond_initial_norm/offset': _remap_vec(_arr(g('s_input_norm.bias'))),
+      'single_cond_initial_projection/weights': remap_s_inputs(t(g('s_proj.weight'))),
       'fourier_embedding_weight': _arr(g('fourier.w')),
       'fourier_embedding_bias': _arr(g('fourier.b')),
       'noise_embedding_initial_norm/scale': _arr(g('noise_norm.weight')),
       'noise_embedding_initial_norm/offset': _arr(g('noise_norm.bias')),
       'noise_embedding_initial_projection/weights': t(g('noise_proj.weight')),
   }
+  # AF3's transition_block concatenates its own name onto the leaf with NO
+  # separator: `pair_transition_0ffw_layer_norm/scale`, not
+  # `pair_transition_0/ffw_layer_norm/scale`. Same for the ffw_transitions.
   for i in range(2):
-    out.update(nest('pair_transition_%d' % i,
-                    common.transition(sd, '%s.z_transitions.%d' % (prefix, i), d)))
-    out.update(nest('single_transition_%d' % i,
-                    common.transition(sd, '%s.s_transitions.%d' % (prefix, i), d)))
+    for tag, src in (('pair_transition_%d' % i, 'z_transitions.%d' % i),
+                     ('single_transition_%d' % i, 's_transitions.%d' % i)):
+      tr = common.transition(sd, '%s.%s' % (prefix, src), d)
+      out['%sffw_layer_norm/scale' % tag] = tr['input_layer_norm/scale']
+      out['%sffw_layer_norm/offset' % tag] = tr['input_layer_norm/offset']
+      out['%sffw_transition1/weights' % tag] = tr['transition1/weights']
+      out['%sffw_transition2/weights' % tag] = tr['transition2/weights']
   return out
 
 
@@ -872,6 +906,11 @@ def _remap_restype_block(w, n_af3):
   6MRR, whose res_type values run 3..21, i.e. inside the shifted protein range.
   """
   return w[ESM_RESTYPE_OFFSET:ESM_RESTYPE_OFFSET + n_af3]
+
+
+def _remap_vec(v):
+  """The s_inputs remap for a 1-D tensor (a LayerNorm scale or offset)."""
+  return remap_s_inputs(v[:, None])[:, 0]
 
 
 def remap_s_inputs(w, c_atom=384, n_esm=33, n_af3=31):
@@ -900,3 +939,288 @@ def remap_msa_feat(w, n_esm=33, gap_index=21):
   head, tail = block[:gap_index], block[gap_index:]
   gap = np.zeros((1,) + w.shape[1:], w.dtype)
   return np.concatenate([head, gap, tail, w[n_esm:]], axis=0)
+
+
+def af3_atom_block(sd, prefix, c_atom, num_head):
+  """One SWAAtomBlock as one AF3 atom-transformer block.
+
+  ESMFold2 fuses the whole modulation into a single Linear to 6*c:
+      shift_a, scale_a, gate_a, shift_f, scale_f, gate_f
+  AF3 keeps six separate projections, so the fused weight is split six ways.
+  Note the ORDER -- shift before scale -- and that gate_a/gate_f are the
+  adaptive_zero_cond output gates, not part of the adaLN.
+  """
+  g = lambda leaf: sd['%s.%s' % (prefix, leaf)]
+  mod = t(g('adaln_modulation.1.weight'))                 # (c, 6c)
+  sh_a, sc_a, g_a, sh_f, sc_f, g_f = np.split(mod, 6, axis=1)
+  d_head = c_atom // num_head
+  return {
+      # cross_attention adaLNs the queries and the keys SEPARATELY, each with its
+      # own projections; ESMFold2 has one adaln_modulation read by both, so the
+      # same weights fill the q and k slots.
+      'qsingle_cond_bias/weights': sh_a,
+      'qsingle_cond_scale/weights': sc_a,
+      'ksingle_cond_bias/weights': sh_a,
+      'ksingle_cond_scale/weights': sc_a,
+      'adaptive_zero_cond/weights': g_a,
+      'adaptive_zero_cond/bias': np.zeros((c_atom,), np.float32),
+      'ffw_single_cond_bias/weights': sh_f,
+      'ffw_single_cond_scale/weights': sc_f,
+      'ffw_adaptive_zero_cond/weights': g_f,
+      'ffw_adaptive_zero_cond/bias': np.zeros((c_atom,), np.float32),
+      'q_projection/weights': t(g('attn.Wqkv.weight'))[:, :c_atom].reshape(
+          c_atom, num_head, d_head),
+      'q_projection/bias': np.zeros((num_head, d_head), np.float32),
+      'k_projection/weights': t(g('attn.Wqkv.weight'))[:, c_atom:2 * c_atom].reshape(
+          c_atom, num_head, d_head),
+      'v_projection/weights': t(g('attn.Wqkv.weight'))[:, 2 * c_atom:].reshape(
+          c_atom, num_head, d_head),
+      'gating_query/weights': t(g('attn.gate_proj.weight')),
+      'transition2/weights': t(g('attn.out_proj.weight')),
+      'ffw_transition1/weights': t(g('ffn.w_up.weight')),
+      'ffw_transition2/weights': t(g('ffn.w_down.weight')),
+  }
+
+
+def map_esmfold2_to_af3_graph(sd, dims=None):
+  """ESMFold2 -> the shared AF3 graph's own scopes. The whole port, in one map."""
+  dims = dims or derive_dims(sd)
+  c_z, c_m = dims['c_z'], dims['c_msa']
+  pair_head = c_z // 64                      # AF3 tri-attention heads
+  P = 'diffuser/evoformer'
+  D = 'diffuser/~/diffusion_head'
+  CH = 'diffuser/confidence_head'
+  flat = {}
+
+  def put(scope, local):
+    for k, v in local.items():
+      flat['%s/%s' % (scope, k) if scope else k] = v
+
+  # ── trunk inputs, recycling, distogram ────────────────────────────────────
+  a_vec, b_T = parcae_dynamics(sd)
+  put(P, {
+      'left_single/weights': remap_s_inputs(t(sd['z_init_1.weight'])),
+      'right_single/weights': remap_s_inputs(t(sd['z_init_2.weight'])),
+      'bond_embedding/weights': t(sd['token_bonds.weight']),
+      'prev_embedding/weights': b_T,
+      'prev_embedding_layer_norm/scale': _arr(sd['parcae_input_norm.weight']),
+      'prev_embedding_layer_norm/offset': _arr(sd['parcae_input_norm.bias']),
+      'recycle_decay': a_vec,
+      '~_relative_encoding/position_activations/weights': t(sd['rel_pos.embed.weight']),
+      'msa_activations/weights': remap_msa_feat(t(sd['msa_encoder.embed.weight'])),
+      'extra_msa_target_feat/weights': remap_s_inputs(
+          t(sd['msa_encoder.project_inputs.weight'])),
+  })
+  flat['diffuser/distogram_head/half_logits/weights'] = t(sd['distogram_head.weight'])
+
+  # ── trunk pairformer and MSA stack ────────────────────────────────────────
+  put(P, af3_pair_stack(sd, 'folding_trunk', dims['n_trunk'], c_z, pair_head,
+                        '__layer_stack_no_per_layer_1/trunk_pairformer'))
+  n_msa = dims['n_msa']
+  msa = stack_blocks(
+      lambda i: af3_msa_block(sd, 'msa_encoder.blocks.%d' % i, c_z, pair_head,
+                              i == n_msa - 1, c_m), n_msa)
+  put(P, nest('__layer_stack_no_per_layer/msa_stack', msa))
+
+  # ── diffusion ─────────────────────────────────────────────────────────────
+  put(D, af3_diffusion_conditioning(sd, 'structure_head.diffusion_module.conditioning'))
+  n_tok = 12
+  stk, pl = af3_diffusion_transformer(
+      sd, 'structure_head.diffusion_module.token_transformer', n_tok, 3,
+      dims['c_diff'], 16, c_z)
+  # AF3 concatenates the stack's module name onto the leaf with NO separator:
+  # `...diffusion_transformeradaptive_zero_cond/bias`, not `.../adaptive_zero_cond`.
+  # The token stack is named `transformer`, and AF3 concatenates that name onto
+  # each leaf with no separator.
+  pre = ('%s/transformer/__layer_stack_with_per_layer/'
+         '__layer_stack_with_per_layer/transformer' % D)
+  for k, v in stk.items():
+    flat[pre + k] = v
+  flat['%s/transformer/__layer_stack_with_per_layer/pair_logits_projection/weights' % D] = pl
+  # DIFFUSION_PROJECTED_RELPOS: ESMFold2 concatenates [z_trunk, PROJECTED relpos],
+  # and the projection is the trunk's own rel_pos embedding reused.
+  flat['%s/relpe_projection/weights' % D] = t(sd['rel_pos.embed.weight'])
+
+  # ── the single track ESMFold2 does not have ──────────────────────────────
+  # PAIR_ONLY_TRUNK removes the pairformer's single update, but AF3 still builds
+  # the top-level single embedding and its recycle. Nothing reads them for this
+  # model (the diffusion conditions on s_inputs alone), so they are zeros rather
+  # than an invented mapping.
+  c_s = 384
+  put(P, {
+      'single_activations/weights': np.zeros((447, c_s), np.float32),
+      'prev_single_embedding/weights': np.zeros((c_s, c_s), np.float32),
+      'prev_single_embedding_layer_norm/scale': np.ones((c_s,), np.float32),
+      'prev_single_embedding_layer_norm/offset': np.zeros((c_s,), np.float32),
+  })
+
+  # ── atom encoders: the inputs embedder and the diffusion one ─────────────
+  for prefix, name, root, c_out, n_at in (
+      ('inputs_embedder.atom_attention_encoder', 'evoformer_conditioning',
+       'diffuser', dims['c_diff'] // 2, dims.get('n_input_atom', 3)),
+      ('structure_head.diffusion_module.atom_encoder', 'diffusion',
+       D, dims['c_diff'], dims['n_diff_atom'])):
+    o, stk = af3_atom_encoder(sd, prefix, name, dims['c_atom'], 4, n_at, c_out)
+    put(root, o)
+    pre_at = '%s/%s_atom_transformer_encoder' % (root, name)
+    for k, v in stk.items():
+      flat['%s/__layer_stack_with_per_layer/%s_atom_transformer_encoder%s' % (
+          pre_at, name, k)] = v
+    flat['%s/pair_input_layer_norm/scale' % pre_at] = np.ones((16,), np.float32)
+    flat['%s/pair_logits_projection/weights' % pre_at] = np.zeros((16, n_at, 4), np.float32)
+
+  # ── the diffusion atom decoder and the coordinate heads ─────────────────
+  AD = 'structure_head.diffusion_module.atom_decoder'
+  dec = [af3_atom_block(sd, '%s.atom_transformer.blocks.%d' % (AD, i),
+                        dims['c_atom'], 4) for i in range(dims['n_diff_atom'])]
+  pre_dec = '%s/diffusion_atom_transformer_decoder' % D
+  for k in dec[0]:
+    flat['%s/__layer_stack_with_per_layer/diffusion_atom_transformer_decoder%s' % (
+        pre_dec, k)] = np.stack([b[k] for b in dec], 0)
+  flat['%s/pair_input_layer_norm/scale' % pre_dec] = np.ones((16,), np.float32)
+  flat['%s/pair_logits_projection/weights' % pre_dec] = np.zeros(
+      (16, dims['n_diff_atom'], 4), np.float32)
+  put(D, {
+      # coords_linear takes [r_l | pred_r1]; pred_r1 is zeros on the inference
+      # path, so only the first three columns can contribute.
+      'diffusion_atom_positions_to_features/weights':
+          t(sd['structure_head.diffusion_module.atom_encoder.coords_linear.weight'])[:3],
+      'diffusion_atom_features_to_position_update/weights': t(sd[AD + '.output_linear.weight']),
+      'diffusion_atom_features_layer_norm/scale': _arr(sd[AD + '.norm.weight']),
+      'diffusion_project_token_features_for_broadcast/weights':
+          t(sd[AD + '.token_to_atom_linear.weight']),
+      # no trunk single or atom-pair conditioning in this model
+      'diffusion_embed_trunk_single_cond/weights': np.zeros((c_s, dims['c_atom']), np.float32),
+      'diffusion_lnorm_trunk_single_cond/scale': np.ones((c_s,), np.float32),
+      'diffusion_embed_trunk_pair_cond/weights': np.zeros((c_z, 16), np.float32),
+      'diffusion_lnorm_trunk_pair_cond/scale': np.ones((c_z,), np.float32),
+      'output_norm/scale': np.ones((dims['c_diff'],), np.float32),
+      # AF3 re-embeds the conditioned single before the token stack; ESMFold2
+      # feeds s straight in, so this is the identity: a unit LayerNorm scale and
+      # an identity projection leave s unchanged.
+      'single_cond_embedding_norm/scale': np.ones((dims['c_diff'],), np.float32),
+      'single_cond_embedding_projection/weights': np.eye(dims['c_diff'], dtype=np.float32),
+  })
+  # the token stack's SHARED pair LayerNorm is identity: ESMFold2's per-block
+  # pair LN scales are folded into pair_logits_projection instead (its offsets
+  # cancel in the softmax), so nothing is left for the shared one to do.
+  flat['%s/transformer/pair_input_layer_norm/scale' % D] = np.ones((c_z,), np.float32)
+
+  # ── confidence head ──────────────────────────────────────────────────────
+  ch = 'confidence_head'
+  n_at_tok = 24                     # AF3 slot count; ESMFold2 trains 23
+  def pad_atoms(w):
+    return np.concatenate([w, np.zeros((1,) + w.shape[1:], w.dtype)], 0)
+  RE = CH + '/~_boltz2_reembed'
+  put(RE, {
+      's_inputs_norm/scale': _remap_vec(_arr(sd['%s.s_inputs_norm.weight' % ch])),
+      's_inputs_norm/offset': _remap_vec(_arr(sd['%s.s_inputs_norm.bias' % ch])),
+      's_norm/scale': _arr(sd['%s.s_norm.weight' % ch]),
+      's_norm/offset': _arr(sd['%s.s_norm.bias' % ch]),
+      's_input_to_s/weights': remap_s_inputs(t(sd['%s.s_input_to_s.weight' % ch])),
+      'z_norm/scale': _arr(sd['%s.z_norm.weight' % ch]),
+      'z_norm/offset': _arr(sd['%s.z_norm.bias' % ch]),
+      's_to_z_prod_in1/weights': remap_s_inputs(t(sd['%s.s_to_z_prod_in1.weight' % ch])),
+      's_to_z_prod_in2/weights': remap_s_inputs(t(sd['%s.s_to_z_prod_in2.weight' % ch])),
+      's_to_z_prod_out/weights': t(sd['%s.s_to_z_prod_out.weight' % ch]),
+      'left_target_feat_project/weights': remap_s_inputs(t(sd['%s.s_to_z.weight' % ch])),
+      'right_target_feat_project/weights':
+          remap_s_inputs(t(sd['%s.s_to_z_transpose.weight' % ch])),
+      'rel_pos_project/weights': t(sd['rel_pos.embed.weight']),
+      'token_bonds_project/weights': t(sd['token_bonds.weight'])[:1],
+      # ESMFold2's distance-bin EMBEDDING is a Linear on the one-hot, so it maps
+      # straight across -- but AF3 allots 64 bins where ESMFold2 trains 39, so the
+      # tail is zero: a bin the model never learned contributes nothing.
+      'distogram_feat_project/weights': np.concatenate([
+          _arr(sd['%s.dist_bin_pairwise_embed.weight' % ch]),
+          np.zeros((64 - 39, c_z), np.float32)], 0),
+      # boltz2's contact conditioning; ESMFold2 has none
+      'contact_encoder/weights': np.zeros((260, c_z), np.float32),
+      'contact_encoder/bias': np.zeros((c_z,), np.float32),
+      'contact_fourier/weights': np.zeros((1, c_z), np.float32),
+      'contact_fourier/bias': np.zeros((c_z,), np.float32),
+      'token_bonds_type_embed/weights': np.zeros((7, c_z), np.float32),
+  })
+  put(CH, {
+      'contact_encoding_unselected': np.zeros((c_z,), np.float32),
+      'contact_encoding_unspecified': np.zeros((c_z,), np.float32),
+      'row_pool_attn/weights': t(sd['%s.row_attention_pooling.attn_proj.weight' % ch]),
+      'row_pool_out/weights': t(sd['%s.row_attention_pooling.out_proj.weight' % ch]),
+      'pae_logits_ln/scale': _arr(sd['%s.pae_ln.weight' % ch]),
+      'pae_logits_ln/offset': _arr(sd['%s.pae_ln.bias' % ch]),
+      'pae_logits/weights': t(sd['%s.pae_head.weight' % ch]),
+      'logits_ln/scale': _arr(sd['%s.pde_ln.weight' % ch]),
+      'logits_ln/offset': _arr(sd['%s.pde_ln.bias' % ch]),
+      'left_half_distance_logits/weights': t(sd['%s.pde_head.weight' % ch]),
+      'plddt_logits_ln/scale': _arr(sd['%s.plddt_ln.weight' % ch]),
+      'plddt_logits_ln/offset': _arr(sd['%s.plddt_ln.bias' % ch]),
+      'plddt_logits/weights': pad_atoms(_arr(sd['%s.plddt_weight' % ch])).transpose(1, 0, 2),
+      'experimentally_resolved_ln/scale': _arr(sd['%s.resolved_ln.weight' % ch]),
+      'experimentally_resolved_ln/offset': _arr(sd['%s.resolved_ln.bias' % ch]),
+      'experimentally_resolved_logits/weights':
+          pad_atoms(_arr(sd['%s.resolved_weight' % ch])).transpose(1, 0, 2),
+  })
+  # AF3's confidence pairformer carries a single track; ESMFold2's 4-block
+  # confidence trunk is pair-only, so the single leaves are zeros -- a residual
+  # with zero weights contributes exactly zero, the same identity the trunk uses.
+  conf = stack_blocks(
+      lambda i: zero_single_track(
+          zero_pair_attention(pair_only_block(sd, '%s.folding_trunk.blocks.%d' % (ch, i)),
+                              c_z, pair_head), c_z, c_s),
+      dims['n_conf'])
+  put(CH, nest('__layer_stack_no_per_layer/confidence_pairformer', conf))
+  return flat
+
+
+def af3_atom_encoder(sd, prefix, name, c_atom, num_head, n_blocks, c_out,
+                     pair_channels=16):
+  """ESMFold2's atom encoder onto AF3's per-atom conditioning scopes.
+
+  The fused atom_linear (c_atom, 389) SPLITS into AF3's five bias-free
+  per-feature embedders -- a Linear over a concatenation IS the sum of its
+  column blocks, so this is a slice, not an approximation:
+
+      [ref_pos 3 | charge 1 | mask 1 | element 128 | atom_name 256]
+
+  Everything ESMFold2 does not have is zero-filled: the atom PAIR conditioning
+  (offsets, distances, the three pair MLPs, the single->pair projections) and
+  the attention's pair bias, because its atom attention is positional through
+  rotary alone.
+
+  Queries and keys get the SAME adaLN weights: cross_attention conditions each
+  side separately, while ESMFold2 has one adaln_modulation read by both.
+  """
+  g = lambda leaf: sd['%s.%s' % (prefix, leaf)]
+  w = t(g('atom_linear.weight'))                        # (389, c_atom)
+  o = 0
+  out = {}
+  for leaf, width in (('embed_ref_pos', 3), ('embed_ref_charge', 1),
+                      ('embed_ref_mask', 1), ('embed_ref_element', 128),
+                      ('embed_ref_atom_name', 256)):
+    out['%s_%s/weights' % (name, leaf)] = w[o:o + width]
+    o += width
+  assert o == w.shape[0], (o, w.shape)
+  out['%s_atom_features_norm/scale' % name] = _arr(g('atom_norm.weight'))
+  out['%s_atom_features_norm/offset' % name] = _arr(g('atom_norm.bias'))
+  out['%s_project_atom_features_for_aggr/weights' % name] = t(g('atom_to_token_linear.weight'))
+  for leaf, shape in (('embed_pair_offsets', (3, pair_channels)),
+                      ('embed_pair_offsets_1', (3, pair_channels)),
+                      ('embed_pair_distances', (1, pair_channels)),
+                      ('embed_pair_distances_1', (1, pair_channels)),
+                      ('embed_pair_offsets_valid', (1, pair_channels)),
+                      ('pair_mlp_1', (pair_channels, pair_channels)),
+                      ('pair_mlp_2', (pair_channels, pair_channels)),
+                      ('pair_mlp_3', (pair_channels, pair_channels)),
+                      ('single_to_pair_cond_row', (c_atom, pair_channels)),
+                      ('single_to_pair_cond_row_1', (c_atom, pair_channels)),
+                      ('single_to_pair_cond_col', (c_atom, pair_channels)),
+                      ('single_to_pair_cond_col_1', (c_atom, pair_channels))):
+    out['%s_%s/weights' % (name, leaf)] = np.zeros(shape, np.float32)
+
+  blocks = [af3_atom_block(sd, '%s.atom_transformer.blocks.%d' % (prefix, i),
+                           c_atom, num_head) for i in range(n_blocks)]
+  stacked = {}
+  for k in blocks[0]:
+    stacked[k] = np.stack([b[k] for b in blocks], 0)
+  stack_name = '%s_atom_transformer_%s' % (name, 'encoder' if 'encoder' in name or True else '')
+  return out, stacked

@@ -40,7 +40,7 @@ _TAP_ATOM_BLOCKS = os.environ.get('CHAI_TAP_ATOM_BLOCKS') == '1'
 ATOM_BLOCK_TAPS = []
 
 
-def adaptive_layernorm(x, single_cond, name, global_config=None):
+def adaptive_layernorm(x, single_cond, name, global_config=None, atom=False):
   """Adaptive LayerNorm."""
   # Adopted from Scalable Diffusion Models with Transformers
   # https://arxiv.org/abs/2212.09748
@@ -60,7 +60,12 @@ def adaptive_layernorm(x, single_cond, name, global_config=None):
   # affine-free RMSNorm, and the conditioning goes through SiLU before the
   # modulation projection. Its adaln_modulation is one fused Linear to 6*d; the
   # converter splits it into the scale/bias/gate slots AF3 keeps separate.
-  esm = global_config is not None and global_config.model in model_config.SWA_ROPE_ATOM_ATTENTION
+  # ESMFold2's departures are its ATOM blocks only -- its TOKEN transformer uses
+  # the ordinary AdaptiveLayerNorm (LayerNorm on the conditioning, sigmoid gate),
+  # so gating on the model alone would wrongly strip single_cond_layer_norm and
+  # the scale bias from 12 token blocks that do have them.
+  esm = (atom and global_config is not None
+         and global_config.model in model_config.SWA_ROPE_ATOM_ATTENTION)
   identity_scale = chai or esm
   if single_cond is None:
     x = hm.LayerNorm(name=f'{name}layer_norm', use_fast_variance=False)(x)
@@ -145,13 +150,14 @@ def transition_block(
     single_cond: jnp.ndarray | None = None,
     use_glu_kernel: bool = True,
     name: str = '',
+    atom: bool = False,
 ) -> jnp.ndarray:
   """Transition Block."""
   num_channels = x.shape[-1]
   num_intermediates = num_intermediate_factor * num_channels
 
   x = adaptive_layernorm(x, single_cond, name=f'{name}ffw_',
-                         global_config=global_config)
+                         global_config=global_config, atom=atom)
 
   # Boltz-2's ConditionedTransitionBlock adds an extra multiplicative up-gate a_to_b(a)
   # on the SwiGLU output before the down-projection: b = SwiGLU(swish_gate(a)) * a_to_b(a).
@@ -524,7 +530,7 @@ def cross_attention(
     bias = jnp.where(pair_mask[..., None, :, :], bias, -1e9)
 
   x_q = adaptive_layernorm(x_q, single_cond_q, name=f'{name}q',
-                           global_config=global_config)
+                           global_config=global_config, atom=True)
   if keys_from_queries is not None:
     # opendde/protenix chain the two adaptive LayerNorms instead of running them
     # in parallel. Their AttentionPairBias in cross_attention_mode reads
@@ -548,7 +554,7 @@ def cross_attention(
     # 0.990195 / q_skip 0.991027 before it.
     x_k = keys_from_queries(x_q)
   x_k = adaptive_layernorm(x_k, single_cond_k, name=f'{name}k',
-                           global_config=global_config)
+                           global_config=global_config, atom=True)
 
   assert config.key_dim % config.num_head == 0
   assert config.value_dim % config.num_head == 0
@@ -689,6 +695,7 @@ class CrossAttTransformer(hk.Module):
           self.global_config,
           queries_single_cond,
           name=self.name,
+          atom=True,
       )
       queries_act = block_in + attn + trans
       # the two branches separately: chai's block output is

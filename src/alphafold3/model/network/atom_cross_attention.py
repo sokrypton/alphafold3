@@ -105,6 +105,14 @@ def _per_atom_conditioning(
     act += hk.get_parameter(f'{name}_conformer_embedding_bias',
                             [c.per_atom_channels], dtype=act.dtype,
                             init=hk.initializers.Constant(0.0))
+  if global_config.model in model_config.NORMED_ATOM_FEATURES:
+    # ESMFold2 builds this as ONE Linear over the concatenated 389-d atom
+    # features and then LAYER-NORMS the result (atom_linear -> atom_norm). AF3
+    # sums bias-free per-feature Linears and does not normalise. The sum is the
+    # same tensor -- a fused Linear over a concatenation IS the sum of its column
+    # blocks, which is why the converter can split atom_linear five ways -- but
+    # the LayerNorm is data-dependent and cannot be folded into any of them.
+    act = hm.LayerNorm(name=f'{name}_atom_features_norm')(act)
   act *= batch.ref_structure.mask.astype(jnp.float32)[:, :, None]
 
   # Compute pair conditioning

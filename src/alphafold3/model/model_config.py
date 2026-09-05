@@ -171,6 +171,19 @@ SWA_ROPE_ATOM_ATTENTION = ('esmfold2',)
 # structure head is handed s_trunk=None. Their diffusion single conditioning is
 # built from s_inputs alone rather than from [single_embedding, target_feat].
 PAIR_ONLY_TRUNK = ('esmfold2',)
+
+
+# Models that LayerNorm the summed per-atom reference features. AF3 sums
+# bias-free per-feature Linears and leaves the result unnormalised.
+NORMED_ATOM_FEATURES = ('esmfold2',)
+
+
+# Models whose confidence head RE-EMBEDS the pair from s_inputs rather than
+# reading the trunk pair directly: z_norm(z) + relpos + bonds + a row, a column
+# and an outer PRODUCT of s_inputs, plus a distance-bin embedding of the
+# PREDICTED coordinates. boltz2 established the path; ESMFold2 builds the same
+# thing, which is why it reuses it rather than adding a second one.
+REEMBED_CONFIDENCE_PAIR = ('boltz2', 'esmfold2')
 ATOM_ROPE_HALF_WINDOW = 64
 # 32 queries + 2*64 of context needs 160; the next power-of-two multiple that
 # AF3's gather machinery is happy with is 192.

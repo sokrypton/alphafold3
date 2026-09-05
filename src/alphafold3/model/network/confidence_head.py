@@ -324,6 +324,19 @@ class ConfidenceHead(hk.Module):
       single_act = embeddings['single'].astype(dtype)
       target_feat = embeddings['target_feat'].astype(dtype)
 
+      if self.global_config.model in model_config.PAIR_ONLY_TRUNK:
+        # No trunk single exists, so there is nothing to read: ESMFold2 builds
+        # its single by ROW-ATTENTION POOLING the pair -- softmax over j of a
+        # learned scalar per (i, j), then a projection. This is the one piece of
+        # ESMFold2 with no AF3 analogue, and it is here rather than in the trunk
+        # because the pair it pools is the confidence head's own re-embedded
+        # pair, not the trunk's.
+        scores = hm.Linear(1, name='row_pool_attn')(pair_act)[..., 0]
+        scores = jnp.where(seq_mask_cast[None, :] > 0, scores, -1e9)
+        single_act = hm.Linear(
+            single_act.shape[-1], name='row_pool_out')(
+                jnp.einsum('nm,nmd->nd', jax.nn.softmax(scores, axis=-1), pair_act))
+
       if self.global_config.model in model_config.PROTENIX_FAMILY:
         # Protenix LayerNorms (and clamps) the trunk single before ANY use -- the
         # confidence pairformer and every head see the normalised one
@@ -355,7 +368,7 @@ class ConfidenceHead(hk.Module):
       num_residues = seq_mask.shape[0]
       num_pair_channels = pair_act.shape[2]
 
-      if self.global_config.model == 'boltz2':
+      if self.global_config.model in model_config.REEMBED_CONFIDENCE_PAIR:
         positions = atom_layout.convert(
             token_atoms_to_pseudo_beta, dense_atom_positions, layout_axes=(-3, -2))
         pair_act, single_act = self._boltz2_reembed(
