@@ -739,3 +739,78 @@ def af3_msa_block(sd, prefix, c_z, num_head, is_final, c_m, msa_heads=8,
                     common.transition(sd, prefix + '.msa_transition', d)))
   out.update(zero_pair_attention(pair_only_block(sd, prefix), c_z, num_head))
   return out
+
+
+def af3_diffusion_block(sd, prefix_attn, prefix_trans, c_token, num_head):
+  """One ESMFold2 diffusion block as one AF3 diffusion-transformer block.
+
+  adaLN and the gates line up directly:
+      adaln.s_scale       -> single_cond_layer_norm/scale
+      adaln.s_gate  (w,b) -> single_cond_scale/{weights,bias}
+      adaln.s_shift.w     -> single_cond_bias/weights
+      q_proj (w,b)        -> q_projection/{weights,bias}, reshaped to (H, D)
+      kv_proj             -> k_projection + v_projection (the fused half split)
+      g_proj              -> gating_query
+      out_proj            -> transition2          (the ATTENTION output)
+      out_gate (w,b)      -> adaptive_zero_cond/{weights,bias}
+      lin_swish / lin_out -> ffw_transition1 / ffw_transition2
+      output_gate (w,b)   -> ffw_adaptive_zero_cond/{weights,bias}
+
+  The PER-BLOCK pair LayerNorm is folded, not carried: AF3 shares one
+  pair_input_layer_norm across the stack, so the block's own LN scale multiplies
+  into pair_logits_projection and its offset is dropped -- the offset enters
+  every logit of a row equally and cancels in the softmax. The shared LN is then
+  set to identity. Same treatment boltz2 and the protenix family already get.
+  """
+  a = lambda leaf: sd['%s.%s' % (prefix_attn, leaf)]
+  tr = lambda leaf: sd['%s.%s' % (prefix_trans, leaf)]
+  d_head = c_token // num_head
+  kv = _arr(a('kv_proj.weight'))                       # (2*c, c)
+  k_w, v_w = kv[:c_token], kv[c_token:]
+  out = {
+      'single_cond_layer_norm/scale': _arr(a('adaln.s_scale')),
+      'single_cond_scale/weights': t(a('adaln.s_gate.weight')),
+      'single_cond_scale/bias': _arr(a('adaln.s_gate.bias')),
+      'single_cond_bias/weights': t(a('adaln.s_shift.weight')),
+      'q_projection/weights': t(a('q_proj.weight')).reshape(c_token, num_head, d_head),
+      'q_projection/bias': _arr(a('q_proj.bias')).reshape(num_head, d_head),
+      'k_projection/weights': t(k_w).reshape(c_token, num_head, d_head),
+      'v_projection/weights': t(v_w).reshape(c_token, num_head, d_head),
+      'gating_query/weights': t(a('g_proj.weight')),
+      'transition2/weights': t(a('out_proj.weight')),
+      'adaptive_zero_cond/weights': t(a('out_gate.weight')),
+      'adaptive_zero_cond/bias': _arr(a('out_gate.bias')),
+      'ffw_single_cond_layer_norm/scale': _arr(tr('adaln.s_scale')),
+      'ffw_single_cond_scale/weights': t(tr('adaln.s_gate.weight')),
+      'ffw_single_cond_scale/bias': _arr(tr('adaln.s_gate.bias')),
+      'ffw_single_cond_bias/weights': t(tr('adaln.s_shift.weight')),
+      'ffw_transition1/weights': t(tr('lin_swish.weight')),
+      'ffw_transition2/weights': t(tr('lin_out.weight')),
+      'ffw_adaptive_zero_cond/weights': t(tr('output_gate.weight')),
+      'ffw_adaptive_zero_cond/bias': _arr(tr('output_gate.bias')),
+  }
+  # per-block pair LN scale folded into the pair bias; offset dropped (cancels)
+  pair_scale = _arr(a('pair_norm.weight'))
+  out['__pair_logits'] = t(a('pair_bias_proj.weight')) * pair_scale[:, None]
+  return out
+
+
+def af3_diffusion_transformer(sd, prefix, n_blocks, n_super, c_token, num_head, c_z):
+  """The 12 ESMFold2 token blocks as AF3's nested (n_super, inner) stack."""
+  blocks = [af3_diffusion_block(sd, '%s.attn_blocks.%d' % (prefix, i),
+                                '%s.transition_blocks.%d' % (prefix, i),
+                                c_token, num_head)
+            for i in range(n_blocks)]
+  inner = n_blocks // n_super
+  out = {}
+  for k in blocks[0]:
+    if k == '__pair_logits':
+      continue
+    flat = np.stack([b[k] for b in blocks], 0)
+    out[k] = flat.reshape((n_super, inner) + flat.shape[1:])
+  # pair_logits_projection is (n_super, c_z, inner, num_head): the SUPER axis
+  # leads and the inner axis sits between the channel and head axes, not beside
+  # the super axis.
+  pl = np.stack([b['__pair_logits'] for b in blocks], 0)          # (n, c_z, H)
+  pl = pl.reshape(n_super, inner, c_z, num_head).transpose(0, 2, 1, 3)
+  return out, pl
