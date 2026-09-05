@@ -394,13 +394,14 @@ def map_protenix2_to_af3(sd, **overrides):
   map_pairformer_stack(sd, params, n_blocks=d['n_pairformer'], pair_H=d['pair_H'])
   map_confidence_head(sd, params, n_layers=d['n_confidence'], pair_H=d['pair_H'])
   map_distogram_head(sd, params)
-  if 'template_embedder.layernorm_z.weight' in sd:
-    # CORRECTION: the v0.5.0 lineage (mini, tiny, protenix05) is NOT templateless.
-    # It carries the seven FUSED embedder tensors (layernorm_v/z, linear_no_bias_
-    # a/u/z) and drops only the pairformer_stack. Gating the whole embedder on
-    # n_template shipped three blobs with no template scopes at all, and
-    # protenix_tiny then failed to apply on any batch carrying templates:
-    #   Unable to retrieve parameter 'scale' for module .../template_embedding/z_norm
+  if d['n_template']:
+    # The v0.5.0 lineage (protenix05, mini, tiny) DOES still carry the seven fused
+    # template-embedder tensors, but native never reads them: its
+    # TemplateEmbedder.forward returns 0 outright when n_blocks < 1 ("Compatible
+    # with the Protenix 0.5.0 model series"). They are vestigial, so converting
+    # them would hand the graph weights for a path native does not run. The graph
+    # skips the whole template embedding for these models instead; see
+    # evoformer._embed_template_pair.
     map_template_embedder(sd, params, n_blocks=d['n_template'],
                           templ_H=d['templ_H'])
   map_evoformer_conditioning(sd, params, n_atom=d['n_input_atom_enc'])

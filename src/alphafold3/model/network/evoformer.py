@@ -386,6 +386,20 @@ class Evoformer(hk.Module):
       use_dropout=False,
   ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Embeds Templates and merges into pair activations."""
+    # A template stack configured with ZERO blocks means the model has no template
+    # path at all, not a template path with an empty stack. Protenix's own
+    # TemplateEmbedder.forward opens with
+    #     if "template_aatype" not in input_feature_dict or self.n_blocks < 1:
+    #         # Compatible with the Protenix 0.5.0 model series
+    #         return 0
+    # so for that lineage (protenix05, mini, tiny) native contributes EXACTLY zero
+    # even when templates are supplied -- the fused-embedder tensors those
+    # checkpoints still carry are vestigial. Running the embedder anyway would add
+    # a term native never computes: with no templates present a_tij is 0, but
+    # u_proj(relu(v_norm(z_proj(z_norm(z))))) is NOT, so the divergence is real and
+    # is not masked away by an empty template batch.
+    if not self.config.template.template_stack.num_layer:
+      return pair_activations, key
     dtype = pair_activations.dtype
     key, subkey = jax.random.split(key)
     # Boltz-2 uses a distinct template module (own featurisation + forward, validated
