@@ -256,7 +256,7 @@ PER_BLOCK_ATOM_PAIR_LAYER_NORM = ('opendde', 'rosettafold3') + PROTENIX_FAMILY
 #
 # Reading the tensor name alone would have got two of the four wrong. The halving
 # lives in the converters, as a weight transform, so there is no forward branch.
-DISTOGRAM_BIAS = ('opendde', 'rosettafold3', 'boltz2') + PROTENIX_FAMILY
+DISTOGRAM_BIAS = ('opendde', 'rosettafold3', 'boltz2', 'esmfold2') + PROTENIX_FAMILY
 
 
 class GlobalConfig(base_config.BaseConfig):

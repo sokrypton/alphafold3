@@ -1011,7 +1011,15 @@ def map_esmfold2_to_af3_graph(sd, dims=None):
       'extra_msa_target_feat/weights': remap_s_inputs(
           t(sd['msa_encoder.project_inputs.weight'])),
   })
+  # ESMFold2 symmetrises BEFORE the head -- distogram_head(z + z^T) -- while AF3
+  # computes half_logits(z) and then half + half^T. For the WEIGHTS those agree
+  # (W(z + z^T) == Wz + (Wz)^T), but the BIAS is added once natively and twice
+  # here, so it is HALVED. Dropping it entirely, which is what happens without
+  # DISTOGRAM_BIAS membership, adds a constant per-bin offset to every logit and
+  # flattens the contact map to ~0.96 EVERYWHERE -- the trunk looks destroyed
+  # when only the head is wrong.
   flat['diffuser/distogram_head/half_logits/weights'] = t(sd['distogram_head.weight'])
+  flat['diffuser/distogram_head/half_logits/bias'] = _arr(sd['distogram_head.bias']) / 2.0
 
   # ── trunk pairformer and MSA stack ────────────────────────────────────────
   put(P, af3_pair_stack(sd, 'folding_trunk', dims['n_trunk'], c_z, pair_head,

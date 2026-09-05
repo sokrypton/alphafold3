@@ -314,18 +314,21 @@ def trunk(f, lm_hidden, p, dims, n_loops=3, key=None, lm_dropout=0.25, msa=None)
     # ESMFold2 keeps 25% dropout on the LM pair rep at INFERENCE, resampled every
     # loop (config.lm_encoder.per_loop_lm_dropout).  It is not optional polish:
     # disabling it costs ~18 A on 6MRR.
-    lm_i = lm_z
-    if lm_dropout > 0:
-      key, k_do = jax.random.split(key)
-      keep = jax.random.bernoulli(k_do, 1.0 - lm_dropout, lm_z.shape)
-      lm_i = lm_z * keep / (1.0 - lm_dropout)
-    lm_ref = pair_stack(lm_i, p, 'lm_encoder/', dims['n_lm_encoder'], pm)
+    lm_ref = None
+    if lm_z is not None:
+      lm_i = lm_z
+      if lm_dropout > 0:
+        key, k_do = jax.random.split(key)
+        keep = jax.random.bernoulli(k_do, 1.0 - lm_dropout, lm_z.shape)
+        lm_i = lm_z * keep / (1.0 - lm_dropout)
+      lm_ref = pair_stack(lm_i, p, 'lm_encoder/', dims['n_lm_encoder'], pm)
     z_inject = z_init
     if msa is not None:
       # OVERWRITE, not add (config.msa_encoder_overwrite)
       z_inject = msa_encoder(z_inject, s_inputs, msa['oh'], msa['has_deletion'],
                              msa['deletion_value'], msa['mask'], p, dims)
-    inj = layer_norm(z_inject + lm_ref, p['parcae_input_norm/scale'], p['parcae_input_norm/offset'])
+    inj = layer_norm(z_inject if lm_ref is None else z_inject + lm_ref,
+                     p['parcae_input_norm/scale'], p['parcae_input_norm/offset'])
     z = av * z + inj @ bT
     z = pair_stack(z, p, 'folding_trunk/', dims['n_trunk'], pm)
   z = pair_stack(z @ p['parcae_readout/weights'], p, 'parcae_coda/', dims['n_coda'], pm)
