@@ -483,7 +483,7 @@ class Evoformer(hk.Module):
     carrying n_pass pair tensors instead of one.
     """
     lm = batch.lm_pair
-    if lm is None or not self.config.lm_encoder.num_layer:
+    if lm is None:
       return pair_activations
     lm = lm.astype(pair_activations.dtype)
     rate = model_config.LM_PAIR_DROPOUT.get(self.global_config.model, 0.0)
@@ -491,13 +491,22 @@ class Evoformer(hk.Module):
       keep = jax.random.bernoulli(key, 1.0 - rate, lm.shape)
       lm = lm * keep.astype(lm.dtype) / (1.0 - rate)
 
-    def lm_fn(z):
-      return modules.PairFormerIteration(
-          self.config.pairformer, self.global_config, with_single=False,
-          name='lm_encoder')(act=z, pair_mask=pair_mask, use_dropout=use_dropout)
+    if self.config.lm_encoder.num_layer:
+      # The RELEASED line refines the shim's output through four pair-only
+      # blocks. The EXPERIMENTAL line has no lm_encoder and adds the shim's
+      # output straight to z_init -- gating the whole contribution on the
+      # encoder's depth, as this did, meant those four models folded with NO
+      # language model at all. Silent: they still folded, one of them at 1.694,
+      # and supplying ESM-C changed the answer by nothing whatsoever, which is
+      # what finally gave it away.
+      def lm_fn(z):
+        return modules.PairFormerIteration(
+            self.config.pairformer, self.global_config, with_single=False,
+            name='lm_encoder')(act=z, pair_mask=pair_mask,
+                               use_dropout=use_dropout)
 
-    lm = _stack(self.config.lm_encoder.num_layer, lm_fn,
-                self.config.pairformer.block_remat)(lm)
+      lm = _stack(self.config.lm_encoder.num_layer, lm_fn,
+                  self.config.pairformer.block_remat)(lm)
     return pair_activations + lm
 
   @hk.transparent
@@ -736,7 +745,9 @@ class Evoformer(hk.Module):
             batch=batch, pair_activations=pair_activations
         )
         _tap('z_init', pair_activations)
-        if self.config.msa_stack.num_layer:
+        msa_after = (self.global_config.model
+                     in model_config.MSA_AFTER_RECYCLE)
+        if self.config.msa_stack.num_layer and not msa_after:
           # ESMFold2-Fast disables the MSA encoder outright
           # (msa_encoder.enabled false); it folds from ESM-C alone. Skipping the
           # CALL, not just the stack, is what keeps msa_activations and
@@ -757,6 +768,26 @@ class Evoformer(hk.Module):
             pair_mask=pair_mask, key=key, use_dropout=use_dropout)
         _tap('z_inject', pair_activations)
         pair_activations = _add_prev(pair_activations, None)
+        if self.config.msa_stack.num_layer and msa_after:
+          # the experimental line: after the recycle, and ADDED. Its encoder
+          # returns the updated pair, so `z + encoder(z)` double-counts z --
+          # the same shape as boltz2's and chai's, and the weights were trained
+          # with it.
+          n_msa_rows = batch.msa.rows.shape[0]
+          if n_msa_rows > 1:
+            msa_out, key = self._embed_process_msa(
+                msa_batch=batch.msa,
+                pair_activations=pair_activations,
+                pair_mask=pair_mask,
+                key=key,
+                target_feat=target_feat,
+                use_dropout=use_dropout,
+                is_ligand=batch.token_features.is_ligand,
+                asym_id=batch.token_features.asym_id,
+            )
+            pair_activations = pair_activations + msa_out
+          # with a query-only MSA `msa_track_mask` is all False and native's
+          # whole update is multiplied by zero, so there is nothing to add.
         _tap('z_parcae', pair_activations)
       elif chai:
         pair_activations = self._relative_encoding(batch, pair_activations)

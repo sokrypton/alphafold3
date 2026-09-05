@@ -117,6 +117,17 @@ NO_HEAD_NORM = {'boltz2': ('*',),
 # so it rides in ESMFOLD2_VARIANTS as `conf_bins`.
 LEARNED_CONFIDENCE_BINS = ESMFOLD2_FAMILY
 
+# Where the MSA encoder sits relative to the recycle. The released line
+# OVERWRITES the injection before it (`msa_encoder_overwrite: true`); the
+# experimental line runs it AFTER, as an addition:
+#     z = z_init + pair_loop_proj(z)
+#     z = z + msa_encoder(x_pair=z, ...)
+# and its encoder returns the UPDATED pair rather than a delta, so that add is
+# the same double count boltz2 and chai make. It also zeroes its whole output
+# when the MSA has no non-query rows (`msa_track_mask`), which for a
+# single-sequence fold means the MSA track contributes exactly nothing.
+MSA_AFTER_RECYCLE = ESMFOLD2_EXPERIMENTAL
+
 # The Protenix family. Its model types differ from one another ONLY in counts
 # and widths (converters/protenix2.derive_dims reads both off the checkpoint), so
 # every FORWARD branch that protenix2 takes, mini and tiny take too. Keeping the
@@ -228,7 +239,13 @@ PAIR_ONLY_TRUNK = ESMFOLD2_FAMILY
 # every recycle pass (config.lm_encoder.per_loop_lm_dropout; the top-level config
 # says 0.0 and is overridden). It is not optional polish -- disabling it costs
 # ~18 A on 6MRR.
-LM_PAIR_DROPOUT = {m: 0.25 for m in ESMFOLD2_FAMILY}
+# ...and only on the RELEASED line. Its 25% lives in the lm_encoder
+# (`lm_encoder.lm_dropout`, `per_loop_lm_dropout: true`), and the experimental
+# line has no lm_encoder at all: it calls the shim once with
+# `lm_dropout=config.lm_dropout`, which its config sets to 0.0. Applying 25%
+# there drops a quarter of a signal the model was never trained to lose.
+LM_PAIR_DROPOUT = {m: (0.25 if m in ESMFOLD2_SSM_RECYCLE else 0.0)
+                   for m in ESMFOLD2_FAMILY}
 
 
 # Models whose sampler rigid-aligns the noisy coordinates onto the denoised
