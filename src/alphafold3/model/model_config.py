@@ -134,6 +134,16 @@ PER_BLOCK_PAIR_LAYER_NORM = (
 KEY_MASKED_ATOM_ATTENTION = ('rosettafold3', 'opendde') + PROTENIX_FAMILY
 
 
+# Models that recycle through a linear STATE-SPACE step instead of an addition.
+#
+# ESMFold2's "parcae" trunk is a discretised diagonal SSM over the recycle axis,
+# z = a * z_prev + b(norm(z_inject)), where a and b are input-independent and so
+# fold to plain arrays at conversion time. Everything else here recycles with
+# z = z_inject + prev_embedding(norm(z_prev)), which is the same expression at
+# a = 1 with the operands the other way round.
+SSM_RECYCLE = ('esmfold2',)
+
+
 # Models whose MSA stack does NOT update the MSA representation at all: their
 # msa_module block is OuterProductMean + a pair stack, and there is no MSA row
 # attention and no MSA transition anywhere in the checkpoint.

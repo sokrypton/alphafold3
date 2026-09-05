@@ -621,6 +621,25 @@ class Evoformer(hk.Module):
         z_prev = prev['pair'].astype(act.dtype)
         if first is not None:
           z_prev = jnp.where(first > 0.5, init_act.astype(z_prev.dtype), z_prev)
+        if self.global_config.model in model_config.SSM_RECYCLE:
+          # ESMFold2 recycles through a discretised diagonal SSM ("parcae")
+          # rather than an addition:
+          #     z = a * z_prev + b(norm(z_inject))
+          # against AF3's
+          #     z = z_inject + prev_embedding(norm(z_prev))
+          # Same two modules, applied to the OTHER operand, plus a per-channel
+          # decay. a and b are input-independent in the checkpoint, so b folds
+          # into prev_embedding and only `recycle_decay` is new; at a = 1 with
+          # the operands swapped back this reduces to AF3's own recycling.
+          decay = hk.get_parameter('recycle_decay', [act.shape[-1]],
+                                   dtype=act.dtype, init=jnp.ones)
+          return decay * z_prev + hm.Linear(
+              act.shape[-1],
+              name='prev_embedding',
+              initializer=self.global_config.final_init,
+          )(
+              hm.LayerNorm(name='prev_embedding_layer_norm')(act)
+          )
         return act + hm.Linear(
             act.shape[-1],
             name='prev_embedding',

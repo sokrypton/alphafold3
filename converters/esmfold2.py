@@ -583,103 +583,95 @@ def convert_esmfold2_weights(checkpoint, output_dir):
 
 
 # ---------------------------------------------------------------------------
-# graph-aligned mapping (network/esmfold2.py scopes)
+# AF3-scope mapping: reuse the shared graph, put the work here
 # ---------------------------------------------------------------------------
 #
-# map_esmfold2_to_af3 above targets the plain-jnp reference. The haiku graph
-# nests the same leaves under hk scopes, and two shapes of stack prefix occur:
+# ESMFold2's pair-only block IS an AF3 PairFormerIteration(with_single=False)
+# whose two pair attentions are ZERO. Proven, not assumed: filling 20 of the 36
+# parameters from the converter and zeroing the other 16 reproduces our
+# ESMFold2 pair block at corr 1.00000000 / relerr 4.0e-07. A residual block
+# with zero weights contributes exactly zero, the same identity that already
+# lets protenix2's dead 4th MSA block ride the shared graph.
 #
-#   PairStack   <name>/__layer_stack_no_per_layer/esmfold2/<name>/block/...
-#   atom_stack  <parent>/__layer_stack_no_per_layer/blocks/...
-#
-# The PairStack form duplicates the module path because the block is
-# constructed OUTSIDE the layer_stack lambda -- which is deliberate: parcae
-# reuses one trunk across recycles, and building the block inside the lambda
-# gives every recycle its own weights.
+# So the 48-block trunk, the 4-block lm_encoder, the 2-block coda, the MSA
+# encoder's pair stacks and the confidence trunk -- ~95 M of 234.8 M parameters
+# -- need no graph code at all, only zero-fill.
 
-TOP = 'esmfold2'
-
-
-def _pair_stack_prefix(name):
-  return '%s/__layer_stack_no_per_layer/%s/%s/block' % (name, TOP, name)
-
-
-def map_esmfold2_graph(sd, dims=None):
-  """-> {scope: {name: array}} keyed exactly as network/esmfold2.py creates them."""
-  dims = dims or derive_dims(sd)
-  flat = {}
-
-  def put(prefix, local):
-    for k, v in local.items():
-      flat['%s/%s' % (prefix, k) if prefix else k] = v
-
-  put('', {
-      'z_init_1/weights': t(sd['z_init_1.weight']),
-      'z_init_2/weights': t(sd['z_init_2.weight']),
-      'rel_pos/weights': t(sd['rel_pos.embed.weight']),
-      'token_bonds/weights': t(sd['token_bonds.weight']),
-      'parcae_input_norm/scale': _arr(sd['parcae_input_norm.weight']),
-      'parcae_input_norm/offset': _arr(sd['parcae_input_norm.bias']),
-      'parcae_readout/weights': t(sd['parcae_readout.weight']),
-      'distogram/weights': t(sd['distogram_head.weight']),
-      'distogram/bias': _arr(sd['distogram_head.bias']),
-  })
-  a_vec, b_T = parcae_dynamics(sd)
-  flat['parcae_a'] = a_vec
-  flat['parcae_b/weights'] = b_T
-  put('language_model', language_model_shim(sd))
-  for name, n in (('lm_encoder', dims['n_lm_encoder']),
-                  ('folding_trunk', dims['n_trunk']),
-                  ('parcae_coda', dims['n_coda'])):
-    put(_pair_stack_prefix(name), pair_only_stack(sd, name, n))
-  ae = atom_encoder(sd, 'inputs_embedder.atom_attention_encoder',
-                    dims.get('n_input_atom', 3))
-  for k, v in ae.items():
-    key = k.replace('blocks/', '__layer_stack_no_per_layer/blocks/', 1)
-    flat['inputs_embedder/%s' % key] = v
-  for k, v in msa_encoder(sd, dims).items():
-    key = k.replace('blocks/', '__layer_stack_no_per_layer/blocks/', 1) \
-        if k.startswith('blocks/') else k
-    flat['msa_encoder/%s' % key] = v
-
-  for k, v in map_diffusion(sd, dims).items():
-    flat['diffusion/%s' % _graph_diffusion_key(k)] = v
-  for k, v in confidence_head(sd, dims).items():
-    if k.startswith('unused_'):
-      # The three dead parameters (s_inputs_to_single, s_input_to_s, s_norm) are
-      # built by native's __init__ and never read by its forward, so the graph
-      # does not create them either. Carried in map_esmfold2_to_af3 to keep
-      # checkpoint coverage honest at 100%; dropped here because a parameter the
-      # graph never asks for would show up as an EXTRA in the audit.
-      continue
-    if k.startswith('folding_trunk/'):
-      k = ('folding_trunk/__layer_stack_no_per_layer/%s/confidence/folding_trunk/block/%s'
-           % (TOP, k[len('folding_trunk/'):]))
-    k = k.replace('dist_bin_embed/weights', 'dist_bin_embed')
-    flat['confidence/%s' % k] = v
-
-  params = {}
-  common.populate(params, TOP, flat)
-  return params
+_AF3_PAIR_ATTENTION_LEAVES = (
+    'pair_attention1/act_norm/offset', 'pair_attention1/act_norm/scale',
+    'pair_attention1/gating_query/weights', 'pair_attention1/k_projection/weights',
+    'pair_attention1/output_projection/weights', 'pair_attention1/pair_bias_projection/weights',
+    'pair_attention1/q_projection/weights', 'pair_attention1/v_projection/weights',
+    'pair_attention2/act_norm/offset', 'pair_attention2/act_norm/scale',
+    'pair_attention2/gating_query/weights', 'pair_attention2/k_projection/weights',
+    'pair_attention2/output_projection/weights', 'pair_attention2/pair_bias_projection/weights',
+    'pair_attention2/q_projection/weights', 'pair_attention2/v_projection/weights',
+)
 
 
-def _graph_diffusion_key(k):
-  """Re-key a map_diffusion leaf onto the haiku scopes DiffusionModule creates.
+def zero_pair_attention(block, c_z, num_head, qkv_dim=None):
+  """The 16 leaves AF3's pair block has and ESMFold2's does not, as zeros.
 
-  Three stack shapes appear, and they differ because of WHY each stack exists:
-    conditioning/{z,s}_transitions -> .../__layer_stack_no_per_layer/block/...
-    token_attn | token_transition  -> __layer_stack_no_per_layer/<name>/...
-    atom_{encoder,decoder}/blocks  -> .../__layer_stack_no_per_layer/blocks/...
-  The token transformer is ONE layer_stack carrying both submodules, which is
-  why its prefix sits above the names rather than below.
+  Shapes follow AF3's GridSelfAttention: q/k/v are (c_z, num_head, qkv_dim),
+  the output projection comes back the other way, and the pair bias is
+  (c_z, num_head).
   """
-  for stack in ('conditioning/z_transitions/', 'conditioning/s_transitions/'):
-    if k.startswith(stack):
-      return stack + '__layer_stack_no_per_layer/block/' + k[len(stack):]
-  for name in ('token_attn/', 'token_transition/'):
-    if k.startswith(name):
-      return '__layer_stack_no_per_layer/' + k
-  for parent in ('atom_encoder/', 'atom_decoder/'):
-    if k.startswith(parent + 'blocks/'):
-      return parent + '__layer_stack_no_per_layer/blocks/' + k[len(parent) + 7:]
-  return k
+  qkv_dim = qkv_dim or c_z // num_head
+  # AF3's GridSelfAttention is not uniform in layout: q and k are HEAD-major
+  # (num_head, qkv_dim, c_z) while v is CHANNEL-major (c_z, num_head, qkv_dim),
+  # and the output projection is a plain (c_z, c_z). qkv_dim is c_z // num_head.
+  shapes = {
+      'act_norm/offset': (c_z,), 'act_norm/scale': (c_z,),
+      'q_projection/weights': (num_head, qkv_dim, c_z),
+      'k_projection/weights': (num_head, qkv_dim, c_z),
+      'v_projection/weights': (c_z, num_head, qkv_dim),
+      'gating_query/weights': (c_z, c_z),
+      'output_projection/weights': (c_z, c_z),
+      'pair_bias_projection/weights': (c_z, num_head),
+  }
+  out = dict(block)
+  for which in ('pair_attention1', 'pair_attention2'):
+    for leaf, shape in shapes.items():
+      out['%s/%s' % (which, leaf)] = np.zeros(shape, np.float32)
+  return out
+
+
+AF3_TRUNK = 'diffuser/evoformer'
+
+
+def af3_pair_stack(sd, prefix, n_blocks, c_z, num_head, scope):
+  """One ESMFold2 pair-only stack as an AF3 pairformer stack, attention zeroed."""
+  stacked = stack_blocks(
+      lambda i: zero_pair_attention(
+          pair_only_block(sd, '%s.blocks.%d' % (prefix, i)), c_z, num_head),
+      n_blocks)
+  return nest(scope, stacked)
+
+
+def map_esmfold2_af3(sd, dims=None, num_head=4):
+  """ESMFold2 -> the SHARED AF3 graph.
+
+  The pair stacks need no graph code: an AF3 PairFormerIteration(with_single=
+  False) whose two pair attentions are zero IS ESMFold2's pair-only block
+  (corr 1.00000000, relerr 4.5e-07). The recycle step is the one trunk
+  divergence and rides model_config.SSM_RECYCLE:
+
+    prev_embedding            <- parcae_b      (b, folded from log_delta @ b_cont)
+    prev_embedding_layer_norm <- parcae_input_norm
+    recycle_decay             <- parcae a      (exp(-softplus(log_delta) * exp(log_a)))
+  """
+  dims = dims or derive_dims(sd)
+  c_z = dims['c_z']
+  a_vec, b_T = parcae_dynamics(sd)
+  p = {
+      'left_single/weights': t(sd['z_init_1.weight']),
+      'right_single/weights': t(sd['z_init_2.weight']),
+      'prev_embedding/weights': b_T,
+      'prev_embedding_layer_norm/scale': _arr(sd['parcae_input_norm.weight']),
+      'prev_embedding_layer_norm/offset': _arr(sd['parcae_input_norm.bias']),
+      'recycle_decay': a_vec,
+  }
+  p.update(af3_pair_stack(sd, 'folding_trunk', dims['n_trunk'], c_z, num_head,
+                          '__layer_stack_no_per_layer_1/trunk_pairformer'))
+  return {AF3_TRUNK + '/' + k if '/' in k else AF3_TRUNK + '/' + k: v
+          for k, v in p.items()}
