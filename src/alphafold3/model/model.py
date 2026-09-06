@@ -92,8 +92,36 @@ def get_predicted_structure(
   Returns:
     Predicted structure.
   """
-  model_output_coords = result['diffusion_samples']['atom_positions']
+  return predicted_structure_from_coords(
+      result['diffusion_samples']['atom_positions'],
+      batch,
+      predicted_lddt=result.get('predicted_lddt'),
+  )
 
+
+def predicted_structure_from_coords(
+    model_output_coords, batch: feat_batch.Batch, predicted_lddt=None
+) -> structure.Structure:
+  """Coordinates in the model-output atom layout -> a Structure.
+
+  Split out of get_predicted_structure so that a model which is not an AF3
+  diffusion model can reach it. Everything below is driven by the batch's atom
+  layouts and knows nothing about how the coordinates were produced -- the only
+  AF3-specific thing in the original was reading them out of
+  `result['diffusion_samples']`. AlphaFold 2 arrives here from
+  `alphafold3.af2.output`, which regathers its atom37 into the same layout, and
+  so gets the same mmCIF, the same b-factors and the same missing-atom warning
+  rather than a second output path that drifts.
+
+  Args:
+    model_output_coords: (..., num_tokens, max_atoms_per_token, 3).
+    batch: model input batch, for its atom layouts and empty output structure.
+    predicted_lddt: (..., num_tokens, max_atoms_per_token) or None; written to
+      the b-factor column, as AlphaFold does.
+
+  Returns:
+    Predicted structure.
+  """
   # Rearrange model output coordinates to the flat output layout.
   model_output_to_flat = atom_layout.compute_gather_idxs(
       source_layout=batch.convert_model_output.token_atoms_layout,
@@ -104,8 +132,6 @@ def get_predicted_structure(
       arr=model_output_coords,
       layout_axes=(-3, -2),
   )
-
-  predicted_lddt = result.get('predicted_lddt')
 
   if predicted_lddt is not None:
     pred_flat_b_factors = atom_layout.convert(

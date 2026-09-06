@@ -777,6 +777,13 @@ class AF2Spec:
 
   engine = 'af2'
 
+  # AF2 declares no featurisation conventions: it reads the batch the AF3
+  # featuriser produces (alphafold3.af2.features.from_af3_batch) rather than
+  # asking for it to be built differently. Present, and empty, so that
+  # `predict_structure` can consult `spec.featurise` without caring which engine
+  # it has.
+  featurise = {}
+
   def __init__(self, name, model_type, weights_licence=None,
                weights_source=None):
     from alphafold3.model import model_config
@@ -790,6 +797,14 @@ class AF2Spec:
     self.model_type = model_type
     self.weights_licence = weights_licence
     self.weights_source = weights_source
+
+  def without(self, featurise_off):
+    '''No featurisation knobs to switch off; --featurise_off cannot apply.'''
+    if featurise_off:
+      raise ValueError(
+          f'--featurise_off={list(featurise_off)} does not apply to '
+          f'{self.name}: AlphaFold 2 declares no featurisation conventions.')
+    return self
 
   def default_model_names(self, use_templates=False):
     from alphafold3.af2 import runner as af2_runner

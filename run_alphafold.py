@@ -476,13 +476,19 @@ _COMPRESS_LARGE_OUTPUT_FILES = flags.DEFINE_bool(
 # and load from --model_dir. The name selects the forward branches, the config
 # shapes and the sampler constants all at once -- see
 # alphafold3.model.model_registry.
+# AlphaFold 2 is in this list too. It does not ride the AF3 graph -- see
+# alphafold3.af2 -- so it is dispatched on `spec.engine`, and its weights are
+# DeepMind's own params_model_*.npz read from --model_dir rather than a
+# converted blob.
 _MODEL = flags.DEFINE_enum(
     'model',
     'alphafold3',
-    sorted(model_registry.MODEL_SPECS),
+    sorted(list(model_registry.MODEL_SPECS) + list(model_registry.AF2_SPECS)),
     'Which model to run. Its weights must already be in --model_dir: conversion'
     ' is a separate offline step (python -m converters.convert --model NAME'
-    ' --out DIR), so a run never needs torch or the original checkpoint.',
+    ' --out DIR), so a run never needs torch or the original checkpoint.'
+    ' The af2_* models instead want a directory holding AlphaFold 2\'s'
+    ' params/params_model_*.npz.',
 )
 
 _USE_ESM_EMBEDDINGS = flags.DEFINE_bool(
@@ -1502,28 +1508,41 @@ def main(_):
     else:
       raise ValueError(f'Unsupported JAX backend: {jax_backend}')
 
-    # Idempotent after the first run: a directory that already holds a blob is
-    # left alone. AlphaFold 3's own parameters are never fetched.
-    model_dir = weights.ensure_weights(
-        model_name, model_dir, download=_DOWNLOAD_WEIGHTS.value,
-        precision=_WEIGHTS_PRECISION.value)
+    spec = model_registry.get(model_name)
+    if spec.engine == 'af2':
+      # AlphaFold 2's parameters are DeepMind's own release, read from
+      # --model_dir; there is no converted blob to fetch, and they are not ours
+      # to redistribute.
+      from alphafold3.af2 import inference as af2_inference
 
-    print('Building model from scratch...')
-    model_runner = ModelRunner(
-        config=make_model_config(
-            flash_attention_implementation=typing.cast(
-                tokamax.DotProductAttentionImplementation,
-                _FLASH_ATTENTION_IMPLEMENTATION.value,
-            ),
-            num_diffusion_samples=_NUM_DIFFUSION_SAMPLES.value,
-            num_recycles=_NUM_RECYCLES.value,
-            return_embeddings=_SAVE_EMBEDDINGS.value,
-            return_distogram=_SAVE_DISTOGRAM.value,
-            model_name=model_name,
-        ),
-        device=device,
-        model_dir=model_dir,
-    )
+      print('Building AlphaFold 2 from scratch...')
+      model_runner = af2_inference.AF2ModelRunner(
+          spec, device=device, model_dir=model_dir,
+          num_recycles=_NUM_RECYCLES.value,
+      )
+    else:
+      # Idempotent after the first run: a directory that already holds a blob is
+      # left alone. AlphaFold 3's own parameters are never fetched.
+      model_dir = weights.ensure_weights(
+          model_name, model_dir, download=_DOWNLOAD_WEIGHTS.value,
+          precision=_WEIGHTS_PRECISION.value)
+
+      print('Building model from scratch...')
+      model_runner = ModelRunner(
+          config=make_model_config(
+              flash_attention_implementation=typing.cast(
+                  tokamax.DotProductAttentionImplementation,
+                  _FLASH_ATTENTION_IMPLEMENTATION.value,
+              ),
+              num_diffusion_samples=_NUM_DIFFUSION_SAMPLES.value,
+              num_recycles=_NUM_RECYCLES.value,
+              return_embeddings=_SAVE_EMBEDDINGS.value,
+              return_distogram=_SAVE_DISTOGRAM.value,
+              model_name=model_name,
+          ),
+          device=device,
+          model_dir=model_dir,
+      )
     # Check we can load the model parameters before launching anything.
     print('Checking that model parameters can be loaded...')
     _ = model_runner.model_params
