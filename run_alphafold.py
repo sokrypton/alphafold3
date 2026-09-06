@@ -527,6 +527,19 @@ _WEIGHTS_PRECISION = flags.DEFINE_enum(
     ' D/L peptide, with stereochemistry unchanged -- see docs/ported_models.md.'
     ' Ignored when --model_dir points at weights you already have.')
 
+_PRECOMPILE = flags.DEFINE_list(
+    'precompile',
+    [],
+    'Token counts to compile the model for, then exit without folding, e.g.'
+    ' --precompile=128,256. XLA compiles per input shape, and with --cache_dir'
+    ' the executable persists -- so this moves a cold compile out of a user\'s'
+    ' first fold and into a step that can run at install time. Measured on'
+    ' esmfold2_fast at 128 tokens: a first real fold goes from 102 s to 44 s,'
+    ' and to 29 s once the language-model tower is warm too. It folds a DUMMY'
+    ' sequence, so no real input is needed; only the token count has to match,'
+    ' which is what --buckets makes predictable.',
+)
+
 _NOJIT = flags.DEFINE_bool(
     'nojit',
     False,
@@ -781,6 +794,57 @@ class ResultsForSeed:
   full_fold_input: folding_input.Input
   embeddings: dict[str, np.ndarray] | None = None
   distogram: np.ndarray | None = None
+
+
+def _precompile(model_runner, model_name, model_dir, token_counts):
+  """Compile the model for each token count, then return without folding.
+
+  A DUMMY sequence is folded through the ordinary code path rather than the
+  graph being rebuilt from stored shapes. That is deliberate: the persistent
+  cache key covers the whole jit configuration, and reconstructing it by hand
+  from <model>.shapes.json produced an executable that never matched -- among
+  other reasons because the manifest records the graph's INTERNAL dtypes
+  (bfloat16 under global_config.bfloat16='all') where the loaded parameters are
+  float32, for 125 of 369 leaves. Driving the real path cannot drift from it.
+
+  Only the token count has to match the eventual input, which is what --buckets
+  makes predictable: a 68-residue protein lands in the 128 bucket.
+  """
+  from alphafold3.constants import decoded_ccd
+  from alphafold3.model import model_registry
+
+  spec = model_registry.get(model_name)
+  ccd = decoded_ccd.get_ccd()
+  for n_tokens in token_counts:
+    t0 = time.time()
+    fold_input = folding_input.Input(
+        name='precompile', rng_seeds=[0],
+        chains=[folding_input.ProteinChain(
+            id='A', sequence='G' * max(n_tokens - 60, 8), ptms=[],
+            unpaired_msa='', paired_msa='', templates=[])])
+    featurise = lambda **kw: featurisation.featurise_input(
+        fold_input=fold_input, ccd=ccd, buckets=[n_tokens], **kw)
+    batch = featurise()[0]
+    if spec.featurise:
+      n = int(np.asarray(batch['token_index']).shape[-1])
+      lm_pair = None
+      if spec.featurise.get('lm_pair'):
+        lm_pair = np.zeros(
+            (n, n, model_runner._model_config.evoformer.pair_channel),
+            np.float32)
+      esm = None
+      if spec.featurise.get('esm'):
+        esm = np.zeros((int(np.asarray(batch['is_protein']).sum()), 2560),
+                       np.float32)
+      batch = model_features.apply(
+          batch, spec, refeaturise=featurise, model_dir=model_dir, esm=esm,
+          has_msa=False, fold_input=fold_input, lm_pair=lm_pair)
+    jax.block_until_ready(
+        model_runner.run_inference(batch, jax.random.PRNGKey(0)))
+    print(f'  compiled {model_name} for {n_tokens} tokens in '
+          f'{time.time() - t0:.1f} s')
+  print('Precompiled. Re-run with the same --cache_dir to fold without '
+        'compiling.')
 
 
 def _protein_sequences(fold_input):
@@ -1466,6 +1530,10 @@ def main(_):
     # Check we can load the model parameters before launching anything.
     print('Checking that model parameters can be loaded...')
     _ = model_runner.model_params
+    if _PRECOMPILE.value:
+      _precompile(model_runner, model_name, model_dir,
+                  [int(n) for n in _PRECOMPILE.value])
+      return 0
   else:
     model_runner = None
 
