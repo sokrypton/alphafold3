@@ -41,6 +41,12 @@ import jax.numpy as jnp
 # per-block pair reps when CHAI_TAP_MSA_BLOCKS=1; diagnostic, default empty
 MSA_BLOCK_TAPS = []
 
+# per-block pair reps of the TRUNK stack when ESM_TAP_TRUNK_BLOCKS=1. A stack
+# comparison says a pass is wrong; this says WHICH block, and whether the error
+# is spread evenly (a per-block convention) or concentrated (a mapping error).
+# Those point at different fixes, so it is worth the tap rather than a guess.
+TRUNK_BLOCK_TAPS = []
+
 
 def _stack(num_layer, fn, remat):
   """ColabDesign2: a layer_stack, optionally gradient-checkpointed.
@@ -884,13 +890,32 @@ class Evoformer(hk.Module):
             use_dropout=use_dropout,   # traced; captured from the enclosing call
         )
 
-      pairformer_stack = _stack(self.config.pairformer.num_layer,
-                                pairformer_fn,
-                                self.config.pairformer.block_remat)
+      if os.environ.get('ESM_TAP_TRUNK_BLOCKS') == '1':
+        # Diagnostic only. layer_stack gives each block its OWN weights where a
+        # python loop would share one set, so the blocks still run stacked and
+        # the per-block pair reps ride out as per-layer outputs -- the same
+        # shape as the MSA tap above.
+        TRUNK_BLOCK_TAPS.clear()
 
-      pair_activations, single_activations = pairformer_stack(
-          (pair_activations, single_activations)
-      )
+        def tapped_pairformer(x):
+          out = pairformer_fn(x)
+          return out, out[0]
+
+        (pair_activations, single_activations), per_block = (
+            hk.experimental.layer_stack(self.config.pairformer.num_layer,
+                                        with_per_layer_inputs=True)(
+                                            tapped_pairformer)(
+                                                (pair_activations,
+                                                 single_activations)))
+        TRUNK_BLOCK_TAPS.append(per_block)
+      else:
+        pairformer_stack = _stack(self.config.pairformer.num_layer,
+                                  pairformer_fn,
+                                  self.config.pairformer.block_remat)
+
+        pair_activations, single_activations = pairformer_stack(
+            (pair_activations, single_activations)
+        )
 
       pair_pre_coda = pair_activations
       if pair_only and self.config.coda.num_layer:
