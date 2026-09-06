@@ -459,6 +459,68 @@ def create_relative_encoding(
   return jnp.concatenate(rel_feats, axis=-1)
 
 
+def relative_encoding_segments(
+    seq_features: features.TokenFeatures,
+    max_relative_idx: int,
+    max_relative_chain: int,
+    chain_bucket_on_same_chain: bool = False,
+):
+  """The same encoding as INDICES, so a projection of it can be a gather.
+
+  `create_relative_encoding` returns a concatenation of three one-hots and a
+  boolean, and every consumer immediately contracts it with a weight. That
+  product is a row lookup written as a matmul: for a one-hot block,
+  `one_hot(idx, N) @ W == W[idx]`. Building the one-hot first materialises an
+  (num_tokens, num_tokens, 139) float32 array to do it -- 82 MB at 384 tokens,
+  583 MB at 1024, and it grows with the square of the sequence.
+
+  Returns (pos_idx, width), (token_idx, width), same_entity, (chain_idx, width)
+  -- the same order the concatenation used, so a caller can slice one weight
+  along those blocks and gather.
+  """
+  # Deliberately built by calling nothing: the arithmetic below has to stay
+  # identical to create_relative_encoding above, and the cheapest way to keep
+  # them in step is that a test compares the two.
+  token_index = seq_features.token_index
+  residue_index = seq_features.residue_index
+  asym_id = seq_features.asym_id
+  entity_id = seq_features.entity_id
+  sym_id = seq_features.sym_id
+
+  asym_id_same = asym_id[:, None] == asym_id[None, :]
+  entity_id_same = entity_id[:, None] == entity_id[None, :]
+
+  offset = residue_index[:, None] - residue_index[None, :]
+  if seq_features.cyclic_period is not None:
+    period = jnp.where(seq_features.cyclic_period > 0,
+                       seq_features.cyclic_period,
+                       jnp.full_like(seq_features.cyclic_period, 10000))
+    offset = offset - period[None, :] * jnp.round(offset / period[None, :])
+    offset = offset.astype(residue_index.dtype)
+  clipped = jnp.clip(offset + max_relative_idx, min=0, max=2 * max_relative_idx)
+  rel_pos_idx = jnp.where(asym_id_same, clipped, 2 * max_relative_idx + 1)
+
+  token_offset = token_index[:, None] - token_index[None, :]
+  clipped_token = jnp.clip(
+      token_offset + max_relative_idx, min=0, max=2 * max_relative_idx)
+  residue_same = asym_id_same & (residue_index[:, None] == residue_index[None, :])
+  rel_token_idx = jnp.where(residue_same, clipped_token, 2 * max_relative_idx + 1)
+
+  clipped_chain = jnp.clip(
+      sym_id[:, None] - sym_id[None, :] + max_relative_chain,
+      min=0, max=2 * max_relative_chain)
+  special = 2 * max_relative_chain + 1
+  if chain_bucket_on_same_chain:
+    rel_chain_idx = jnp.where(asym_id_same, special, clipped_chain)
+  else:
+    rel_chain_idx = jnp.where(entity_id_same, clipped_chain, special)
+
+  n_idx = 2 * max_relative_idx + 2
+  n_chain = 2 * max_relative_chain + 2
+  return ((rel_pos_idx, n_idx), (rel_token_idx, n_idx), entity_id_same,
+          (rel_chain_idx, n_chain))
+
+
 def shuffle_msa(
     key: jax.Array, msa: features.MSA
 ) -> tuple[features.MSA, jax.Array]:

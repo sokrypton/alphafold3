@@ -188,6 +188,38 @@ def boltz2_contact_conditioning(contact, threshold, num_channels, dtype):
           + unselected * contact[..., 1:2].astype(dtype))
 
 
+class _RelativeEncodingProjection(hk.Module):
+  """`hm.Linear` over the relative encoding, evaluated as gathers.
+
+  Subclasses hk.Module under the SAME name the Linear had, so the weight keeps
+  its path (`.../position_activations/weights`), its shape (num_features,
+  num_channels) and its initialiser, and every existing checkpoint still loads.
+
+  The encoding is concat([one_hot(pos), one_hot(token), same_entity,
+  one_hot(chain)]), so the contraction splits along those blocks and three of
+  the four are row lookups.
+  """
+
+  def __init__(self, num_channels, name):
+    super().__init__(name=name)
+    self.num_channels = num_channels
+
+  def __call__(self, pos_idx, token_idx, entity_same, chain_idx,
+               n_idx, n_chain, dtype):
+    num_features = 2 * n_idx + 1 + n_chain
+    weights = hk.get_parameter(
+        'weights', (num_features, self.num_channels), dtype,
+        hm._get_initializer_scale('linear', (num_features,)))  # pylint: disable=protected-access
+    w_pos = weights[:n_idx]
+    w_token = weights[n_idx:2 * n_idx]
+    w_entity = weights[2 * n_idx]
+    w_chain = weights[2 * n_idx + 1:]
+    return (w_pos[pos_idx]
+            + w_token[token_idx]
+            + entity_same.astype(dtype)[..., None] * w_entity
+            + w_chain[chain_idx])
+
+
 class Evoformer(hk.Module):
   """Creates 'single' and 'pair' embeddings."""
 
@@ -281,18 +313,25 @@ class Evoformer(hk.Module):
       )(rel_feat)
       return pair_activations
 
-    rel_feat = featurization.create_relative_encoding(
-        seq_features=batch.token_features,
-        max_relative_idx=self.config.max_relative_idx,
-        max_relative_chain=self.config.max_relative_chain,
-        chain_bucket_on_same_chain=(
-            self.global_config.model in model_config.ESMFOLD2_FAMILY),
-    )
-    rel_feat = rel_feat.astype(pair_activations.dtype)
-
-    pair_activations += hm.Linear(
-        self.config.pair_channel, name='position_activations'
-    )(rel_feat)
+    # A GATHER, not a matmul against a one-hot. `position_activations` is a
+    # (139, pair_channel) weight contracted with a concatenation of three
+    # one-hots and a boolean, so each block of it is a row lookup:
+    # one_hot(idx, N) @ W == W[idx]. Building the one-hot first materialises an
+    # (L, L, 139) float32 array -- 82 MB at 384 tokens, 583 MB at 1024, and it
+    # is rebuilt on every recycle. Same weight, same parameter path, same
+    # arithmetic to summation order.
+    (pos_idx, n_idx), (token_idx, _), entity_same, (chain_idx, n_chain) = (
+        featurization.relative_encoding_segments(
+            seq_features=batch.token_features,
+            max_relative_idx=self.config.max_relative_idx,
+            max_relative_chain=self.config.max_relative_chain,
+            chain_bucket_on_same_chain=(
+                self.global_config.model in model_config.ESMFOLD2_FAMILY),
+        ))
+    pair_activations += _RelativeEncodingProjection(
+        self.config.pair_channel, name='position_activations',
+    )(pos_idx, token_idx, entity_same, chain_idx, n_idx, n_chain,
+      dtype=pair_activations.dtype)
     return pair_activations
 
   @hk.transparent
