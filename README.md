@@ -49,19 +49,23 @@ shapes, sampler constants and input conventions are used.
 | `protenix2` | [Protenix-v2](https://github.com/bytedance/Protenix) (ByteDance) | Apache 2.0 |
 | `rosettafold3` | [RoseTTAFold3](https://files.ipd.uw.edu/pub/rf3/) (RosettaCommons) | see upstream |
 | `chai1` | [chai-1](https://github.com/chaidiscovery/chai-lab) (Chai Discovery) | Apache 2.0 |
-| `esmfold2` | [ESMFold2](https://huggingface.co/biohub/ESMFold2) (Arc Institute / CZ Biohub) | see upstream |
-| `esmfold2_fast` | [ESMFold2-Fast](https://huggingface.co/biohub/ESMFold2-Fast) — half the trunk, no MSA encoder | see upstream |
-| `esmfold2_exp` | [ESMFold2-Experimental](https://huggingface.co/biohub/ESMFold2-Experimental) | see upstream |
-| `esmfold2_exp_fast` | [ESMFold2-Experimental-Fast](https://huggingface.co/biohub/ESMFold2-Experimental-Fast) | see upstream |
-| `esmfold2_exp_cutoff2025` | [ESMFold2-Experimental-Cutoff2025](https://huggingface.co/biohub/ESMFold2-Experimental-Cutoff2025) | see upstream |
-| `esmfold2_exp_fast_cutoff2025` | [ESMFold2-Experimental-Fast-Cutoff2025](https://huggingface.co/biohub/ESMFold2-Experimental-Fast-Cutoff2025) | see upstream |
+| `esmfold2` | [ESMFold2](https://huggingface.co/biohub/ESMFold2) (Arc Institute / CZ Biohub) | MIT |
+| `esmfold2_fast` | [ESMFold2-Fast](https://huggingface.co/biohub/ESMFold2-Fast) — half the trunk, no MSA encoder | MIT |
+| `esmfold2_exp` | [ESMFold2-Experimental](https://huggingface.co/biohub/ESMFold2-Experimental) | MIT |
+| `esmfold2_exp_fast` | [ESMFold2-Experimental-Fast](https://huggingface.co/biohub/ESMFold2-Experimental-Fast) | MIT |
+| `esmfold2_exp_cutoff2025` | [ESMFold2-Experimental-Cutoff2025](https://huggingface.co/biohub/ESMFold2-Experimental-Cutoff2025) | MIT |
+| `esmfold2_exp_fast_cutoff2025` | [ESMFold2-Experimental-Fast-Cutoff2025](https://huggingface.co/biohub/ESMFold2-Experimental-Fast-Cutoff2025) | MIT |
+| `esmfold2_lm600m` | [ESMFold2-Experimental-Fast-base600M-step1500k](https://huggingface.co/biohub/ESMFold2-Experimental-Fast-base600M-step1500k) — conditions on **ESM-C 600M**, not 6B | MIT |
 | `protenix05` | [Protenix v0.5.0](https://github.com/bytedance/Protenix) (ByteDance) | Apache 2.0 |
 | `protenix1` | [Protenix-v1](https://github.com/bytedance/Protenix) (ByteDance) | Apache 2.0 |
 | `protenix1_20250630` | [Protenix-v1 2025-06-30](https://github.com/bytedance/Protenix) (ByteDance) | Apache 2.0 |
 | `protenix_mini` | [Protenix mini](https://github.com/bytedance/Protenix) (ByteDance) | Apache 2.0 |
 | `protenix_tiny` | [Protenix tiny](https://github.com/bytedance/Protenix) (ByteDance) | Apache 2.0 |
 
-The six ESMFold2 variants fold from **ESM-C**, not an MSA. Their language-model
+The ESMFold2 variants fold from **ESM-C**, not an MSA. All but `esmfold2_lm600m`
+condition on ESM-C 6B; that one uses the 600M tower, and upstream ships the
+"Experimental" line for paper reproducibility rather than for research use --
+its own card says to prefer plain `esmfold2`. Their language-model
 input is built outside the fold by `converters.esmc_embed` (the tower, published
 int8 at 5.5 GB) and `converters.esmfold2_lm` (the per-model shim, which rides
 along with the weights). Given an MSA instead they fold from that: 5CAJ reads

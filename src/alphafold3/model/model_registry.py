@@ -771,7 +771,11 @@ MODEL_SPECS = {
     # ESMFold2 carries a trained Fourier noise embedding like the OF3 lineage,
     # but is not OpenFold-derived, so it is named rather than inherited -- the
     # same reason chai1 is named.
+    # MIT, stated on every card in the family (with a third-party notice
+    # alongside it). We were emitting "we have not established" while actively
+    # redistributing these weights, which understated what the cards say.
     **{m: ModelSpec(m, trained_fourier=True,
+                    weights_licence='the MIT License',
                     weights_source='https://huggingface.co/biohub/%s' % hub)
        for m, hub in ESMFOLD2_HUB_IDS.items()},
 }
