@@ -41,9 +41,9 @@ class _Converters(dict):
   """The converter registry, imported on first use.
 
   Lazily, because importing a converter pulls in alphafold3 (for the blob
-  format) and numpy, and not every environment that needs this package has
-  them: uploading needs huggingface_hub and nothing else, and a publish-time
-  check that silently no-ops where it cannot import is worse than no check.
+  format) and numpy, and not every caller of this package has them -- the
+  registry itself is just a name table, and reading it should not require the
+  whole model to be importable.
   """
 
   def __missing__(self, key):
