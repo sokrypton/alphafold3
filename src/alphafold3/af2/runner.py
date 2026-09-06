@@ -361,7 +361,7 @@ class AF2Runner:
     w = jnp.asarray(inputs['opt'].get('profile_gap', 0.0), prf.dtype)
     gap = jnp.zeros(prf.shape[-1], prf.dtype).at[21].set(1.0)
     prf = (1.0 - w) * prf + w * gap
-    return {
+    out = {
         'msa': one_hot,
         'cluster_profile': prf,
         'target_feat': one_hot[0, :, :20],
@@ -369,6 +369,32 @@ class AF2Runner:
         'deletion_matrix': jnp.zeros(one_hot.shape[:2]),
         'msa_mask': jnp.ones(one_hot.shape[:2]),
     }
+
+    # A real alignment, if one was featurised (alphafold3.af2.features.
+    # msa_features). It goes BENEATH the rows this function just built, never in
+    # place of them: row 0 stays the sequence under design, so the gradient
+    # reaches the MSA path the same way it reaches the single-sequence one, and
+    # prediction is still the same code with a peaked one-hot. The extra rows
+    # are constants -- indices, not logits -- so they carry no gradient.
+    #
+    # target_feat and aatype are read off row 0 above and stay there: they are
+    # the QUERY's features, and taking them from a padded alignment would let a
+    # homolog decide what is being folded.
+    extra = inputs.get('msa_extra')
+    if extra is not None:
+      rows = jax.nn.one_hot(jnp.asarray(extra), one_hot.shape[-1])
+      dels = jnp.asarray(inputs['deletion_matrix_extra'], jnp.float32)
+      out['msa'] = jnp.concatenate([out['msa'], rows], 0)
+      out['deletion_matrix'] = jnp.concatenate([out['deletion_matrix'], dels], 0)
+      out['msa_mask'] = jnp.concatenate(
+          [out['msa_mask'], jnp.ones(rows.shape[:2])], 0)
+      # cluster_profile has to grow with it. sample_msa subsamples msa,
+      # deletion_matrix and msa_mask but NOT cluster_profile, so leaving it at
+      # the designed depth desynchronises the two and create_msa_feat fails on
+      # the concatenate. Build the runner with use_cluster_profile=True and
+      # nearest_neighbor_clusters overwrites this with the real thing.
+      out['cluster_profile'] = jnp.concatenate([prf, rows], 0)
+    return out
 
   def update_seq(self, seq, inputs, pssm=None):
     '''sequence -> msa_feat / target_feat, v1's update_seq

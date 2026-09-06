@@ -106,7 +106,8 @@ def protein_chains(fold_input):
 
 
 def featurise_input(fold_input, num_seq: int = 1, num_templates: int = 1,
-                    chain_break: int | None = None) -> tuple[dict, str]:
+                    chain_break: int | None = None,
+                    use_msa: bool = True) -> tuple[dict, str]:
   '''-> (AF2 input dict, the concatenated one-letter sequence)
 
   The sequence comes back alongside because `AF2Runner.predict` takes it
@@ -154,6 +155,11 @@ def featurise_input(fold_input, num_seq: int = 1, num_templates: int = 1,
   inputs['sym_id'] = np.concatenate(sym_id).astype(float)
   inputs['entity_id'] = np.concatenate(entity_id).astype(float)
 
+  if use_msa:
+    extra = msa_features(fold_input, L)
+    if extra is not None:
+      inputs.update(extra)
+
   return inputs, ''.join(seqs)
 
 
@@ -166,3 +172,84 @@ def aatype_from_sequence(seq: str) -> np.ndarray:
   '''
   order = rc.restype_order
   return np.array([order.get(a, rc.restype_num) for a in seq], dtype=int)
+
+
+# ----------------------------------------------------------------------- MSA
+
+def parse_a3m(a3m: str, length: int) -> tuple[np.ndarray, np.ndarray]:
+  '''an A3M alignment -> (msa, deletion_matrix), both (num_seq, length)
+
+  `msa` is indices into `residue_constants.restypes_with_x_and_gap`, so 20 is X
+  and 21 is a gap -- the 22-wide alphabet AF2's msa one-hot uses.
+
+  A3M writes insertions relative to the query in LOWERCASE. They occupy no
+  aligned column, so they are dropped from `msa` and counted into
+  `deletion_matrix` at the column that follows them, which is what AF2's
+  has_deletion / deletion_value channels read.
+  '''
+  order = rc.restype_order_with_x
+  gap = len(rc.restypes_with_x_and_gap) - 1     # 21
+  unknown = rc.restype_num                      # 20, i.e. X
+
+  msa, deletions = [], []
+  for block in a3m.split('>')[1:]:
+    lines = block.split('\n')
+    seq = ''.join(lines[1:]).strip()
+    if not seq:
+      continue
+    row = np.full(length, gap, dtype=np.int8)
+    dels = np.zeros(length, dtype=np.float32)
+    col = pending = 0
+    for ch in seq:
+      if ch.islower():
+        pending += 1
+        continue
+      if col >= length:
+        raise ValueError(
+            f'A3M row is longer than the query ({length} aligned columns); '
+            'the alignment does not match the sequence it is attached to')
+      row[col] = gap if ch == '-' else order.get(ch.upper(), unknown)
+      dels[col] = pending
+      col, pending = col + 1, 0
+    if col != length:
+      raise ValueError(
+          f'A3M row has {col} aligned columns, query has {length}')
+    msa.append(row)
+    deletions.append(dels)
+
+  if not msa:
+    raise ValueError('no sequences in A3M')
+  return np.stack(msa), np.stack(deletions)
+
+
+def msa_features(fold_input, length: int) -> dict | None:
+  '''-> {'msa_extra', 'deletion_matrix_extra'} for the chain's alignment, or None
+
+  The QUERY row is deliberately not included. `AF2Runner` writes row 0 itself
+  from `params['seq']`, which is what keeps one code path for prediction and
+  design; these are the rows stacked BENEATH it, and they are constants.
+
+  Single chain only. Multi-chain alignments need MSA pairing -- rows matched
+  across chains by species, with the unpaired remainder block-diagonal -- and
+  guessing at that would produce an alignment that looks right and pairs the
+  wrong organisms. Raises instead.
+  '''
+  chains = protein_chains(fold_input)
+  a3ms = [(c, (c.unpaired_msa or '') + (c.paired_msa or '')) for c in chains]
+  if not any(text.strip() for _c, text in a3ms):
+    return None
+  if len(chains) > 1:
+    raise NotImplementedError(
+        'MSA input is single-chain only for now: a multi-chain alignment needs '
+        'MSA pairing (rows matched across chains by species, unpaired remainder '
+        'block-diagonal), and an unpaired concatenation would look like an '
+        'alignment while pairing the wrong organisms. Fold multi-chain inputs '
+        'without an MSA, or use an AF3-family model.')
+
+  chain, text = a3ms[0]
+  msa, deletions = parse_a3m(text, length)
+  # Row 0 of an A3M is the query itself, which the runner supplies.
+  if len(msa) > 1 and ''.join(
+      rc.restypes_with_x_and_gap[i] for i in msa[0]) == chain.sequence:
+    msa, deletions = msa[1:], deletions[1:]
+  return {'msa_extra': msa, 'deletion_matrix_extra': deletions}

@@ -28,6 +28,15 @@ _NEG = 1e8
 def dot_product_attention(q, k, v, *, mask=None, bias=None, implementation=None,
                           scale=None):
   '''tokamax.dot_product_attention, guarded so cuDNN backprop works at odd lengths.'''
+  # cuDNN's fused attention takes fp16/bf16 only, and rejects fp32 from several
+  # frames inside jax with "Q must be fp16/bf16/fp8_e4m3fn/fp8_e5m2" -- a message
+  # that names neither the caller nor the tensor. Dispatching to it in fp32 is
+  # never right, so fall back to XLA, which is what a non-Ada machine would have
+  # picked anyway. Surfaced by folding with a real MSA at use_bfloat16=False:
+  # the MSA axis is deep enough to cross the flash-attention length threshold,
+  # which single-sequence design never does.
+  if implementation == 'cudnn' and q.dtype == jnp.float32:
+    implementation = 'xla'
   if implementation == 'cudnn':
     Q, K = q.shape[-3], k.shape[-3]
     padq, padk = Q % 2, K % 2
