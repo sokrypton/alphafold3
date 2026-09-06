@@ -616,6 +616,12 @@ class ModelSpec:
                'weights_repo', 'weights_file', 'weights_prefix', 'weights_licence',
                'weights_source')
 
+  # Which network this spec's weights run on. Everything in MODELS rides the
+  # AF3 graph; AF2 does not (see AF2Spec). Read this rather than testing the
+  # name against a tuple -- a name test is the thing that silently admits a new
+  # model to the wrong graph.
+  engine = 'af3'
+
   def __init__(self, name, full_fat=False, trained_fourier=None,
                weights_repo=_WEIGHTS_REPO, weights_file=None,
                weights_licence=None, weights_source=None):
@@ -752,6 +758,66 @@ class ModelSpec:
     return config
 
 
+
+class AF2Spec:
+  """A model that runs on the vendored AlphaFold 2 network, not the AF3 graph.
+
+  Deliberately NOT a subclass of ModelSpec. Every attribute ModelSpec carries --
+  full_fat, trained_fourier, featurise, a converted `.bin.zst` blob -- describes
+  the AF3 graph, and inheriting them would give an AF2 model a set of settings
+  that look meaningful and are not. What the two share is what a caller actually
+  needs: a name, an engine, and enough licence provenance to write output terms.
+
+  AF2's parameters are not converted and not republished. They are DeepMind's
+  own `params_model_*.npz` from the AlphaFold 2 release, read straight from
+  `--model_dir`, which is why there is no weights_file here.
+  """
+
+  __slots__ = ('name', 'model_type', 'weights_licence', 'weights_source')
+
+  engine = 'af2'
+
+  def __init__(self, name, model_type, weights_licence=None,
+               weights_source=None):
+    from alphafold3.model import model_config
+
+    if name not in model_config.AF2_MODELS:
+      raise ValueError(
+          f'unknown AF2 model {name!r}; known: {list(model_config.AF2_MODELS)}')
+    self.name = name
+    # What `alphafold3.af2.runner.AF2Runner(model_type=...)` wants. The runner
+    # keeps ColabDesign's names because its own branches are keyed on them.
+    self.model_type = model_type
+    self.weights_licence = weights_licence
+    self.weights_source = weights_source
+
+  def default_model_names(self, use_templates=False):
+    from alphafold3.af2 import runner as af2_runner
+    return af2_runner.default_model_names(self.model_type, use_templates)
+
+  def output_terms(self):
+    return (
+        '# OUTPUT TERMS OF USE\n\n'
+        f'These structure predictions were generated with AlphaFold 2 '
+        f'({self.name}) parameters,\n'
+        'run through the AlphaFold 2 network vendored in this package.\n\n'
+        'The AlphaFold 3 Output Terms of Use do NOT apply: no AlphaFold 3\n'
+        'parameters were used. What applies is the licence the AlphaFold 2\n'
+        f'parameters are distributed under -- {self.weights_licence} --\n'
+        f'see {self.weights_source}.\n')
+
+
+AF2_SPECS = {
+    'af2_ptm': AF2Spec(
+        'af2_ptm', 'alphafold2_ptm',
+        weights_licence='CC BY 4.0',
+        weights_source='https://github.com/google-deepmind/alphafold'),
+    'af2_multimer': AF2Spec(
+        'af2_multimer', 'alphafold2_multimer_v3',
+        weights_licence='CC BY 4.0',
+        weights_source='https://github.com/google-deepmind/alphafold'),
+}
+
 MODEL_SPECS = {
     'alphafold3': ModelSpec('alphafold3', trained_fourier=False,
                             weights_repo=None, weights_file='af3.bin.zst'),
@@ -817,6 +883,8 @@ MODEL_SPECS = {
 # Historical / abbreviated spellings, kept working.
 ALIASES = {
     'af3': 'alphafold3',
+    'af2': 'af2_ptm', 'alphafold2': 'af2_ptm', 'af2_monomer': 'af2_ptm',
+    'af2_multimer_v3': 'af2_multimer', 'alphafold2_multimer': 'af2_multimer',
     'of3': 'openfold3',
     'if2': 'intellifold2', 'intellifold': 'intellifold2',
     'protenix': 'protenix2',
@@ -832,10 +900,15 @@ ALIASES = {
 
 
 def get(name):
-  """-> the ModelSpec for a model name or historical alias."""
+  """-> the ModelSpec (AF3 graph) or AF2Spec (AF2 network) for a name or alias.
+
+  Check `spec.engine` before assuming which graph you have: 'af3' for everything
+  in MODELS, 'af2' for the AlphaFold 2 models.
+  """
   key = ALIASES.get(name, name)
-  spec = MODEL_SPECS.get(key)
+  spec = MODEL_SPECS.get(key) or AF2_SPECS.get(key)
   if spec is None:
-    raise ValueError(f'unknown model {name!r}; known: {sorted(MODEL_SPECS)} '
+    known = sorted(list(MODEL_SPECS) + list(AF2_SPECS))
+    raise ValueError(f'unknown model {name!r}; known: {known} '
                      f'(aliases {sorted(ALIASES)})')
   return spec

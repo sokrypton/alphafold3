@@ -79,6 +79,28 @@ MODELS = (
     'esmfold2_lm300m',
 )
 
+# AlphaFold 2, which is NOT in MODELS above and must not be: every name there is
+# a set of weights for THIS graph, selected by `global_config.model`, and AF2
+# does not ride this graph at all. Its trunk is MSA row/column attention where
+# AF3 uses pair-weighted averaging, and its head is IPA over backbone frames and
+# torsions where AF3 diffuses coordinates -- there is no weight transform
+# between those. AF2 is a sibling network under `alphafold3.af2`, reached by its
+# own runner, and these names exist so that one registry can offer every model
+# this package can run.
+#
+# `af2_ptm` covers the monomer pTM models and `af2_multimer` the multimer_v3
+# ones. Both run on ONE graph: a monomer checkpoint is converted onto the
+# multimer network at load (alphafold3.af2.convert), which is the same trick the
+# AF3-family ports use, one model generation down.
+AF2_MODELS = (
+    'af2_ptm',
+    'af2_multimer',
+)
+
+# Every model this package can run, whichever graph it rides. Use this for a
+# user-facing list; use MODELS for anything that indexes the AF3 graph.
+ALL_MODELS = MODELS + AF2_MODELS
+
 
 # The ESMFold2 family. Like PROTENIX_FAMILY, the members differ only in COUNTS
 # -- 24 or 48 trunk blocks -- so every forward branch one takes, all take.

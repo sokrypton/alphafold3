@@ -173,8 +173,15 @@ class RegistryTest(parameterized.TestCase):
     ONLY models. Tables keyed by something else entirely (AFFINE_LAYER_NORMS is
     keyed by the LayerNorm's name) match no model and are skipped, while their
     VALUES -- which are model tuples -- are checked.
+
+    AF2_MODELS and ALL_MODELS are the exceptions, and they exist precisely to
+    name models that do NOT ride this graph, so they are exempt from the rule
+    and drive the converse check instead.
     """
     known = set(model_config.MODELS)
+    af2 = set(model_config.AF2_MODELS)
+    # The two tables that exist precisely to name models NOT on this graph.
+    exempt = ('AF2_MODELS', 'ALL_MODELS')
 
     def check(where, names):
       names = [n for n in names if isinstance(n, str)]
@@ -184,17 +191,33 @@ class RegistryTest(parameterized.TestCase):
       self.assertEmpty(stale, '%s names %s, which is not in model_config.MODELS'
                        % (where, stale))
 
+    def check_no_af2(where, names):
+      '''...and the same silent failure arriving from the other direction.
+
+      Every other table in model_config is a forward-branch membership table
+      for THIS graph. An AlphaFold 2 name in one is a name that can never
+      match, so the branch is simply dead -- no error, exactly like a stale
+      rename.
+      '''
+      leaked = sorted(set(n for n in names if isinstance(n, str)) & af2)
+      self.assertEmpty(
+          leaked, '%s names %s, which run on the AlphaFold 2 network and can '
+          'never match a branch in this graph' % (where, leaked))
+
     for attr in dir(model_config):
-      if attr.startswith('_'):
+      if attr.startswith('_') or attr in exempt:
         continue
       value = getattr(model_config, attr)
       if isinstance(value, tuple):
         check('model_config.%s' % attr, list(value))
+        check_no_af2('model_config.%s' % attr, list(value))
       elif isinstance(value, dict):
         check('model_config.%s keys' % attr, list(value))
+        check_no_af2('model_config.%s keys' % attr, list(value))
         for key, val in value.items():
           if isinstance(val, tuple):
             check('model_config.%s[%r]' % (attr, key), list(val))
+            check_no_af2('model_config.%s[%r]' % (attr, key), list(val))
 
   def test_every_featurise_knob_is_actually_consumed(self):
     """A declared knob that nothing reads is a silent no-op.

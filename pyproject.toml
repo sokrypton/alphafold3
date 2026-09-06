@@ -17,6 +17,10 @@ license = {file = "LICENSE"}
 dependencies = [
     "absl-py>=2.3.1",
     "dm-haiku==0.0.17",
+    # AlphaFold 2's own config objects and tree utilities. Only alphafold3.af2
+    # needs these; the AF3-family graph does not touch them.
+    "dm-tree",
+    "ml_collections",
     "etils[epath]",
     "jax==0.10.2",
     "jax[cuda12]==0.10.2; sys_platform != 'darwin'",
