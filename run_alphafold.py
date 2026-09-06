@@ -518,14 +518,16 @@ _CYCLIC = flags.DEFINE_list(
     ' and a chain left out is byte-identical to before.',
 )
 _WEIGHTS_PRECISION = flags.DEFINE_enum(
-    'weights_precision', 'fp32', ['fp32', 'fp16', 'int8'],
-    'Which published form of the weights to fetch. fp32 is what the converters'
-    ' write and the default. fp16 and int8 are the same weights stored smaller'
-    ' (12.4 GB of models becomes 6.4 or 2.6), expanded on load, which is worth'
-    ' it on a metered or slow connection such as Colab. Measured cost of int8'
-    ' on rosettafold3: within sampling noise on protein, ligand, RNA and a'
-    ' D/L peptide, with stereochemistry unchanged -- see docs/ported_models.md.'
-    ' Ignored when --model_dir points at weights you already have.')
+    'weights_precision', 'int8', ['fp32', 'fp16', 'int8'],
+    'Which published form of the weights to fetch. int8 is the DEFAULT: the same'
+    ' weights stored smaller (12.4 GB of models becomes 2.6) and expanded on'
+    ' load, which is what makes them practical on a metered or slow connection'
+    ' such as Colab. Measured cost on rosettafold3: within sampling noise on'
+    ' protein, ligand, RNA and a D/L peptide, with stereochemistry unchanged --'
+    ' see docs/ported_models.md; every published int8 blob is gated by'
+    ' dev/int8_roundtrip_check.py at the 1/256 int8 floor. fp32 is published too'
+    ' and is the exact bytes the converters wrote, if you want them. Ignored'
+    ' when --model_dir points at weights you already have.')
 
 _PRECOMPILE = flags.DEFINE_list(
     'precompile',
