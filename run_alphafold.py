@@ -485,29 +485,21 @@ _MODEL = flags.DEFINE_enum(
     ' --out DIR), so a run never needs torch or the original checkpoint.',
 )
 
-_ESM_EMBEDDINGS = flags.DEFINE_string(
-    'esm_embeddings',
-    None,
-    'Path to an npz of precomputed ESM2 token embeddings, as written by'
-    ' `python -m converters.esm_lm --family esm2`. Only chai-1 reads them, and running it'
-    ' without them is running a different model: its token feature stream is'
-    ' mostly ESM2, and a natural protein folds to 5.70 A without them where'
-    ' chai-1 reaches 0.642. They are precomputed because chai ships ESM as a'
-    ' TorchScript archive; converters.esm_lm converts and runs it, so this'
-    ' is a precompute step rather than a torch dependency.',
+_USE_ESM_EMBEDDINGS = flags.DEFINE_bool(
+    'use_esm_embeddings',
+    False,
+    'Run this model with its protein language model. Two of the ported models'
+    ' fold from one and are a different model without it: chai-1 from ESM2 3B'
+    ' (its token feature stream is mostly ESM2 -- a natural protein folds to'
+    ' 5.70 A without it where chai-1 reaches 0.642), and ESMFold2 from ESM-C,'
+    ' which is its alternative to an MSA rather than an extra on top of one --'
+    ' a variant with no MSA encoder folds to ~14 A without it.'
+    ' The tower runs in-process and is downloaded on demand (2.4 GB for ESM2,'
+    ' 5.1 GB for ESM-C 6B), which is why this is opt-in rather than the'
+    ' default. WHICH tower is read from the model, not chosen here: ESMFold2'
+    ' variants are trained against step-matched ESM-C snapshots.',
 )
 
-_LM_PAIR = flags.DEFINE_string(
-    'lm_pair',
-    None,
-    'ESMFold2 only: its language-model PAIR representation, built from ESM-C.'
-    ' ESM-C is ESMFold2\'s alternative to an MSA, not an extra on top of one,'
-    ' and a variant with no MSA encoder folds to ~14 A without it. Either a'
-    ' path to an npz (a `lm_pair` array, or the `lm_hidden` states written by'
-    ' `python -m converters.esm_lm --family esmc`, which are run through this'
-    ' model\'s own shim), or `auto` to run the tower in-process -- which'
-    ' downloads it on demand (5.5 GB for the 6B tier), so it is opt-in.',
-)
 _FEATURISE_OFF = flags.DEFINE_list(
     'featurise_off',
     [],
@@ -791,51 +783,59 @@ class ResultsForSeed:
   distogram: np.ndarray | None = None
 
 
-def _resolve_lm_pair(spec, fold_input, model_runner):
-  """--lm_pair -> the (num_tokens, num_tokens, c_z) array, or None.
+def _protein_sequences(fold_input):
+  return [c.sequence for c in fold_input.chains
+          if isinstance(c, folding_input.ProteinChain)]
 
-  Resolved HERE rather than in main because `auto` depends on the sequence, and
-  one run can hold several fold inputs. The shim is the model's own -- every
-  ESMFold2 release trains its own, and feeding one variant another's reads corr
-  0.026 against native, so it is loaded from the model directory by name.
+
+def _resolve_esm(use_esm, fold_input, model_runner):
+  """--use_esm_embeddings -> (esm2_rows, esmc_pair), either of which may be None.
+
+  Both families fold from a language model, but they consume different things:
+  chai-1 takes ESM2's last hidden state as a TOKEN feature, and ESMFold2 takes
+  ESM-C's states through its own shim to become a PAIR representation. One flag
+  covers both because the choice is the model's, not the user's.
+
+  Resolved HERE rather than in main because it depends on the sequence, and one
+  run can hold several fold inputs.
   """
-  if spec is None or isinstance(spec, np.ndarray):
-    return spec
-  from converters import esmfold2 as esmfold2_converter
-
-  model_name = model_runner.model_name
-  shim = esmfold2_converter.load_shim_params(model_runner.model_dir, model_name)
-  if spec != 'auto':
-    z = np.load(os.path.expanduser(spec), allow_pickle=True)
-    if hasattr(z, 'files'):
-      if 'lm_pair' in z.files:
-        return z['lm_pair']
-      hidden = z['lm_hidden' if 'lm_hidden' in z.files else z.files[0]]
-    else:
-      hidden = z
-    return esmfold2_converter.shim(hidden, shim)
-
-  from alphafold3.model import model_registry, weights as weights_lib
+  if not use_esm:
+    return None, None
+  from alphafold3.model import weights as weights_lib
   from converters import esm_lm
 
-  sequences = [c.sequence for c in fold_input.chains
-               if isinstance(c, folding_input.ProteinChain)]
+  model_name = model_runner.model_name
+  sequences = _protein_sequences(fold_input)
+
+  if model_name == 'chai1':
+    print('Running the ESM2 tower for chai-1...')
+    # Multi-chain is fine here: the rows are concatenated in chain order and
+    # land on the batch's protein tokens in that order.
+    rows = esm_lm.embed(sequences, weights_lib.default_dir('esm2'), 'esm2')
+    print(f'ESM2 embeddings {rows.shape}')
+    return rows, None
+
+  from alphafold3.model import model_registry
+  from converters import esmfold2 as esmfold2_converter
   if len(sequences) != 1:
     # ESM-C wraps multiple chains as [EOS, BOS]-separated with a sequence_id
     # that restricts attention within a chain. That is implemented in the tower
     # but not gated against native, so refuse rather than fold something
     # plausible-looking.
     raise ValueError(
-        f'--lm_pair auto handles a single protein chain; this input has '
-        f'{len(sequences)}. Precompute it instead, or fold from an MSA.')
+        f'--use_esm_embeddings handles a single protein chain for ESMFold2; '
+        f'this input has {len(sequences)}. Fold from an MSA instead.')
   tower = model_registry.ESMFOLD2_VARIANTS[model_name]['esmc']
-  print(f'Running the {tower} tower for {model_name} (--lm_pair auto)...')
+  print(f'Running the {tower} tower for {model_name}...')
   # default_dir at fp32 on purpose, whatever --weights_precision says: a tower
   # is only ever int8 (converters.esm_lm.QUANT_SCHEME), so it has one directory
   # rather than one per precision.
   hidden = esm_lm.embed(sequences[0], weights_lib.default_dir(tower),
                         'esmc', tower)
-  return esmfold2_converter.shim(hidden, shim)
+  # The shim is the model's own -- every ESMFold2 release trains one, and
+  # feeding a variant another's reads corr 0.026 against native.
+  shim = esmfold2_converter.load_shim_params(model_runner.model_dir, model_name)
+  return None, esmfold2_converter.shim(hidden, shim)
 
 
 def predict_structure(
@@ -847,8 +847,7 @@ def predict_structure(
     conformer_max_iterations: int | None = None,
     resolve_msa_overlaps: bool = True,
     fix_standalone_glycans: bool = False,
-    esm_embeddings: np.ndarray | None = None,
-    lm_pair: str | np.ndarray | None = None,
+    use_esm: bool = False,
     featurise_off: Sequence[str] = (),
     cyclic: bool | Sequence[str] = False,
 ) -> Sequence[ResultsForSeed]:
@@ -892,7 +891,8 @@ def predict_structure(
     )
     # Once, not once per seed: the examples below differ only by rng seed, and
     # `auto` runs a multi-billion-parameter tower.
-    lm_pair_array = _resolve_lm_pair(lm_pair, fold_input, model_runner)
+    esm_embeddings, lm_pair_array = _resolve_esm(
+        use_esm, fold_input, model_runner)
     featurised_examples = [
         model_features.apply(
             example, spec,
@@ -1071,8 +1071,7 @@ def process_fold_input(
     model_runner: None,
     output_dir: epath.PathLike,
     buckets: Sequence[int] | None = None,
-    esm_embeddings: np.ndarray | None = None,
-    lm_pair: str | np.ndarray | None = None,
+    use_esm: bool = False,
     featurise_off: Sequence[str] = (),
     cyclic: bool | Sequence[str] = False,
     ref_max_modified_date: datetime.date | None = None,
@@ -1094,8 +1093,7 @@ def process_fold_input(
     model_runner: ModelRunner,
     output_dir: epath.PathLike,
     buckets: Sequence[int] | None = None,
-    esm_embeddings: np.ndarray | None = None,
-    lm_pair: str | np.ndarray | None = None,
+    use_esm: bool = False,
     featurise_off: Sequence[str] = (),
     cyclic: bool | Sequence[str] = False,
     ref_max_modified_date: datetime.date | None = None,
@@ -1116,8 +1114,7 @@ def process_fold_input(
     model_runner: ModelRunner | None,
     output_dir: epath.PathLike,
     buckets: Sequence[int] | None = None,
-    esm_embeddings: np.ndarray | None = None,
-    lm_pair: str | np.ndarray | None = None,
+    use_esm: bool = False,
     featurise_off: Sequence[str] = (),
     cyclic: bool | Sequence[str] = False,
     ref_max_modified_date: datetime.date | None = None,
@@ -1214,8 +1211,7 @@ def process_fold_input(
         fold_input=fold_input,
         model_runner=model_runner,
         buckets=buckets,
-        esm_embeddings=esm_embeddings,
-        lm_pair=lm_pair,
+        use_esm=use_esm,
         featurise_off=featurise_off,
         cyclic=cyclic,
         ref_max_modified_date=ref_max_modified_date,
@@ -1397,24 +1393,17 @@ def main(_):
   cyclic = _CYCLIC.value or False
   if cyclic and [c.lower() for c in cyclic] == ['all']:
     cyclic = True
-  esm_embeddings = None
-  if _ESM_EMBEDDINGS.value:
-    esm_embeddings = np.load(_ESM_EMBEDDINGS.value, allow_pickle=True)['esm']
-    print(f'Loaded ESM embeddings {esm_embeddings.shape} from '
-          f'{_ESM_EMBEDDINGS.value}')
-  elif model_name == 'chai1':
-    print('WARNING: chai-1 is running WITHOUT ESM embeddings. Its token feature'
-          ' stream is mostly ESM2; see --esm_embeddings.')
-  lm_pair = _LM_PAIR.value
-  if lm_pair and model_name not in model_config.ESMFOLD2_FAMILY:
-    raise ValueError(f'--lm_pair is ESMFold2-only, and {model_name} is not in '
-                     'that family')
-  if not lm_pair and model_name in model_config.ESMFOLD2_FAMILY:
-    # Silent until now, and the cost is not subtle: ESM-C is ESMFold2's
-    # alternative to an MSA, so a variant with no MSA encoder has nothing left
-    # to fold from and reads ~14 A on a target it otherwise gets to 0.7.
-    print('WARNING: %s is running WITHOUT its ESM-C language model. It is the'
-          ' alternative to an MSA, not an extra on top of one; see --lm_pair.'
+  use_esm = _USE_ESM_EMBEDDINGS.value
+  wants_esm = model_name == 'chai1' or model_name in model_config.ESMFOLD2_FAMILY
+  if use_esm and not wants_esm:
+    raise ValueError(
+        f'--use_esm_embeddings is for chai-1 and the ESMFold2 family; '
+        f'{model_name} does not read a language model')
+  if not use_esm and wants_esm:
+    # Silent until now, and the cost is not subtle for either family: see the
+    # flag's help.
+    print('WARNING: %s is running WITHOUT its language model, which is part of'
+          ' the model rather than an extra; see --use_esm_embeddings.'
           % model_name)
   if MODEL_DIR.value is not None:
     model_dir = MODEL_DIR.value
@@ -1501,8 +1490,7 @@ def main(_):
         buckets=None
         if _NOJIT.value
         else tuple(int(bucket) for bucket in _BUCKETS.value),
-        esm_embeddings=esm_embeddings,
-        lm_pair=lm_pair,
+        use_esm=use_esm,
         featurise_off=_FEATURISE_OFF.value,
         cyclic=cyclic,
         ref_max_modified_date=max_template_date,

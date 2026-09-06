@@ -162,15 +162,29 @@ python run_alphafold.py \
 
 ### chai-1 needs ESM2 embeddings
 
-chai-1 folds with ESM2 token embeddings, which are most of its token feature
-stream — without them it is a different model (a natural protein folds to 5.70 Å
-where chai reaches 0.642). Precompute them once, in whatever environment has
-chai's traced ESM archive, and pass them in:
+Two of the models fold from a protein language model, and are a different model
+without it: chai-1 from ESM2 3B, whose token embeddings are most of its token
+feature stream (a natural protein folds to 5.70 Å without them where chai
+reaches 0.642), and ESMFold2 from ESM-C, which is its alternative to an MSA
+rather than an extra on top of one (a variant with no MSA encoder folds to
+~14 Å without it).
+
+Both towers are converted and run here, in jax, so one flag covers both. Which
+tower is right is read from the model, not chosen on the command line —
+ESMFold2's variants are trained against step-matched ESM-C snapshots:
 
 ```bash
-python converters/esm_lm.py --sequence MQIFVKT... --out esm.npz
-python run_alphafold.py --model=chai1 --esm_embeddings=esm.npz ...
+python run_alphafold.py --model=chai1         --use_esm_embeddings ...
+python run_alphafold.py --model=esmfold2_fast --use_esm_embeddings ...
 ```
+
+The tower runs in-process and is downloaded on demand (2.4 GB for ESM2, 5.1 GB
+for ESM-C 6B), which is why it is opt-in rather than the default. Running one of
+these models without the flag warns, because the result is a different model
+rather than a slightly worse one.
+
+`converters/esm_lm.py` also runs either tower standalone, if you want the hidden
+states themselves rather than a fold.
 
 ### Cyclic chains
 
