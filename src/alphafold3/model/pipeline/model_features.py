@@ -304,15 +304,29 @@ def _attach_lm_pair(batch, lm_pair):
   """ESMFold2's language-model PAIR representation, from alphafold3.model.esm.
 
   (num_tokens, num_tokens, c_z), built outside the fold from ESM-C's hidden
-  states. Attached verbatim: unlike the ESM2 token embeddings, this is already
-  in the trunk's own pair layout, so there is no scatter onto protein tokens to
-  get wrong -- but it does have to be the SAME token order the featuriser laid
-  out, which is why it is keyed to the batch rather than to the input JSON.
+  states. It has to be in the SAME token order the featuriser laid out, which is
+  why it is keyed to the batch rather than to the input JSON.
+
+  ESM-C is a PROTEIN language model, so a pair rep covering only the protein
+  tokens is scattered into the full token grid with zeros elsewhere -- the same
+  thing `_attach_esm` does for chai-1's ESM2, and the only sensible reading of
+  "no language-model information about this token". Note that native ESMFold2
+  has no non-protein path at all (its featuriser takes sequences), so a ligand
+  or nucleic-acid chain is out of distribution for the model however this term
+  is filled.
   """
   lm = np.asarray(lm_pair, np.float32)
   n = np.asarray(batch['token_index']).shape[-1]
   if lm.shape[:2] != (n, n):
-    raise ValueError(f'lm_pair is {lm.shape[:2]} but the batch has {n} tokens')
+    is_protein = np.asarray(batch['is_protein']).astype(bool)
+    idxs = np.flatnonzero(is_protein)
+    if lm.shape[:2] != (len(idxs), len(idxs)):
+      raise ValueError(
+          f'lm_pair is {lm.shape[:2]} but the batch has {n} tokens '
+          f'({len(idxs)} of them protein)')
+    full = np.zeros((n, n, lm.shape[-1]), np.float32)
+    full[np.ix_(idxs, idxs)] = lm
+    lm = full
   batch['lm_pair'] = lm
   return batch
 

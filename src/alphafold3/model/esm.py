@@ -97,9 +97,12 @@ def _require_jax():
 
 
 def _layer_norm(x, scale, offset=0.0, eps=1e-5):
+  dtype = x.dtype
+  x = x.astype(jnp.float32)                      # the reduction, always in f32
   m = x.mean(-1, keepdims=True)
   v = x.var(-1, keepdims=True)
-  return (x - m) * jax.lax.rsqrt(v + eps) * scale + offset
+  out = (x - m) * jax.lax.rsqrt(v + eps) * scale + offset
+  return out.astype(dtype)
 
 
 def _rope(x, pos, base=10000.0):
@@ -112,16 +115,35 @@ def _rope(x, pos, base=10000.0):
   d = x.shape[-1]
   inv = 1.0 / (base ** (np.arange(0, d, 2, dtype=np.float32) / d))
   fr = pos[:, None] * inv[None, :]
-  c, s = jnp.cos(fr)[:, None], jnp.sin(fr)[:, None]
+  # cast to x's dtype: the angles are computed in float32 (they must be -- the
+  # position index is exact there and not in bfloat16), but leaving them float32
+  # would promote the residual stream back up and break the scan carry.
+  c = jnp.cos(fr)[:, None].astype(x.dtype)
+  s = jnp.sin(fr)[:, None].astype(x.dtype)
   x1, x2 = x[..., :d // 2], x[..., d // 2:]
   return jnp.concatenate([x1 * c - x2 * s, x1 * s + x2 * c], -1)
 
 
-def _deq(w, k):
+# float32, and bfloat16 measured and rejected. Native runs ESM-C at bf16, and
+# the accuracy would have been acceptable (lm_z against native 0.999969 at bf16
+# vs 0.999976 at fp32), but it buys nothing here: at the lengths these towers
+# see, the forward is WEIGHT-bound, not compute-bound. The 6B streams 6.36 GB of
+# int8 through the scan and dequantises it, against attention over a few hundred
+# tokens -- so peak VRAM was identical either way (7.93 GB, all weights) and
+# bf16 only added a cast to the dequantise. Set this to jnp.bfloat16 if a much
+# longer sequence ever makes the activations matter.
+#
+# LayerNorm is float32 regardless: it takes a mean and a variance over the full
+# d_model, which is the reduction bf16 is worst at, for a vanishing share of the
+# FLOPs.
+COMPUTE_DTYPE = jnp.float32 if jnp is not None else None
+
+
+def _deq(w, k, dtype):
   """int8 weights are dequantised inside the scan body, not on load."""
   if k + '__q_scale' in w:
-    return w[k].astype(jnp.float32) * w[k + '__q_scale']
-  return w[k].astype(jnp.float32)
+    return (w[k].astype(jnp.float32) * w[k + '__q_scale']).astype(dtype)
+  return w[k].astype(dtype)
 
 
 def _attend(q, k, v, pos, heads, head_dim):
@@ -133,29 +155,29 @@ def _attend(q, k, v, pos, heads, head_dim):
   return jnp.einsum('hij,jhd->ihd', jax.nn.softmax(logits, -1), v).reshape(n_len, -1)
 
 
-def _esmc_forward_block(x, w, pos, heads, head_dim, scale):
-  h = _layer_norm(x, w['attn_norm/scale'], w['attn_norm/offset']) @ _deq(w, 'qkv/weights')
+def _esmc_forward_block(x, w, pos, heads, head_dim, scale, dtype):
+  h = _layer_norm(x, w['attn_norm/scale'], w['attn_norm/offset']) @ _deq(w, 'qkv/weights', dtype)
   q, k, v = jnp.split(h, 3, -1)
   q = _layer_norm(q, w['q_norm/scale'])       # over the FULL d_model, not per head
   k = _layer_norm(k, w['k_norm/scale'])
   ctx = _attend(q, k, v, pos, heads, head_dim)
-  x = x + (ctx @ _deq(w, 'attn_out/weights')) / scale
-  h = _layer_norm(x, w['ffn_norm/scale'], w['ffn_norm/offset']) @ _deq(w, 'fc1/weights')
+  x = x + (ctx @ _deq(w, 'attn_out/weights', dtype)) / scale
+  h = _layer_norm(x, w['ffn_norm/scale'], w['ffn_norm/offset']) @ _deq(w, 'fc1/weights', dtype)
   n = h.shape[-1] // 2
-  return x + ((jax.nn.silu(h[..., :n]) * h[..., n:]) @ _deq(w, 'fc2/weights')) / scale
+  return x + ((jax.nn.silu(h[..., :n]) * h[..., n:]) @ _deq(w, 'fc2/weights', dtype)) / scale
 
 
-def _esm2_forward_block(x, w, pos, heads, head_dim, scale):
+def _esm2_forward_block(x, w, pos, heads, head_dim, scale, dtype):
   del scale  # ESM2 does not scale its residuals
   h = _layer_norm(x, w['attn_norm/scale'], w['attn_norm/offset'])
-  q = h @ _deq(w, 'q/weights') + w['q/bias']
-  k = h @ _deq(w, 'k/weights') + w['k/bias']
-  v = h @ _deq(w, 'v/weights') + w['v/bias']
+  q = h @ _deq(w, 'q/weights', dtype) + w['q/bias'].astype(dtype)
+  k = h @ _deq(w, 'k/weights', dtype) + w['k/bias'].astype(dtype)
+  v = h @ _deq(w, 'v/weights', dtype) + w['v/bias'].astype(dtype)
   ctx = _attend(q, k, v, pos, heads, head_dim)
-  x = x + ctx @ _deq(w, 'attn_out/weights') + w['attn_out/bias']
+  x = x + ctx @ _deq(w, 'attn_out/weights', dtype) + w['attn_out/bias'].astype(dtype)
   h = _layer_norm(x, w['ffn_norm/scale'], w['ffn_norm/offset'])
-  h = jax.nn.gelu(h @ _deq(w, 'fc1/weights') + w['fc1/bias'], approximate=False)
-  return x + h @ _deq(w, 'fc2/weights') + w['fc2/bias']
+  h = jax.nn.gelu(h @ _deq(w, 'fc1/weights', dtype) + w['fc1/bias'].astype(dtype), approximate=False)
+  return x + h @ _deq(w, 'fc2/weights', dtype) + w['fc2/bias'].astype(dtype)
 
 
 _BLOCKS = {'esmc': _esmc_forward_block, 'esm2': _esm2_forward_block}
@@ -190,10 +212,11 @@ def forward(ids, p, dims, all_states=None):
   if all_states is None:
     all_states = family == 'esmc'
   ids = jnp.asarray(ids)
+  dtype = COMPUTE_DTYPE
   n_len = ids.shape[0]
   heads, head_dim = dims['n_heads'], dims['d_model'] // dims['n_heads']
   scale = dims.get('residual_scale', 1.0)
-  embed = jnp.asarray(p['embed/weights']).astype(jnp.float32)[ids]
+  embed = jnp.asarray(p['embed/weights']).astype(dtype)[ids]
   if family == 'esm2':
     embed = embed * _ESM2_TOKEN_DROPOUT
   pos = jnp.arange(n_len, dtype=jnp.float32)
@@ -202,15 +225,15 @@ def forward(ids, p, dims, all_states=None):
   block = _BLOCKS[family]
 
   def body(carry, w):
-    out = block(carry, w, pos, heads, head_dim, scale)
+    out = block(carry, w, pos, heads, head_dim, scale, dtype)
     return out, (out if all_states else None)
 
   x, states = jax.lax.scan(body, embed, xs)
   final = _layer_norm(x, p['final_norm/scale'], p.get('final_norm/offset', 0.0))
   if not all_states:
-    return final
+    return final.astype(jnp.float32)
   states = jnp.concatenate([embed[None], states], axis=0)
-  return states.at[-1].set(final)
+  return states.at[-1].set(final).astype(jnp.float32)
 
 
 # ---------------------------------------------------------------------------
