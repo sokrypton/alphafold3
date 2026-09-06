@@ -31,6 +31,7 @@ The port is [documented in memory](../../../README.md); these are its gates.
 | `esmfold2_fold_from_native_z.py` | Folds with NATIVE's trunk through OUR diffusion -- the call that says which half is wrong. |
 | `esmfold2_audit_biases.py` | Which trained LayerNorm biases never reach the graph? Asks the CHECKPOINT, the direction a scope diff cannot look. |
 | `esmfold2_native_variants.py` | Native folds, one release at a time. Picks the model class from the checkpoint's own `architectures`. |
+| `esmfold2_oracle_exp_trunk.py` | Native PER-PASS trunk activations for an experimental release -- `lm_z`, `trunk_in{i}`, `trunk_pass{i}`. The generator `esmfold2_localise_exp.py` reads; without it that harness has nothing to compare against. |
 | `esmfold2_msa_gate.py` / `esmfold2_msa_vs_lm.py` | Does an MSA substitute for ESM-C? Ours and native's answer to the same 2x2. |
 | `esmfold2_oracle*.py`, `esmfold2_targets.py` | Dump native activations and survey native's accuracy. These GENERATE the npz files the gates consume. |
 | `esmfold2_bench_*.py`, `esmfold2_ablate_lm.py`, `esmfold2_native_*.py` | Cost and ablation runs. Their conclusions are recorded in commits; the scripts regenerate them. |
