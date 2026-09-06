@@ -386,7 +386,7 @@ def forward(ids, p, dims, all_states=None):
 # Loading and the CLI.
 # ---------------------------------------------------------------------------
 
-def load(model_dir=None, family='esmc'):
+def load(model_dir=None, family='esmc', tower=None):
   """-> (params, dims). Weights stay INT8; the scan body dequantises per block.
 
   Deliberately not `params.get_model_haiku_params`, which dequantises on load
@@ -397,7 +397,12 @@ def load(model_dir=None, family='esmc'):
   import re
   from .common import read_blob
 
-  model_dir = model_dir or ('~/ported/%s' % family)
+  # `family` is the ARCHITECTURE and names the blob; `tower` is which trained
+  # tower of that architecture, and names the directory and the published file.
+  # ESMFold2's variants are trained against step-matched ESM-C snapshots, so
+  # esmc/esmc_300m/esmc_600m are three different towers of one family.
+  tower = tower or family
+  model_dir = model_dir or ('~/ported/%s' % tower)
   path = os.path.join(os.path.expanduser(str(model_dir)), '%s.bin.zst' % family)
   if not os.path.exists(path):
     # A tower has no ModelSpec -- it is a separate graph, not an AF3 model -- so
@@ -407,7 +412,7 @@ def load(model_dir=None, family='esmc'):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     repo = model_registry.get('esmfold2' if family == 'esmc' else 'chai1')
     weights._download(weights._HF_URL.format(repo=repo.weights_repo,
-                                             file='%s.bin.zst' % family), path)
+                                             file='%s.bin.zst' % tower), path)
   per_block = collections.defaultdict(dict)
   p = {}
   for scope, name, arr in read_blob(path):
@@ -449,7 +454,7 @@ def load(model_dir=None, family='esmc'):
   return p, dims
 
 
-def embed(sequences, model_dir=None, family='esmc'):
+def embed(sequences, model_dir=None, family='esmc', tower=None):
   """-> the array the consumer wants, BOS/EOS stripped.
 
   ESM-C: (L, n_layers + 1, d_model), every state, for ESMFold2's layer mix.
@@ -460,7 +465,7 @@ def embed(sequences, model_dir=None, family='esmc'):
   _require_jax()
   if isinstance(sequences, str):
     sequences = [sequences]
-  p, dims = load(model_dir, family)
+  p, dims = load(model_dir, family, tower)
   rows = []
   for seq in sequences:
     ids = lm_input_ids(sequence_ids(seq, family))
