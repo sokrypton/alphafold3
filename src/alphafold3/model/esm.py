@@ -415,17 +415,6 @@ def load_shim_params(model_dir, model_name=None):
       f'no shim in {root} -- rerun convert_esmfold2_weights, or run without ESM-C')
 
 
-def _shim_layer_norm(x, scale, offset, eps=1e-5):
-  m = x.mean(-1, keepdims=True)
-  v = x.var(-1, keepdims=True)
-  return (x - m) / np.sqrt(v + eps) * scale + offset
-
-
-def _shim_gelu(x):
-  from scipy.special import erf
-  return x * 0.5 * (1.0 + erf(x / np.sqrt(2.0)))
-
-
 def shim(hidden, params):
   """(num_tokens, num_layers, lm_width) -> (num_tokens, num_tokens, c_z).
 
@@ -433,17 +422,39 @@ def shim(hidden, params):
   so it folds to a plain (num_layers,) array. It peaks on the LAST ESM-C layers
   -- 79/80/78 hold 58% of the mass -- so the tower cannot be truncated from the
   top, though ~31 of the 81 states carry 99% of it.
+
+  Runs on the accelerator, like the tower above it. Every step is a matmul or an
+  elementwise op over (L, L, c_z), so on the host this cost more than the 6B
+  tower's forward pass and grew as L^2: at 340 tokens it was 2.4 s, of which the
+  erf in the gelu and two LayerNorms were 86%. Nothing about it wanted to be on
+  a CPU -- it was numpy only because it started life beside the converters.
+
+  The layer mix is applied BEFORE the projection rather than after. `lm_projection`
+  is linear and shared across layers, so sum_k c_k (LN_k @ W) == (sum_k c_k LN_k) @ W
+  exactly (7e-7 relative, pure float associativity), and the second form does one
+  matmul where the first does num_layers of them.
   """
-  p = params
-  hidden = np.asarray(hidden, np.float32)
+  _require_jax()
+  # float32 matmuls, explicitly. The default on a modern NVIDIA card is tf32,
+  # which took this to 7e-4 relative -- and the trunk amplifies an injection
+  # error by ~50x, so that lands at the same magnitude as the relative-chain bug
+  # this port already had. The precision costs nothing measurable here.
+  with jax.default_matmul_precision('float32'):
+    return _shim(hidden, params)
+
+
+def _shim(hidden, params):
+  p = {k: jnp.asarray(v) for k, v in params.items()}
+  hidden = jnp.asarray(hidden, jnp.float32)
   if hidden.ndim == 4 and hidden.shape[0] == 1:
     hidden = hidden[0]
-  x = _shim_layer_norm(hidden, p['lm_norm/scale'], p['lm_norm/offset'])
-  x = np.einsum('k,lkc->lc', p['combine'], x @ p['lm_projection/weights'])
+  x = _layer_norm(hidden, p['lm_norm/scale'], p['lm_norm/offset'])
+  x = jnp.einsum('k,lkc->lc', p['combine'], x) @ p['lm_projection/weights']
   x = x @ p['downproject/weights'] + p['downproject/bias']
   # SingleToPair: the outer product carries BOTH a product and a difference, so
   # the pair rep sees magnitude and direction, not just agreement.
-  z = np.concatenate([x[:, None] * x[None, :], x[:, None] - x[None, :]], -1)
+  z = jnp.concatenate([x[:, None] * x[None, :], x[:, None] - x[None, :]], -1)
   z = z @ p['pair_mlp_1/weights'] + p['pair_mlp_1/bias']
-  z = _shim_gelu(z) @ p['pair_mlp_2/weights'] + p['pair_mlp_2/bias']
-  return _shim_layer_norm(z, p['pair_norm/scale'], p['pair_norm/offset'])
+  z = jax.nn.gelu(z, approximate=False) @ p['pair_mlp_2/weights'] + p['pair_mlp_2/bias']
+  return np.asarray(
+      _layer_norm(z, p['pair_norm/scale'], p['pair_norm/offset']))
