@@ -62,7 +62,7 @@ def _download(url: str, dst: str, log=print) -> None:
 # Companion artifacts a model needs beside its blob. ESMFold2's LM shim turns
 # ESM-C's hidden states into the pair representation its trunk reads; it is
 # 3.7 MB, and without it the ESM-C path raises on the first fold. The tower
-# ITSELF is fetched on demand by converters.esmc_embed, because it is 5.5 GB and
+# ITSELF is fetched on demand by converters.esm_lm, because it is 5.5 GB and
 # ESMFold2 also runs from an MSA.
 _COMPANIONS = {m: ('%s.lm.npz' % m,) for m in model_config.ESMFOLD2_FAMILY}
 

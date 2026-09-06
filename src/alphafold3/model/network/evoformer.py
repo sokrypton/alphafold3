@@ -459,7 +459,7 @@ class Evoformer(hk.Module):
     """Add ESMFold2's language-model pair representation to the injection.
 
     The shim that turns ESM-C's 81 hidden states into this pair rep is a
-    SEPARATE graph (converters/esmfold2_lm.py) and hands its output in on the
+    SEPARATE graph (converters/esmfold2.py's shim) and hands its output in on the
     batch; ESM-C itself is a 6.35B-parameter artifact that a fold does not
     otherwise load. What is left here needs no new machinery: the lm_encoder is
     four PAIR-ONLY blocks, the same PairFormerIteration-with-zeroed-attention

@@ -30,6 +30,8 @@ Weight-layout divergences handled by the shared dialect:
     silu(x1)*x2  ->  `tr_mode='fused'`.
 """
 
+import os
+
 import numpy as np
 
 from . import common
@@ -722,7 +724,7 @@ def convert_esmfold2_weights(checkpoint, output_dir, model_name='esmfold2'):
   for key, arr in flat.items():
     scope, name = key.rsplit('/', 1)
     params.setdefault(scope, {})[name] = arr
-  # The LanguageModelShim runs as a SEPARATE graph (converters/esmfold2_lm.py),
+  # The LanguageModelShim runs as a SEPARATE graph (converters/esmfold2.py's shim),
   # so its weights are their own artifact rather than records in the blob. They
   # are 40 MB against the blob's 800 and a fold that skips ESM-C never loads
   # them.
@@ -1262,7 +1264,7 @@ def map_esmfold2_to_af3_graph(sd, dims=None):
     # The lm_encoder is four PAIR-ONLY blocks, so it is the same
     # PairFormerIteration-with-zeroed-attention identity the trunk and the coda
     # already ride -- a third stack, no new graph machinery. Only the shim that
-    # feeds it is a separate graph (converters/esmfold2_lm.py).
+    # feeds it is a separate graph (converters/esmfold2.py's shim).
     put(P, af3_pair_stack(sd, 'lm_encoder', lm_n, c_z, pair_head,
                           '~_embed_lm_pair/__layer_stack_no_per_layer/lm_encoder'))
   put(P, af3_pair_stack(sd, 'folding_trunk', dims['n_trunk'], c_z, pair_head,
@@ -1519,3 +1521,68 @@ def af3_atom_encoder(sd, prefix, name, c_atom, num_head, n_blocks, c_out,
     stacked[k] = np.stack([b[k] for b in blocks], 0)
   stack_name = '%s_atom_transformer_%s' % (name, 'encoder' if 'encoder' in name or True else '')
   return out, stacked
+
+
+# ---------------------------------------------------------------------------
+# The LanguageModelShim: ESM-C's hidden states -> ESMFold2's pair rep.
+# ---------------------------------------------------------------------------
+# This belongs to ESMFold2, not to the tower. converters/esm_lm.py runs ESM-C
+# and stops at its hidden states; the last few layers that turn those into a
+# PAIR representation are ESMFold2's own -- a layer mix over all n+1 states, a
+# downprojection, and an outer product. None of it has an AlphaFold 3
+# counterpart to reuse, and every release trains its own, which is why the
+# weights are written per model beside the blob rather than shared.
+#
+# It is numpy, not jax: it runs once per fold on a (L, n+1, width) array and is
+# nowhere near the hot path, so a second graph would buy nothing.
+
+
+def load_shim_params(model_dir, model_name=None):
+  """-> the shim weights written beside the blob by convert_esmfold2_weights.
+
+  Named after the MODEL: each ESMFold2 release trains its own shim, and using
+  another's is not a small error -- corr 0.026 against native, and a fold that
+  goes from 0.96 A to 8.8.
+  """
+  import pathlib
+  root = pathlib.Path(os.path.expanduser(str(model_dir)))
+  name = model_name or root.name
+  for cand in (root / ('%s.lm.npz' % name), root / 'esmfold2.lm.npz'):
+    if cand.exists():
+      return {k.replace('.', '/'): v for k, v in np.load(cand).items()}
+  raise FileNotFoundError(
+      f'no shim in {root} -- rerun convert_esmfold2_weights, or run without ESM-C')
+
+
+def _shim_layer_norm(x, scale, offset, eps=1e-5):
+  m = x.mean(-1, keepdims=True)
+  v = x.var(-1, keepdims=True)
+  return (x - m) / np.sqrt(v + eps) * scale + offset
+
+
+def _shim_gelu(x):
+  from scipy.special import erf
+  return x * 0.5 * (1.0 + erf(x / np.sqrt(2.0)))
+
+
+def shim(hidden, params):
+  """(num_tokens, num_layers, lm_width) -> (num_tokens, num_tokens, c_z).
+
+  `combine` is already softmaxed at conversion time: the layer mix is a constant,
+  so it folds to a plain (num_layers,) array. It peaks on the LAST ESM-C layers
+  -- 79/80/78 hold 58% of the mass -- so the tower cannot be truncated from the
+  top, though ~31 of the 81 states carry 99% of it.
+  """
+  p = params
+  hidden = np.asarray(hidden, np.float32)
+  if hidden.ndim == 4 and hidden.shape[0] == 1:
+    hidden = hidden[0]
+  x = _shim_layer_norm(hidden, p['lm_norm/scale'], p['lm_norm/offset'])
+  x = np.einsum('k,lkc->lc', p['combine'], x @ p['lm_projection/weights'])
+  x = x @ p['downproject/weights'] + p['downproject/bias']
+  # SingleToPair: the outer product carries BOTH a product and a difference, so
+  # the pair rep sees magnitude and direction, not just agreement.
+  z = np.concatenate([x[:, None] * x[None, :], x[:, None] - x[None, :]], -1)
+  z = z @ p['pair_mlp_1/weights'] + p['pair_mlp_1/bias']
+  z = _shim_gelu(z) @ p['pair_mlp_2/weights'] + p['pair_mlp_2/bias']
+  return _shim_layer_norm(z, p['pair_norm/scale'], p['pair_norm/offset'])

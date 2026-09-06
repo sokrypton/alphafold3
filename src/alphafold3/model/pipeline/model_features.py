@@ -301,7 +301,7 @@ def _wide_key_window(batch, k_size, prefix=''):
   return _key_window(batch, 'slide', k_size=k_size, prefix=prefix)
 
 def _attach_lm_pair(batch, lm_pair):
-  """ESMFold2's language-model PAIR representation, from converters.esmfold2_lm.
+  """ESMFold2's language-model PAIR representation, from converters.esmfold2.
 
   (num_tokens, num_tokens, c_z), built outside the fold from ESM-C's hidden
   states. Attached verbatim: unlike the ESM2 token embeddings, this is already

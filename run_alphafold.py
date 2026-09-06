@@ -488,7 +488,7 @@ _ESM_EMBEDDINGS = flags.DEFINE_string(
     'esm_embeddings',
     None,
     'Path to an npz of precomputed ESM2 token embeddings, as written by'
-    ' `python -m converters.esm_embed`. Only chai-1 reads them, and running it'
+    ' `python -m converters.esm_lm --family esm2`. Only chai-1 reads them, and running it'
     ' without them is running a different model: its token feature stream is'
     ' mostly ESM2, and a natural protein folds to 5.70 A without them where'
     ' chai-1 reaches 0.642. They are precomputed because chai ships ESM as a'

@@ -76,7 +76,7 @@ def write_records_blob(out_path, records, *, level=10, identifier=None):
         raise ValueError(
             '%s/%s is %.2f GiB; a record header packs its length as a SIGNED '
             '32-bit int, so 2 GiB is the ceiling. Split the array (see '
-            'converters.esmc.split_stacked_blocks) or store it smaller.'
+            'converters.esm_lm.split_stacked_blocks) or store it smaller.'
             % (scope, name, arr.nbytes / 2 ** 30))
       comp.write(encode_record(scope, name, arr))
   return out_path

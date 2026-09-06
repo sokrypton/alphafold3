@@ -35,11 +35,21 @@ parameter the graph wants and the converter did not produce is listed there,
 reported at load, and filled with zeros rather than random values. All eight
 current conversions report 0 missing.
 
-`esm_embed.py` is the odd one out: it converts nothing, but it belongs on this
-side of the line for the same reason — chai-1 folds with ESM2 token embeddings,
-chai ships ESM as a traced TorchScript archive, and the served path does not
-import torch. It takes sequences directly so it can run in whichever environment
-has that archive.
+`esm_lm.py` is the odd one out: it carries two whole models rather than a map.
+Two of the ports fold from a protein language model — chai-1 from ESM2 3B,
+ESMFold2 from ESM-C — and neither runs at full fidelity without one, so the
+towers are converted and run here, in jax, like everything else. They are one
+file because they are one architecture: pre-LayerNorm, rotary, head_dim 64,
+differing in five documented places (fused vs split qkv, q/k norm, SwiGLU vs
+gelu, residual scaling, and how many hidden states the consumer reads). The
+ESMFold2 shim that turns ESM-C's states into a pair representation is not part
+of the tower and lives in `esmfold2.py`.
+
+Both towers convert at int8 and run under a `lax.scan`. For ESM-C that is not an
+optimisation: float32 cannot be written at all (a record header packs its length
+as a signed 32-bit int, and the fused fc1 stack is one 5.27 GiB tensor), and a
+python loop over the 80 blocks leaves the whole 25 GB tower resident on a 23 GB
+card.
 
 `common.py` holds the primitives every family shares -- the transpose/reshape
 math is the same everywhere, only the torch leaf names and the fusion mode

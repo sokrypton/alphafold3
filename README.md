@@ -66,8 +66,8 @@ The ESMFold2 variants fold from **ESM-C**, not an MSA. All but `esmfold2_lm600m`
 condition on ESM-C 6B; that one uses the 600M tower, and upstream ships the
 "Experimental" line for paper reproducibility rather than for research use --
 its own card says to prefer plain `esmfold2`. Their language-model
-input is built outside the fold by `converters.esmc_embed` (the tower, published
-int8 at 5.5 GB) and `converters.esmfold2_lm` (the per-model shim, which rides
+input is built outside the fold by `converters.esm_lm` (the tower, published
+int8 at 5.5 GB) and `converters.esmfold2` (the per-model shim, which rides
 along with the weights). Given an MSA instead they fold from that: 5CAJ reads
 17.5 A from a single sequence and 1.24 A at MSA depth 256. Supplying neither is
 the one broken configuration.
@@ -168,7 +168,7 @@ where chai reaches 0.642). Precompute them once, in whatever environment has
 chai's traced ESM archive, and pass them in:
 
 ```bash
-python converters/esm_embed.py --sequence MQIFVKT... --out esm.npz
+python converters/esm_lm.py --sequence MQIFVKT... --out esm.npz
 python run_alphafold.py --model=chai1 --esm_embeddings=esm.npz ...
 ```
 

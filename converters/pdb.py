@@ -1,7 +1,7 @@
 """Minimal PDB reading for the converters.
 
 `parse_ca` lived in the oracle harnesses, which are dev-only and out of tree --
-so a tracked module (esmc_embed) importing it from there made the package depend
+so a tracked module (esm_lm) importing it from there made the package depend
 on files the repo does not ship. It is small and has one careful behaviour worth
 keeping in one place, so it lives here instead.
 """

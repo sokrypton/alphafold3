@@ -34,13 +34,18 @@ SOURCES = {
     'esmfold2_lm600m': dict(
         repo='biohub/ESMFold2-Experimental-Fast-base600M-step1500k'),
     # The protein language model ESMFold2 conditions on. NOT an AF3 model -- a
-    # separate graph with its own loader (converters/esmc_embed.py). float32 is
+    # separate graph with its own loader (converters/esm_lm.py). float32 is
     # 25.4 GB and cannot even be WRITTEN as a blob (a record header packs its
     # length as a signed 32-bit int), so it is converted at int8.
     'esmc': dict(repo='biohub/ESMC-6B'),
     # the smaller towers, for the base300M/base600M folding variants
     'esmc_300m': dict(repo='biohub/ESMC-300M-1500000'),
     'esmc_600m': dict(repo='biohub/ESMC-600M-1500000'),
+    # chai-1's ESM2 3B. No URL: chai ships it as a traced TorchScript archive
+    # fetched by chai-lab's own downloader, so pass it with --checkpoint
+    # (~/chai1_weights/esm/traced_sdpa_esm2_t36_3B_UR50D_fp16.pt). The archive
+    # is not opaque -- state_dict() gives the ordinary ESM2 names.
+    'esm2': dict(local='chai1_weights/esm/traced_sdpa_esm2_t36_3B_UR50D_fp16.pt'),
     # OpenFold3 (AlQuraishi Lab). Public, no sign-request needed.
     'openfold3': dict(
         url='https://openfold.s3.amazonaws.com/staging/of3-p2-155k.pt',
