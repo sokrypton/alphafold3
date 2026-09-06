@@ -39,6 +39,7 @@ only this module's own imports matter).
 from __future__ import annotations
 
 import argparse
+import functools
 import os
 
 import numpy as np
@@ -190,38 +191,14 @@ _BLOCKS = {'esmc': _esmc_forward_block, 'esm2': _esm2_forward_block}
 _ESM2_TOKEN_DROPOUT = 1.0 - 0.15 * 0.8
 
 
-def forward(ids, p, dims, all_states=None):
-  """-> hidden states, BOS/EOS still attached.
-
-  A lax.scan over the blocks, NOT a python loop. The loop traced all 80 of
-  ESM-C's blocks into one graph and moved each block's weights to the device as
-  it went, so the whole 25 GB tower ended up resident and a 23 GB card ran out
-  on the last few layers -- native torch never hits this because it executes
-  eagerly and frees as it goes. Scanning compiles ONE block body and keeps the
-  weights as the scanned axis, which is also why they stay int8 on the device
-  and are dequantised inside the body: 6.35 GB resident instead of 25.4 GB.
-
-  `all_states` defaults to what the consumer needs. ESMFold2 mixes ALL n+1
-  states with a learned softmax, so none can be skipped, and the LAST is post
-  the stack's final LayerNorm while the other n are the raw residual stream --
-  returning the pre-norm value there reads corr 0.909 against native on layer 80
-  where every other layer is >= 0.9998. chai-1 reads only the final state.
-  """
-  _require_jax()
-  family = dims.get('family', 'esmc')
-  if all_states is None:
-    all_states = family == 'esmc'
-  ids = jnp.asarray(ids)
+def _forward_impl(ids, p, *, family, heads, head_dim, scale, all_states):
   dtype = COMPUTE_DTYPE
   n_len = ids.shape[0]
-  heads, head_dim = dims['n_heads'], dims['d_model'] // dims['n_heads']
-  scale = dims.get('residual_scale', 1.0)
   embed = jnp.asarray(p['embed/weights']).astype(dtype)[ids]
   if family == 'esm2':
     embed = embed * _ESM2_TOKEN_DROPOUT
   pos = jnp.arange(n_len, dtype=jnp.float32)
-  xs = {k[len('blocks/'):]: jnp.asarray(v)
-        for k, v in p.items() if k.startswith('blocks/')}
+  xs = {k[len('blocks/'):]: v for k, v in p.items() if k.startswith('blocks/')}
   block = _BLOCKS[family]
 
   def body(carry, w):
@@ -234,6 +211,50 @@ def forward(ids, p, dims, all_states=None):
     return final.astype(jnp.float32)
   states = jnp.concatenate([embed[None], states], axis=0)
   return states.at[-1].set(final).astype(jnp.float32)
+
+
+_JIT_CACHE = {}
+
+
+def forward(ids, p, dims, all_states=None):
+  """-> hidden states, BOS/EOS still attached.
+
+  A lax.scan over the blocks, NOT a python loop. The loop traced all 80 of
+  ESM-C's blocks into one graph and moved each block's weights to the device as
+  it went, so the whole 25 GB tower ended up resident and a 23 GB card ran out
+  on the last few layers -- native torch never hits this because it executes
+  eagerly and frees as it goes. Scanning compiles ONE block body and keeps the
+  weights as the scanned axis, which is also why they stay int8 on the device
+  and are dequantised inside the body: 6.35 GB resident instead of 25.4 GB.
+
+  jitted, and not as a micro-optimisation. Un-jitted this cost ~2 s a call that
+  had nothing to do with the work: 8 blocks took 2.09 s and 80 took 2.20 s, and
+  a 68-token sequence was SLOWER than a 340-token one, because the time was
+  per-call tracing rather than execution. Jitting took L=68 from 1.86 s to
+  0.13 s and restored the obvious property that a longer sequence costs more.
+  The cache is keyed on everything the trace depends on; `p` is an argument, so
+  a tower's weights do not bake into the executable.
+
+  `all_states` defaults to what the consumer needs. ESMFold2 mixes ALL n+1
+  states with a learned softmax, so none can be skipped, and the LAST is post
+  the stack's final LayerNorm while the other n are the raw residual stream --
+  returning the pre-norm value there reads corr 0.909 against native on layer 80
+  where every other layer is >= 0.9998. chai-1 reads only the final state.
+  """
+  _require_jax()
+  family = dims.get('family', 'esmc')
+  if all_states is None:
+    all_states = family == 'esmc'
+  heads, head_dim = dims['n_heads'], dims['d_model'] // dims['n_heads']
+  scale = float(dims.get('residual_scale', 1.0))
+  key = (family, heads, head_dim, scale, bool(all_states))
+  fn = _JIT_CACHE.get(key)
+  if fn is None:
+    fn = jax.jit(functools.partial(
+        _forward_impl, family=family, heads=heads, head_dim=head_dim,
+        scale=scale, all_states=all_states))
+    _JIT_CACHE[key] = fn
+  return fn(jnp.asarray(ids), p)
 
 
 # ---------------------------------------------------------------------------
