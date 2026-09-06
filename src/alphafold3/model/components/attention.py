@@ -45,12 +45,27 @@ def dot_product_attention(q, k, v, *, mask=None, bias=None, implementation=None,
       q = jnp.pad(q, zc(q.ndim - 3) + [(0, padq), (0, 0), (0, 0)])
       k = jnp.pad(k, zc(k.ndim - 3) + [(0, padk), (0, 0), (0, 0)])
       v = jnp.pad(v, zc(v.ndim - 3) + [(0, padk), (0, 0), (0, 0)])
+      # Pad a bias axis ONLY if it is full-size. A bias is allowed to be
+      # BROADCAST along the query or key axis -- AF2's MSA column attention
+      # passes (batch, 1, 1, num_seq) -- and padding a length-1 axis turns it
+      # into length 2, which no longer broadcasts against the logits. The
+      # failure then arrives from inside tokamax as a jaxtyping dump naming
+      # neither this function nor the caller, and only at ODD lengths, which is
+      # why it went unseen: it needs a broadcast bias and an odd sequence length
+      # at once (here, an MSA of 513).
       if bias is not None:
-        bias = jnp.pad(bias, zc(bias.ndim - 2) + [(0, padq), (0, padk)])
-        if padk:
+        bq = padq if bias.shape[-2] == Q else 0
+        bk = padk if bias.shape[-1] == K else 0
+        if bq or bk:
+          bias = jnp.pad(bias, zc(bias.ndim - 2) + [(0, bq), (0, bk)])
+        # Only mask out the padded keys where the bias actually indexes them; a
+        # key-broadcast bias cannot express "this one key is padding", and does
+        # not need to -- `mask` below carries it.
+        if bk:
           bias = bias.at[..., K:].set(jnp.asarray(-_NEG, bias.dtype))
       if mask is not None:
-        mask = jnp.pad(mask, zc(mask.ndim - 1) + [(0, padk)])  # pad key axis False
+        if mask.shape[-1] == K:
+          mask = jnp.pad(mask, zc(mask.ndim - 1) + [(0, padk)])  # pad key False
       out = tokamax.dot_product_attention(
           q, k, v, mask=mask, bias=bias, implementation=implementation, scale=scale)
       return out[..., :Q, :, :]
