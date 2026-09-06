@@ -92,6 +92,16 @@ def derive(model_name, batch=None, model_dir=None):
   # (or none) this happens to run on.
   config.global_config.flash_attention_implementation = 'xla'
   model_registry.get(model_name).configure(config)
+  # STORAGE dtypes, not the graph's internal ones. `init` under the default
+  # bfloat16='all' reports bfloat16 for anything the forward computes in
+  # bfloat16 -- 125 of esmfold2_fast's 369 leaves -- while what a converter
+  # writes and `get_model_haiku_params` returns is float32. A manifest exists so
+  # that nothing has to run the graph to learn its parameter tree, so recording
+  # a dtype no stored parameter ever has defeats it: `fill_from_manifest` would
+  # create a missing parameter at the wrong precision, and anything trying to
+  # build parameter avals from the manifest lowers a different graph than the
+  # one that runs. Shapes are identical either way; only the dtypes move.
+  config.global_config.bfloat16 = 'none'
 
   if batch is None:
     batch = canonical_batch(model_name, model_dir=model_dir)
@@ -149,14 +159,24 @@ def converter_is_current(manifest):
 def write(model_name, out_dir, params=None, batch=None, checkpoint=None):
   """Write <model>.shapes.json into out_dir; returns the path.
 
-  `params` is the converted tree, used only to record which parameters the
-  conversion did NOT produce.
+  `params` is the converted tree. It records which parameters the conversion did
+  NOT produce, and it supplies the dtypes: a manifest sits beside one blob and
+  describes THAT blob, and converters do not all store the same precision --
+  intellifold2 writes 138 of its arrays as bfloat16 where every other model
+  writes float32. `derive` reports the graph's storage precision, which is the
+  right answer for a parameter the blob lacks and the wrong one for a parameter
+  it has in bfloat16.
   """
   shapes = derive(model_name, batch=batch, model_dir=out_dir)
   supplied = set()
   if params is not None:
     supplied = {f'{scope}/{name}'
                 for scope, leaves in params.items() for name in leaves}
+    for scope, leaves in shapes.items():
+      for name, entry in leaves.items():
+        have = params.get(scope, {}).get(name)
+        if have is not None:
+          leaves[name] = (str(np.dtype(np.asarray(have).dtype)), entry[1])
   missing = sorted(f'{scope}/{name}'
                    for scope, leaves in shapes.items() for name in leaves
                    if f'{scope}/{name}' not in supplied) if params else []
