@@ -357,8 +357,16 @@ def create_relative_encoding(
     seq_features: features.TokenFeatures,
     max_relative_idx: int,
     max_relative_chain: int,
+    chain_bucket_on_same_chain: bool = False,
 ) -> jax.Array:
   """Add relative position encodings.
+
+  `chain_bucket_on_same_chain` selects ESMFold2's convention for the relative-
+  chain block, which differs from AF3's in BOTH the predicate and the branch:
+  AF3 keys it on same-ENTITY and sends the mismatch to the 2*c+1 bucket, while
+  ESMFold2 keys it on same-CHAIN and sends the MATCH there. On a monomer that is
+  not a subtle difference -- every pair takes bucket 2*c+1 instead of bucket c --
+  so a single wrong column of the embedding is added everywhere.
 
   Honours seq_features.cyclic_period when present: the residue offset is wrapped
   modulo each chain's period before clipping, so a cyclic peptide's termini read
@@ -439,11 +447,11 @@ def create_relative_encoding(
       rel_sym_id + max_rel_chain, min=0, max=2 * max_rel_chain
   )
 
-  final_rel_chain = jnp.where(
-      entity_id_same,
-      clipped_rel_chain,
-      (2 * max_rel_chain + 1) * jnp.ones_like(clipped_rel_chain),
-  )
+  special = (2 * max_rel_chain + 1) * jnp.ones_like(clipped_rel_chain)
+  if chain_bucket_on_same_chain:
+    final_rel_chain = jnp.where(asym_id_same, special, clipped_rel_chain)
+  else:
+    final_rel_chain = jnp.where(entity_id_same, clipped_rel_chain, special)
   rel_chain = jax.nn.one_hot(final_rel_chain, 2 * max_relative_chain + 2)
 
   rel_feats.append(rel_chain)

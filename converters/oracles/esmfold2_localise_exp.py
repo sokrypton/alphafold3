@@ -85,6 +85,17 @@ b = jax.tree_util.tree_map(jnp.asarray, utils.remove_invalidly_typed_feats(batch
 p = afp.get_model_haiku_params(model_dir=d)
 p = {(k[len('diffuser/'):] if k.startswith('diffuser/') else k): v
      for k, v in p.items()}
+# haiku names a layer_stack's scope after whether it carries per-layer inputs,
+# so turning the tap on renames every trunk block param. The weights are
+# identical -- only the scope moves -- so alias them rather than reconvert.
+if os.environ.get('ESM_TAP_TRUNK_BLOCKS') == '1':
+  p = {**p, **{k.replace('__layer_stack_no_per_layer',
+                         '__layer_stack_with_per_layer'): v
+               for k, v in p.items()
+               if '__layer_stack_no_per_layer/trunk_pairformer' in k}}
+ev.TRUNK_BLOCK_TAPS.clear()  # one entry per recycle pass is appended below
+for _v in ev.ESM_TRUNK_TAPS.values():
+  _v.clear()
 g, per_pass = fwd.apply(p, jax.random.PRNGKey(0), b)
 z = np.asarray(g['pair'])
 
@@ -92,6 +103,31 @@ z = np.asarray(g['pair'])
 # inside the 24 blocks. native's `trunk_in{i}` is what our _add_prev produces
 # (z_init + pair_loop_proj(z)); `trunk_pass{i}` is the block stack's output.
 taps = ev.ESM_TRUNK_TAPS
+# Decompose the injection. Native builds trunk_in0 (pass 0, where prev is zero)
+# as outer(z_init_1, z_init_2) + relpos + bonds + lm_z, and lm_z is injected
+# verbatim -- so any gap at the injection is in the other two, and this says
+# which. The trunk amplifies an injection error ~50x, so a 1e-4 gap here is
+# what a 3e-2 gap after 24 blocks is made of.
+if 'z_init_1' in nat and taps.get('z_pair0'):
+  z1, z2 = nat['z_init_1'][0], nat['z_init_2'][0]
+  nat_outer = z1[:, None, :] + z2[None, :, :]
+  our_outer = np.asarray(taps['z_pair0'][0])
+  # The remainder of trunk_in0 is NOT just relpos: `pair_loop_proj` is a
+  # LayerNorm+Linear, so on pass 0 it maps the zero carry to a nonzero constant
+  # (LN(0) -> offset -> Linear) that lands in trunk_in0 too. Native's own relpos
+  # is dumped, so compare against it rather than against a subtraction that
+  # silently absorbs that constant.
+  our_rem = np.asarray(taps['z_relpos'][0]) - our_outer
+  pairs = [('outer(z_init_1,2)', our_outer, nat_outer)]
+  if 'relpos' in nat:
+    pairs.append(('relpos', our_rem, nat['relpos'][0]))
+    pairs.append(('bonds (native=0)',
+                  np.asarray(taps['z_init'][0]) - np.asarray(taps['z_relpos'][0]),
+                  nat['bonds'][0]))
+  for label, a, bb in pairs:
+    print('   %-18s corr %.7f  std %.4f vs %.4f'
+          % (label, np.corrcoef(a.ravel(), bb.ravel())[0, 1], a.std(), bb.std()))
+
 for i in range(N_PASSES):
   for ours, key, label in ((taps.get('z_parcae', [None] * 9)[i]
                             if len(taps.get('z_parcae', [])) > i else None,
@@ -102,6 +138,33 @@ for i in range(N_PASSES):
     a, bb = np.asarray(ours), nat[key][0]
     print('   pass %d %-16s corr %.6f  std %.3f vs %.3f'
           % (i, label, np.corrcoef(a.ravel(), bb.ravel())[0, 1], a.std(), bb.std()))
+# Per BLOCK inside pass 0, when both sides taped it. This is the test that
+# separates a per-block convention from a mapping error: a corr that decays
+# smoothly across the 24 is a convention every block shares, while a cliff at
+# one j is that block's weights.
+blocks = ev.TRUNK_BLOCK_TAPS
+if blocks and 'block0' in nat:
+  per_layer = np.asarray(blocks[0])  # pass 0, (num_layer, L, L, c) -- native
+                                     # dumps pass 0's blocks, so pass 0 it is
+  print('   per-block, pass 0:')
+  for j in range(per_layer.shape[0]):
+    key = 'block%d' % j
+    if key not in nat:
+      break
+    a, bb = per_layer[j], nat[key][0]
+    # The block's own UPDATE, not its output. A block whose output std shrinks
+    # is mostly cancelling its input, which amplifies whatever error arrived --
+    # so a low output corr there can be inherited rather than local. The update
+    # is what the block itself computed, and only IT indicts the block.
+    prev_a = per_layer[j - 1] if j else np.asarray(taps['z_parcae'][0])
+    prev_b = nat['block%d' % (j - 1)][0] if j else nat['trunk_in0'][0]
+    du, dn = a - prev_a, bb - prev_b
+    print('     block %2d  corr %.6f  std %.3f vs %.3f   update corr %.6f'
+          % (j, np.corrcoef(a.ravel(), bb.ravel())[0, 1], a.std(), bb.std(),
+             np.corrcoef(du.ravel(), dn.ravel())[0, 1]))
+elif 'block0' in nat:
+  print('   per-block: set ESM_TAP_TRUNK_BLOCKS=1 to fill TRUNK_BLOCK_TAPS')
+
 print('%s: OUR trunk vs NATIVE trunk (native lm_z injected)' % MODEL)
 print('   shapes %s vs %s' % (z.shape, z_native.shape))
 print('   corr %.6f   relerr %.3e' % (

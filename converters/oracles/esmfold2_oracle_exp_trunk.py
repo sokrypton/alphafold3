@@ -17,6 +17,12 @@ What it captures, and why each one earns its place:
                 divergence to the recycle or to the 24 blocks; for
                 esmfold2_lm600m the injection reads 0.9994 and one pass of the
                 blocks drops it to 0.971.
+  block{j}      pass 0's output of trunk block j, j = 0..23. This is what tells
+                a per-block convention apart from a mapping error: a divergence
+                spread evenly over the 24 is the former, one concentrated in a
+                single block is the latter, and they need different fixes. Only
+                pass 0 is kept -- later passes re-enter an already-diverged z, so
+                they cannot localise anything.
   distogram_logits, sample_atom_coords, feat.*   the ends of the model, for
                 whole-model comparisons.
 
@@ -62,6 +68,26 @@ def dump(hub_name, out, pdb='~/6MRR.pdb', num_loops=3, num_sampling_steps=200):
   model.folding_trunk.register_forward_pre_hook(
       lambda m, i: cap.setdefault('trunk_in', []).append(
           i[0].detach().float().cpu().numpy()))
+  # Per-block, pass 0 only. `FoldingTrunk` holds its blocks in `.blocks`
+  # (a ModuleList of PairUpdateBlock); the hook fires once per block per pass,
+  # so 24 * (num_loops + 1) times, and we keep the first 24.
+  for j, blk in enumerate(model.folding_trunk.blocks):
+    blk.register_forward_hook(
+        lambda m, i, o, j=j: cap.setdefault('block%d' % j, []).append(
+            o.detach().float().cpu().numpy()))
+  # z_init's two halves. Native builds z_init as
+  # `z_init_1(x)[:,:,None] + z_init_2(x)[:,None,:] + relpos + bonds (+ lm_z)`,
+  # so capturing the two projections lets the relpos+bonds remainder be
+  # recovered by subtraction from trunk_in0 -- which is what says whether an
+  # injection gap lives in the target-feat outer sum or in the encodings.
+  model.z_init_1.register_forward_hook(
+      lambda m, i, o: cap.__setitem__('z_init_1', o.detach().float().cpu().numpy()))
+  model.z_init_2.register_forward_hook(
+      lambda m, i, o: cap.__setitem__('z_init_2', o.detach().float().cpu().numpy()))
+  model.rel_pos.register_forward_hook(
+      lambda m, i, o: cap.__setitem__('relpos', o.detach().float().cpu().numpy()))
+  model.token_bonds.register_forward_hook(
+      lambda m, i, o: cap.__setitem__('bonds', o.detach().float().cpu().numpy()))
   model.language_model.register_forward_hook(
       lambda m, i, o: cap.__setitem__('lm_z', o.detach().float().cpu().numpy()))
 
@@ -71,11 +97,13 @@ def dump(hub_name, out, pdb='~/6MRR.pdb', num_loops=3, num_sampling_steps=200):
     o = model(**feats, num_loops=num_loops, num_diffusion_samples=1,
               num_sampling_steps=num_sampling_steps)
 
-  save = {'lm_z': cap['lm_z']}
+  save = {k: cap[k] for k in ('lm_z', 'z_init_1', 'z_init_2', 'relpos', 'bonds') if k in cap}
   for name in ('trunk_pass', 'trunk_in'):
     for i, a in enumerate(cap.get(name, [])):
       save['%s%d' % (name, i)] = a
   save['trunk_out'] = cap['trunk_pass'][-1]
+  for j in range(len(model.folding_trunk.blocks)):
+    save['block%d' % j] = cap['block%d' % j][0]  # pass 0
   save['distogram_logits'] = o['distogram_logits'].float().cpu().numpy()
   save['sample_atom_coords'] = o['sample_atom_coords'].float().cpu().numpy()
   for k, v in feats.items():

@@ -306,6 +306,8 @@ class Evoformer(hk.Module):
         seq_features=batch.token_features,
         max_relative_idx=self.config.max_relative_idx,
         max_relative_chain=self.config.max_relative_chain,
+        chain_bucket_on_same_chain=(
+            self.global_config.model in model_config.ESMFOLD2_FAMILY),
     )
     rel_feat = rel_feat.astype(pair_activations.dtype)
 
@@ -894,8 +896,9 @@ class Evoformer(hk.Module):
         # Diagnostic only. layer_stack gives each block its OWN weights where a
         # python loop would share one set, so the blocks still run stacked and
         # the per-block pair reps ride out as per-layer outputs -- the same
-        # shape as the MSA tap above.
-        TRUNK_BLOCK_TAPS.clear()
+        # shape as the MSA tap above. One entry is APPENDED per recycle pass and
+        # nothing is cleared here: clearing would leave only the last pass, and
+        # the native dump this is compared against is pass 0. The caller clears.
 
         def tapped_pairformer(x):
           out = pairformer_fn(x)
