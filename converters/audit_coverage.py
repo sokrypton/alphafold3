@@ -115,8 +115,15 @@ def _value_index(params):
   for scope, leaves in params.items():
     if scope == '__meta__':
       continue
-    for _, v in leaves.items():
-      walk(np.asarray(v), 2)
+    # Mappers come in two shapes and both are legitimate: NESTED
+    # {scope: {name: array}}, which is what save_af3_params takes, and FLAT
+    # {'scope/name': array}, which is what the ESMFold2 mapper emits because it
+    # assembles one dict across four top-level scopes. Take either.
+    if isinstance(leaves, dict):
+      for _, v in leaves.items():
+        walk(np.asarray(v), 2)
+    else:
+      walk(np.asarray(leaves), 2)
   return index
 
 
@@ -154,6 +161,17 @@ _LOADERS = {
     'boltz2': ('boltz2', None,
                '/home/ubuntu/boltz2_weights/boltz2_conf.ckpt'),
     'opendde': ('opendde', None, '/home/ubuntu/opendde_weights/opendde.pt'),
+    # the ESMFold2 family: one loader, the variant chosen by the directory
+    **{m: ('esmfold2', 'load_esmfold2_checkpoint',
+           '/home/ubuntu/esmfold2_variants/%s' % hub)
+       for m, hub in (
+           ('esmfold2', 'ESMFold2'),
+           ('esmfold2_fast', 'ESMFold2-Fast'),
+           ('esmfold2_exp', 'ESMFold2-Experimental'),
+           ('esmfold2_exp_fast', 'ESMFold2-Experimental-Fast'),
+           ('esmfold2_exp_cutoff2025', 'ESMFold2-Experimental-Cutoff2025'),
+           ('esmfold2_exp_fast_cutoff2025',
+            'ESMFold2-Experimental-Fast-Cutoff2025'))},
 }
 
 _MAPPERS = {
@@ -164,6 +182,9 @@ _MAPPERS = {
     'intellifold2': 'map_intellifold2_to_af3',
     'boltz2': 'map_boltz2_to_af3',
     'opendde': 'convert_opendde',
+    **{m: 'map_esmfold2_to_af3_graph' for m in (
+        'esmfold2', 'esmfold2_fast', 'esmfold2_exp', 'esmfold2_exp_fast',
+        'esmfold2_exp_cutoff2025', 'esmfold2_exp_fast_cutoff2025')},
 }
 
 

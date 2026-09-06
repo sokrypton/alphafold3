@@ -7,12 +7,37 @@ is what the runtime loads (see `alphafold3.model.model_registry`).
 
 `files` rather than `url`/`file` means the model is published as several archives
 (chai-1's five TorchScript modules plus a distogram head), so the converter is
-handed the directory and finds its own pieces.
+handed the directory and finds its own pieces. `repo` means a Hugging Face repo
+to snapshot whole -- the ESMFold2 family needs its config.json as well as its
+weights, because the registry row is asserted against it at conversion.
 """
 
 from __future__ import annotations
 
 SOURCES = {
+    # ESMFold2 and its releases (Arc Institute / CZ Biohub). Hugging Face repos
+    # rather than a single archive: each ships model.safetensors + config.json,
+    # and the converter is handed the DIRECTORY so it can read both -- the
+    # config is what check_release_config asserts the registry row against.
+    #
+    # All six share the ESM-C 6B tower below. They do NOT share the LM shim:
+    # each trains its own `language_model.*`, which convert_esmfold2_weights
+    # writes beside the blob as <model>.lm.npz.
+    'esmfold2': dict(repo='biohub/ESMFold2'),
+    'esmfold2_fast': dict(repo='biohub/ESMFold2-Fast'),
+    'esmfold2_exp': dict(repo='biohub/ESMFold2-Experimental'),
+    'esmfold2_exp_fast': dict(repo='biohub/ESMFold2-Experimental-Fast'),
+    'esmfold2_exp_cutoff2025': dict(repo='biohub/ESMFold2-Experimental-Cutoff2025'),
+    'esmfold2_exp_fast_cutoff2025': dict(
+        repo='biohub/ESMFold2-Experimental-Fast-Cutoff2025'),
+    # The protein language model ESMFold2 conditions on. NOT an AF3 model -- a
+    # separate graph with its own loader (converters/esmc_embed.py). float32 is
+    # 25.4 GB and cannot even be WRITTEN as a blob (a record header packs its
+    # length as a signed 32-bit int), so it is converted at int8.
+    'esmc': dict(repo='biohub/ESMC-6B'),
+    # the smaller towers, for the base300M/base600M folding variants
+    'esmc_300m': dict(repo='biohub/ESMC-300M-1500000'),
+    'esmc_600m': dict(repo='biohub/ESMC-600M-1500000'),
     # OpenFold3 (AlQuraishi Lab). Public, no sign-request needed.
     'openfold3': dict(
         url='https://openfold.s3.amazonaws.com/staging/of3-p2-155k.pt',
