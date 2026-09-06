@@ -35,7 +35,11 @@ parameter the graph wants and the converter did not produce is listed there,
 reported at load, and filled with zeros rather than random values. All eight
 current conversions report 0 missing.
 
-`esm_lm.py` is the odd one out: it carries two whole models rather than a map.
+`esm_lm.py` maps two whole models rather than one family's blocks: chai-1 folds
+from ESM2 3B and ESMFold2 from ESM-C, and neither runs at full fidelity without
+one. Only the WEIGHT MAPS are here — running a tower is inference, so the
+forward, the vocabularies and the loader live in `alphafold3/model/esm.py`, for
+the same reason `params._dequantise_records` does not import this package.
 Two of the ports fold from a protein language model — chai-1 from ESM2 3B,
 ESMFold2 from ESM-C — and neither runs at full fidelity without one, so the
 towers are converted and run here, in jax, like everything else. They are one

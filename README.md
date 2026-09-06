@@ -66,7 +66,7 @@ The ESMFold2 variants fold from **ESM-C**, not an MSA. All but `esmfold2_lm600m`
 condition on ESM-C 6B; that one uses the 600M tower, and upstream ships the
 "Experimental" line for paper reproducibility rather than for research use --
 its own card says to prefer plain `esmfold2`. Their language-model
-input is built outside the fold by `converters.esm_lm` (the tower, published
+input is built outside the fold by `alphafold3.model.esm` (the tower, published
 int8 at 5.5 GB) and `converters.esmfold2` (the per-model shim, which rides
 along with the weights). Given an MSA instead they fold from that: 5CAJ reads
 17.5 A from a single sequence and 1.24 A at MSA depth 256. Supplying neither is
@@ -183,7 +183,7 @@ for ESM-C 6B), which is why it is opt-in rather than the default. Running one of
 these models without the flag warns, because the result is a different model
 rather than a slightly worse one.
 
-`converters/esm_lm.py` also runs either tower standalone, if you want the hidden
+`python -m alphafold3.model.esm` also runs either tower standalone, if you want the hidden
 states themselves rather than a fold.
 
 ### Cyclic chains

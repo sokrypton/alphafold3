@@ -34,7 +34,7 @@ SOURCES = {
     'esmfold2_lm600m': dict(
         repo='biohub/ESMFold2-Experimental-Fast-base600M-step1500k'),
     # The protein language model ESMFold2 conditions on. NOT an AF3 model -- a
-    # separate graph with its own loader (converters/esm_lm.py). float32 is
+    # separate graph with its own loader (alphafold3/model/esm.py). float32 is
     # 25.4 GB and cannot even be WRITTEN as a blob (a record header packs its
     # length as a signed 32-bit int), so it is converted at int8.
     'esmc': dict(repo='biohub/ESMC-6B'),

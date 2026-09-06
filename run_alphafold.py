@@ -802,7 +802,7 @@ def _resolve_esm(use_esm, fold_input, model_runner):
   if not use_esm:
     return None, None
   from alphafold3.model import weights as weights_lib
-  from converters import esm_lm
+  from alphafold3.model import esm
 
   model_name = model_runner.model_name
   sequences = _protein_sequences(fold_input)
@@ -811,12 +811,11 @@ def _resolve_esm(use_esm, fold_input, model_runner):
     print('Running the ESM2 tower for chai-1...')
     # Multi-chain is fine here: the rows are concatenated in chain order and
     # land on the batch's protein tokens in that order.
-    rows = esm_lm.embed(sequences, weights_lib.default_dir('esm2'), 'esm2')
+    rows = esm.embed(sequences, weights_lib.default_dir('esm2'), 'esm2')
     print(f'ESM2 embeddings {rows.shape}')
     return rows, None
 
   from alphafold3.model import model_registry
-  from converters import esmfold2 as esmfold2_converter
   if len(sequences) != 1:
     # ESM-C wraps multiple chains as [EOS, BOS]-separated with a sequence_id
     # that restricts attention within a chain. That is implemented in the tower
@@ -830,12 +829,12 @@ def _resolve_esm(use_esm, fold_input, model_runner):
   # default_dir at fp32 on purpose, whatever --weights_precision says: a tower
   # is only ever int8 (converters.esm_lm.QUANT_SCHEME), so it has one directory
   # rather than one per precision.
-  hidden = esm_lm.embed(sequences[0], weights_lib.default_dir(tower),
+  hidden = esm.embed(sequences[0], weights_lib.default_dir(tower),
                         'esmc', tower)
   # The shim is the model's own -- every ESMFold2 release trains one, and
   # feeding a variant another's reads corr 0.026 against native.
-  shim = esmfold2_converter.load_shim_params(model_runner.model_dir, model_name)
-  return None, esmfold2_converter.shim(hidden, shim)
+  shim = esm.load_shim_params(model_runner.model_dir, model_name)
+  return None, esm.shim(hidden, shim)
 
 
 def predict_structure(
