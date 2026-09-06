@@ -415,9 +415,10 @@ _SAMPLER_CONSTANTS = {
     # check_release_config refusing the conversion, which is exactly the failure
     # it exists for: nothing about the wrong schedule errors, it just anneals
     # differently and returns a plausible structure.
-    'esmfold2_lm600m': dict(steps=15, gamma_0=0.605, gamma_min=1.107,
-                            noise_scale=0.901, step_scale=1.638, rho=8.0,
-                            sigma_min=0.0004, sigma_max=160.0, max_sigma=256.0),
+    **{m: dict(steps=15, gamma_0=0.605, gamma_min=1.107,
+               noise_scale=0.901, step_scale=1.638, rho=8.0,
+               sigma_min=0.0004, sigma_max=160.0, max_sigma=256.0)
+       for m in ('esmfold2_lm600m', 'esmfold2_lm300m')},
 }
 
 
@@ -472,6 +473,12 @@ ESMFOLD2_VARIANTS = {
     'esmfold2_lm600m': dict(
         hub='ESMFold2-Experimental-Fast-base600M-step1500k', trunk=24, msa=0,
         coda=0, lm_enc=0, msa_w=0, bins=128, conf_bins=128, esmc='esmc_600m'),
+    # Identical to the row above in every field but the tower: the two configs
+    # differ only in esmc_id, lm_d_model (960 vs 1152) and lm_num_layers (30 vs
+    # 36), all of which live in the LM, not the folding trunk.
+    'esmfold2_lm300m': dict(
+        hub='ESMFold2-Experimental-Fast-base300M-step1500k', trunk=24, msa=0,
+        coda=0, lm_enc=0, msa_w=0, bins=128, conf_bins=128, esmc='esmc_300m'),
 }
 
 ESMFOLD2_HUB_IDS = {m: v['hub'] for m, v in ESMFOLD2_VARIANTS.items()}

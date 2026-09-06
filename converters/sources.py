@@ -33,6 +33,8 @@ SOURCES = {
     # the 600M-ESM-C tier; pairs with the esmc_600m tower below
     'esmfold2_lm600m': dict(
         repo='biohub/ESMFold2-Experimental-Fast-base600M-step1500k'),
+    'esmfold2_lm300m': dict(
+        repo='biohub/ESMFold2-Experimental-Fast-base300M-step1500k'),
     # The protein language model ESMFold2 conditions on. NOT an AF3 model -- a
     # separate graph with its own loader (alphafold3/model/esm.py). float32 is
     # 25.4 GB and cannot even be WRITTEN as a blob (a record header packs its

@@ -56,6 +56,7 @@ shapes, sampler constants and input conventions are used.
 | `esmfold2_exp_cutoff2025` | [ESMFold2-Experimental-Cutoff2025](https://huggingface.co/biohub/ESMFold2-Experimental-Cutoff2025) | MIT |
 | `esmfold2_exp_fast_cutoff2025` | [ESMFold2-Experimental-Fast-Cutoff2025](https://huggingface.co/biohub/ESMFold2-Experimental-Fast-Cutoff2025) | MIT |
 | `esmfold2_lm600m` | [ESMFold2-Experimental-Fast-base600M-step1500k](https://huggingface.co/biohub/ESMFold2-Experimental-Fast-base600M-step1500k) — conditions on **ESM-C 600M**, not 6B | MIT |
+| `esmfold2_lm300m` | [ESMFold2-Experimental-Fast-base300M-step1500k](https://huggingface.co/biohub/ESMFold2-Experimental-Fast-base300M-step1500k) — conditions on **ESM-C 300M** | MIT |
 | `protenix05` | [Protenix v0.5.0](https://github.com/bytedance/Protenix) (ByteDance) | Apache 2.0 |
 | `protenix1` | [Protenix-v1](https://github.com/bytedance/Protenix) (ByteDance) | Apache 2.0 |
 | `protenix1_20250630` | [Protenix-v1 2025-06-30](https://github.com/bytedance/Protenix) (ByteDance) | Apache 2.0 |
@@ -63,11 +64,13 @@ shapes, sampler constants and input conventions are used.
 | `protenix_tiny` | [Protenix tiny](https://github.com/bytedance/Protenix) (ByteDance) | Apache 2.0 |
 
 The ESMFold2 variants fold from **ESM-C**, not an MSA. All but `esmfold2_lm600m`
-condition on ESM-C 6B; that one uses the 600M tower, and upstream ships the
+and `esmfold2_lm300m` condition on ESM-C 6B; those two use the 600M and 300M
+towers, which differ from each other in nothing but the tower (same trunk, same
+sampler, same heads) and cost 0.5 GB and 0.3 GB against 5.1. Upstream ships the
 "Experimental" line for paper reproducibility rather than for research use --
 its own card says to prefer plain `esmfold2`. Their language-model
 input is built outside the fold by `alphafold3.model.esm` (the tower, published
-int8 at 5.5 GB) and `converters.esmfold2` (the per-model shim, which rides
+int8 at 5.5 GB) and `alphafold3.model.esm`'s shim (per-model, which rides
 along with the weights). Given an MSA instead they fold from that: 5CAJ reads
 17.5 A from a single sequence and 1.24 A at MSA depth 256. Supplying neither is
 the one broken configuration.

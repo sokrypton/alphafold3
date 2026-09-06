@@ -72,9 +72,11 @@ MODELS = (
     'esmfold2_exp_fast',
     'esmfold2_exp_cutoff2025',
     'esmfold2_exp_fast_cutoff2025',
-    # the 600M-ESM-C tier: the experimental-fast architecture trained against a
-    # smaller tower, which is the only thing that differs
+    # the smaller-ESM-C tiers: the experimental-fast architecture trained
+    # against a smaller tower, which is the only thing that differs -- same
+    # trunk depth, same sampler, same heads.
     'esmfold2_lm600m',
+    'esmfold2_lm300m',
 )
 
 
@@ -86,7 +88,7 @@ MODELS = (
 ESMFOLD2_FAMILY = ('esmfold2', 'esmfold2_fast', 'esmfold2_exp',
                    'esmfold2_exp_fast', 'esmfold2_exp_cutoff2025',
                    'esmfold2_exp_fast_cutoff2025',
-                   'esmfold2_lm600m')
+                   'esmfold2_lm600m', 'esmfold2_lm300m')
 
 # ...with one real architectural split inside it. The two RELEASED models recycle
 # through the parcae SSM; the four EXPERIMENTAL ones carry `pair_loop_proj`
@@ -126,7 +128,7 @@ LEARNED_CONFIDENCE_BINS = ESMFOLD2_FAMILY
 # ESMFold2's language-model-tier releases are structure-only. Building the head
 # anyway would leave ~100 parameters at random init and emit a pLDDT that looks
 # like a prediction and is noise -- the same trap as chai1's resolved head.
-NO_CONFIDENCE_HEAD = ('esmfold2_lm600m',)
+NO_CONFIDENCE_HEAD = ('esmfold2_lm600m', 'esmfold2_lm300m')
 
 
 # Which LayerNorms carry a trained OFFSET, keyed by the norm's own name.

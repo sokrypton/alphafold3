@@ -18,7 +18,8 @@ _ENTRY_POINTS = {
     **{m: ('esmfold2', 'convert_esmfold2_weights')
        for m in ('esmfold2', 'esmfold2_fast', 'esmfold2_exp',
                  'esmfold2_exp_fast', 'esmfold2_exp_cutoff2025',
-                 'esmfold2_exp_fast_cutoff2025', 'esmfold2_lm600m')},
+                 'esmfold2_exp_fast_cutoff2025', 'esmfold2_lm600m',
+                 'esmfold2_lm300m')},
     'intellifold2': ('intellifold2', 'convert_intellifold2_weights'),
     'opendde': ('opendde', 'convert_opendde_weights'),
     'boltz2': ('boltz2', 'convert_boltz2_weights'),
@@ -58,6 +59,18 @@ class _Converters(dict):
       raise KeyError(key)
     module, attr = _ENTRY_POINTS[key]
     fn = getattr(importlib.import_module(f'.{module}', __name__), attr)
+    # Bind WHICH variant, where one function serves several names. The eight
+    # ESMFold2 releases share convert_esmfold2_weights, whose `model_name`
+    # defaults to 'esmfold2' -- so without this, converting any variant through
+    # this registry built the base model's graph and died in
+    # check_variant_table comparing the wrong row. Bound by inspection rather
+    # than by a list, so a converter that grows the parameter gets it too.
+    import inspect
+
+    if 'model_name' in inspect.signature(fn).parameters:
+      import functools
+
+      fn = functools.partial(fn, model_name=key)
     self[key] = fn
     return fn
 
