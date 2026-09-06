@@ -72,19 +72,36 @@ def fwd(b):
   tf = af3_model.create_target_feat_embedding(
       batch=fb, config=cfg.evoformer, global_config=cfg.global_config)
   mod = ev.Evoformer(cfg.evoformer, cfg.global_config)
+  per_pass = []
   for _ in range(N_PASSES):
     emb = mod(batch=fb, prev=prev, target_feat=tf, key=jax.random.PRNGKey(0))
+    per_pass.append(emb['pair'])
     prev = {**prev, **{k: v.astype(jnp.float32)
                        for k, v in emb.items() if k in prev}}
-  return emb
+  return emb, per_pass
 
 
 b = jax.tree_util.tree_map(jnp.asarray, utils.remove_invalidly_typed_feats(batch))
 p = afp.get_model_haiku_params(model_dir=d)
 p = {(k[len('diffuser/'):] if k.startswith('diffuser/') else k): v
      for k, v in p.items()}
-g = fwd.apply(p, jax.random.PRNGKey(0), b)
+g, per_pass = fwd.apply(p, jax.random.PRNGKey(0), b)
 z = np.asarray(g['pair'])
+
+# Per PASS, which says whether the divergence enters at the injection or grows
+# inside the 24 blocks. native's `trunk_in{i}` is what our _add_prev produces
+# (z_init + pair_loop_proj(z)); `trunk_pass{i}` is the block stack's output.
+taps = ev.ESM_TRUNK_TAPS
+for i in range(N_PASSES):
+  for ours, key, label in ((taps.get('z_parcae', [None] * 9)[i]
+                            if len(taps.get('z_parcae', [])) > i else None,
+                            'trunk_in%d' % i, 'injection'),
+                           (per_pass[i], 'trunk_pass%d' % i, 'after 24 blocks')):
+    if ours is None or key not in nat:
+      continue
+    a, bb = np.asarray(ours), nat[key][0]
+    print('   pass %d %-16s corr %.6f  std %.3f vs %.3f'
+          % (i, label, np.corrcoef(a.ravel(), bb.ravel())[0, 1], a.std(), bb.std()))
 print('%s: OUR trunk vs NATIVE trunk (native lm_z injected)' % MODEL)
 print('   shapes %s vs %s' % (z.shape, z_native.shape))
 print('   corr %.6f   relerr %.3e' % (
