@@ -528,11 +528,27 @@ class Model(hk.Module):
       *,
       sample_config: diffusion_head.SampleConfig,
   ) -> dict[str, jnp.ndarray]:
+    # ONCE, not once per sampling step per sample. The pair conditioning reads
+    # only the trunk embeddings and the batch -- the noise level enters the
+    # single half -- so building it inside the denoiser meant a LayerNorm, a
+    # projection and two transition blocks over (num_tokens, num_tokens,
+    # pair_channel), plus an (L, L, 139) relative encoding, were rebuilt for
+    # every step of every sample: ~1000 times in a default fold.
+    pair_cond = self.diffusion_module(
+        positions_noisy=None,        # unused on this path
+        noise_level=jnp.zeros(()),   # unused by the pair half
+        batch=batch,
+        embeddings=embeddings,
+        use_conditioning=True,
+        conditioning_only=True,
+    )
+
     denoising_step = functools.partial(
         self.diffusion_module,
         batch=batch,
         embeddings=embeddings,
         use_conditioning=True,
+        pair_cond=pair_cond,
     )
 
     sample = diffusion_head.sample(

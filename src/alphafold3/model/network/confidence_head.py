@@ -372,6 +372,11 @@ class ConfidenceHead(hk.Module):
             self.config.pairformer,
             self.global_config,
             with_single=True,
+            # ESMFold2's confidence trunk is pair-only, like its main trunk: no
+            # triangle attention. The single track stays built -- its zeroed
+            # weights cost O(L*c), not the O(L^3) the attention does.
+            with_pair_attention=(self.global_config.model
+                                 not in model_config.PAIR_ONLY_TRUNK),
             name='confidence_pairformer',
         )(
             act=pair_act,

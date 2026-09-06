@@ -89,8 +89,13 @@ def ensure_weights(model_name: str, model_dir=None, *, download=True,
   wanted = spec.weights_file_for(precision)
   if os.path.exists(os.path.join(model_dir, wanted)):
     return model_dir
-  if precision == 'fp32' and glob.glob(os.path.join(model_dir, '*.bin.zst')):
-    # a hand-converted or hand-placed blob under any name
+  if glob.glob(os.path.join(model_dir, '*.bin.zst')):
+    # A hand-converted or hand-placed blob under any name. NOT gated on the
+    # precision: a directory that already holds weights is weights you already
+    # have, which is what --weights_precision says it ignores. Gating it on
+    # fp32 meant that once int8 became the default, pointing --model_dir at a
+    # directory you had converted yourself DOWNLOADED the int8 blob into it and
+    # then failed, because the directory then held two.
     return model_dir
 
   if spec.weights_repo is None:

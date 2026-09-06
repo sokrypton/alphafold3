@@ -756,45 +756,6 @@ def convert_esmfold2_weights(checkpoint, output_dir, model_name='esmfold2'):
 # encoder's pair stacks and the confidence trunk -- ~95 M of 234.8 M parameters
 # -- need no graph code at all, only zero-fill.
 
-_AF3_PAIR_ATTENTION_LEAVES = (
-    'pair_attention1/act_norm/offset', 'pair_attention1/act_norm/scale',
-    'pair_attention1/gating_query/weights', 'pair_attention1/k_projection/weights',
-    'pair_attention1/output_projection/weights', 'pair_attention1/pair_bias_projection/weights',
-    'pair_attention1/q_projection/weights', 'pair_attention1/v_projection/weights',
-    'pair_attention2/act_norm/offset', 'pair_attention2/act_norm/scale',
-    'pair_attention2/gating_query/weights', 'pair_attention2/k_projection/weights',
-    'pair_attention2/output_projection/weights', 'pair_attention2/pair_bias_projection/weights',
-    'pair_attention2/q_projection/weights', 'pair_attention2/v_projection/weights',
-)
-
-
-def zero_pair_attention(block, c_z, num_head, qkv_dim=None):
-  """The 16 leaves AF3's pair block has and ESMFold2's does not, as zeros.
-
-  Shapes follow AF3's GridSelfAttention: q/k/v are (c_z, num_head, qkv_dim),
-  the output projection comes back the other way, and the pair bias is
-  (c_z, num_head).
-  """
-  qkv_dim = qkv_dim or c_z // num_head
-  # AF3's GridSelfAttention is not uniform in layout: q and k are HEAD-major
-  # (num_head, qkv_dim, c_z) while v is CHANNEL-major (c_z, num_head, qkv_dim),
-  # and the output projection is a plain (c_z, c_z). qkv_dim is c_z // num_head.
-  shapes = {
-      'act_norm/offset': (c_z,), 'act_norm/scale': (c_z,),
-      'q_projection/weights': (num_head, qkv_dim, c_z),
-      'k_projection/weights': (num_head, qkv_dim, c_z),
-      'v_projection/weights': (c_z, num_head, qkv_dim),
-      'gating_query/weights': (c_z, c_z),
-      'output_projection/weights': (c_z, c_z),
-      'pair_bias_projection/weights': (c_z, num_head),
-  }
-  out = dict(block)
-  for which in ('pair_attention1', 'pair_attention2'):
-    for leaf, shape in shapes.items():
-      out['%s/%s' % (which, leaf)] = np.zeros(shape, np.float32)
-  return out
-
-
 AF3_TRUNK = 'diffuser/evoformer'
 
 
@@ -824,11 +785,17 @@ def zero_single_track(block, c_z, c_s, num_head=16, qkv_dim=None):
 
 
 def af3_pair_stack(sd, prefix, n_blocks, c_z, num_head, scope):
-  """One ESMFold2 pair-only stack as an AF3 pairformer stack, attention zeroed."""
+  """One ESMFold2 pair-only stack as an AF3 pairformer stack.
+
+  No triangle attention: ESMFold2's PairUpdateBlock is tri_mul_out, tri_mul_in,
+  pair_transition. This used to write 16 zero leaves per block so that AF3's
+  block would evaluate the attention branch to zero -- correct, and it cost two
+  GridSelfAttentions per block per recycle to compute that zero. The graph now
+  skips the branch (PairFormerIteration(with_pair_attention=False)), so the
+  weights have nothing to feed and are not written.
+  """
   stacked = stack_blocks(
-      lambda i: zero_pair_attention(
-          pair_only_block(sd, '%s.blocks.%d' % (prefix, i)), c_z, num_head),
-      n_blocks)
+      lambda i: pair_only_block(sd, '%s.blocks.%d' % (prefix, i)), n_blocks)
   return nest(scope, stacked)
 
 
@@ -935,7 +902,7 @@ def af3_msa_block(sd, prefix, c_z, num_head, is_final, c_m, msa_heads=8,
     out['msa_attention1/output_projection/weights'] = t(m('Wout.weight'))
     out.update(nest('msa_transition',
                     common.transition(sd, prefix + '.msa_transition', d)))
-  out.update(zero_pair_attention(pair_only_block(sd, prefix), c_z, num_head))
+  out.update(pair_only_block(sd, prefix))
   return out
 
 
@@ -1462,8 +1429,7 @@ def map_esmfold2_to_af3_graph(sd, dims=None):
   # with zero weights contributes exactly zero, the same identity the trunk uses.
   conf = stack_blocks(
       lambda i: zero_single_track(
-          zero_pair_attention(pair_only_block(sd, '%s.folding_trunk.blocks.%d' % (ch, i)),
-                              c_z, pair_head), c_z, c_s),
+          pair_only_block(sd, '%s.folding_trunk.blocks.%d' % (ch, i)), c_z, c_s),
       dims['n_conf'])
   put(CH, nest('__layer_stack_no_per_layer/confidence_pairformer', conf))
   return flat

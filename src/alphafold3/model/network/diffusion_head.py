@@ -176,69 +176,97 @@ class DiffusionHead(hk.Module):
       embeddings: dict[str, jnp.ndarray],
       noise_level: jnp.ndarray,
       use_conditioning: bool,
+      parts: str = 'both',
   ) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """`parts` selects which half to build; the other is returned as None.
+
+    The PAIR half depends only on the trunk embeddings and the batch -- nothing
+    noise- or sample-dependent reaches it, the noise embedding is added to the
+    SINGLE half further down. It was nonetheless built inside the denoiser,
+    which is vmapped over samples and scanned over steps, so a default fold
+    rebuilt it ~1000 times: a LayerNorm, a projection and two transition blocks
+    over (num_tokens, num_tokens, pair_channel), plus the (L, L, 139) relative
+    encoding feeding them. `sample` now builds it once and passes it in.
+
+    Kept as ONE method with a selector rather than split in two: this is
+    @hk.transparent, so its parameters are named against the enclosing module,
+    and calling the same method twice keeps every name exactly where it was.
+    """
+    want_pair = parts in ('both', 'pair')
+    want_single = parts in ('both', 'single')
     single_embedding = use_conditioning * embeddings['single']
     pair_embedding = use_conditioning * embeddings['pair']
 
-    rel_features = featurization.create_relative_encoding(
-        seq_features=batch.token_features,
-        max_relative_idx=32,
-        max_relative_chain=2,
-    ).astype(pair_embedding.dtype)
-    pc = self.config.conditioning.pair_channel
-    if self.global_config.model == 'opendde':
-      # OpenDDE compresses the trunk pair and the rel-pos features SEPARATELY to
-      # pair_channel, concatenates (2*pc), then LN+projects -- rather than one joint
-      # projection over [pair_embedding, RAW rel_features]. The joint LN over the
-      # widened concat couples them, so this is a distinct forward path (new params:
-      # z_trunk_norm/projection + relpe_projection + the LN/projection at 2*pc).
-      z_trunk = hm.Linear(pc, precision='highest', name='z_trunk_projection')(
-          hm.LayerNorm(use_fast_variance=False, create_offset=model_config.affine_norm(self.global_config.model,
-                                                             'z_trunk_norm'),
-                       name='z_trunk_norm')(pair_embedding))
-      relpe = hm.Linear(pc, precision='highest', name='relpe_projection')(rel_features)
-      features_2d = jnp.concatenate([z_trunk, relpe], axis=-1)
-    elif self.global_config.model in model_config.DIFFUSION_PROJECTED_RELPOS:
-      # Boltz's pairwise_conditioner concats [RAW z_trunk(128), PROJECTED relpos(128)] -> 256
-      # (vs AF3's [z_trunk, RAW rel_features(139)] -> 267). relpe_projection == the trunk's
-      # rel_pos.linear_layer (139->128), the same weight used for z-init position_activations.
-      # Protenix rides the SAME path at c_z=256 ([z_trunk(256), relpe(256)] -> 512), but with
-      # its OWN relpe weight (DiffusionConditioning.relpe, distinct from the trunk's) and
-      # create_offset=False on the norms (the boltz2-gated offsets below stay boltz2-only).
-      relpe = hm.Linear(pc, precision='highest', name='relpe_projection')(rel_features)
-      features_2d = jnp.concatenate([pair_embedding, relpe], axis=-1)
-    elif self.global_config.model == 'chai1':
-      # chai conditions on [z_trunk, z_init] -- the token embedder's pair output,
-      # not a relative-position encoding at all (its relative features are
-      # already inside z_init). Trunk first, matching AF3's order here; note the
-      # SINGLE track concatenates the other way round, which is why the
-      # converter swaps that weight's halves and not this one.
-      features_2d = jnp.concatenate(
-          [pair_embedding, embeddings['pair_init'].astype(pair_embedding.dtype)],
-          axis=-1)
-    else:
-      features_2d = jnp.concatenate([pair_embedding, rel_features], axis=-1)
-    pair_cond = hm.Linear(
-        pc,
-        precision='highest',
-        name='pair_cond_initial_projection',
-    )(
-        hm.LayerNorm(
-            use_fast_variance=False,
-            # chai is AFFINE here (token_pair_proj.0 / token_in_proj.0 /
-            # fourier_proj.0 all carry a bias). Found by enumerating every
-            # affine LayerNorm in the checkpoint and diffing against the
-            # converter's scale-only scopes: three showed up, all three real.
-            create_offset=model_config.affine_norm(
-                self.global_config.model, 'pair_cond_initial_norm'),
-            name='pair_cond_initial_norm',
-        )(features_2d)
-    )
-
-    for idx in range(2):
-      pair_cond += diffusion_transformer.transition_block(
-          pair_cond, 2, self.global_config, name=f'pair_transition_{idx}'
+    if want_pair:
+      rel_features = featurization.create_relative_encoding(
+          seq_features=batch.token_features,
+          max_relative_idx=32,
+          max_relative_chain=2,
+      ).astype(pair_embedding.dtype)
+      pc = self.config.conditioning.pair_channel
+      if self.global_config.model == 'opendde':
+        # OpenDDE compresses the trunk pair and the rel-pos features SEPARATELY to
+        # pair_channel, concatenates (2*pc), then LN+projects -- rather than one joint
+        # projection over [pair_embedding, RAW rel_features]. The joint LN over the
+        # widened concat couples them, so this is a distinct forward path (new params:
+        # z_trunk_norm/projection + relpe_projection + the LN/projection at 2*pc).
+        z_trunk = hm.Linear(pc, precision='highest', name='z_trunk_projection')(
+            hm.LayerNorm(use_fast_variance=False, create_offset=model_config.affine_norm(self.global_config.model,
+                                                               'z_trunk_norm'),
+                         name='z_trunk_norm')(pair_embedding))
+        relpe = hm.Linear(pc, precision='highest', name='relpe_projection')(rel_features)
+        features_2d = jnp.concatenate([z_trunk, relpe], axis=-1)
+      elif self.global_config.model in model_config.DIFFUSION_PROJECTED_RELPOS:
+        # Boltz's pairwise_conditioner concats [RAW z_trunk(128), PROJECTED relpos(128)] -> 256
+        # (vs AF3's [z_trunk, RAW rel_features(139)] -> 267). relpe_projection == the trunk's
+        # rel_pos.linear_layer (139->128), the same weight used for z-init position_activations.
+        # Protenix rides the SAME path at c_z=256 ([z_trunk(256), relpe(256)] -> 512), but with
+        # its OWN relpe weight (DiffusionConditioning.relpe, distinct from the trunk's) and
+        # create_offset=False on the norms (the boltz2-gated offsets below stay boltz2-only).
+        relpe = hm.Linear(pc, precision='highest', name='relpe_projection')(rel_features)
+        features_2d = jnp.concatenate([pair_embedding, relpe], axis=-1)
+      elif self.global_config.model == 'chai1':
+        # chai conditions on [z_trunk, z_init] -- the token embedder's pair output,
+        # not a relative-position encoding at all (its relative features are
+        # already inside z_init). Trunk first, matching AF3's order here; note the
+        # SINGLE track concatenates the other way round, which is why the
+        # converter swaps that weight's halves and not this one.
+        features_2d = jnp.concatenate(
+            [pair_embedding, embeddings['pair_init'].astype(pair_embedding.dtype)],
+            axis=-1)
+      else:
+        features_2d = jnp.concatenate([pair_embedding, rel_features], axis=-1)
+      pair_cond = hm.Linear(
+          pc,
+          precision='highest',
+          name='pair_cond_initial_projection',
+      )(
+          hm.LayerNorm(
+              use_fast_variance=False,
+              # chai is AFFINE here (token_pair_proj.0 / token_in_proj.0 /
+              # fourier_proj.0 all carry a bias). Found by enumerating every
+              # affine LayerNorm in the checkpoint and diffing against the
+              # converter's scale-only scopes: three showed up, all three real.
+              create_offset=model_config.affine_norm(
+                  self.global_config.model, 'pair_cond_initial_norm'),
+              name='pair_cond_initial_norm',
+          )(features_2d)
       )
+
+      for idx in range(2):
+        pair_cond += diffusion_transformer.transition_block(
+            pair_cond, 2, self.global_config, name=f'pair_transition_{idx}'
+        )
+      if self.global_config.model == 'chai1':
+        # chai closes each track with an affine LayerNorm; the single one is
+        # applied with the single half below.
+        pair_cond = hm.LayerNorm(use_fast_variance=False,
+                                 name='pair_cond_final_norm')(pair_cond)
+    else:
+      pair_cond = None
+
+    if not want_single:
+      return None, pair_cond
 
     target_feat = embeddings['target_feat']
     if self.global_config.model in model_config.PAIR_ONLY_TRUNK:
@@ -370,7 +398,7 @@ class DiffusionHead(hk.Module):
           single_cond, 2, self.global_config, name=f'single_transition_{idx}'
       )
 
-    if self.global_config.model == 'chai1':
+    if self.global_config.model == 'chai1' and want_single:
       # chai closes its conditioning with an AFFINE LayerNorm on each track --
       # `single_ln` and `pair_ln` -- which AF3 does not have. Both feed every
       # adaLN downstream, and those scale by (s + 1), so leaving them out let
@@ -378,8 +406,6 @@ class DiffusionHead(hk.Module):
       # 160 at its output. Same failure the atom conditioning had.
       single_cond = hm.LayerNorm(use_fast_variance=False,
                                  name='single_cond_final_norm')(single_cond)
-      pair_cond = hm.LayerNorm(use_fast_variance=False,
-                               name='pair_cond_final_norm')(pair_cond)
 
     return single_cond, pair_cond
 
@@ -391,16 +417,38 @@ class DiffusionHead(hk.Module):
       batch: feat_batch.Batch,
       embeddings: dict[str, jnp.ndarray],
       use_conditioning: bool,
+      pair_cond: jnp.ndarray | None = None,
+      conditioning_only: bool = False,
   ) -> jnp.ndarray:
 
     with utils.bfloat16_context():
-      # Get conditioning
-      trunk_single_cond, trunk_pair_cond = self._conditioning(
+      if conditioning_only:
+        # Build and return the pair conditioning, nothing else. It has to be
+        # reached through __call__ rather than by calling _conditioning from
+        # outside: _conditioning is @hk.transparent, so its parameters attach to
+        # whatever module is on the stack, and calling it from the enclosing
+        # Model put them at `diffuser/pair_cond_initial_norm` instead of
+        # `diffuser/~/diffusion_head/pair_cond_initial_norm`.
+        _, only_pair_cond = self._conditioning(
+            batch=batch,
+            embeddings=embeddings,
+            noise_level=noise_level,
+            use_conditioning=use_conditioning,
+            parts='pair',
+        )
+        return only_pair_cond
+
+      # Get conditioning. The pair half is noise- and sample-independent, so
+      # `sample` builds it once and hands it in; only the single half, which
+      # carries the noise embedding, is rebuilt per step.
+      trunk_single_cond, built_pair_cond = self._conditioning(
           batch=batch,
           embeddings=embeddings,
           noise_level=noise_level,
           use_conditioning=use_conditioning,
+          parts='single' if pair_cond is not None else 'both',
       )
+      trunk_pair_cond = pair_cond if pair_cond is not None else built_pair_cond
 
       # Extract features
       sequence_mask = batch.token_features.mask

@@ -647,6 +647,7 @@ class PairFormerIteration(hk.Module):
       config: Config,
       global_config: model_config.GlobalConfig,
       with_single=False,
+      with_pair_attention=True,
       *,
       name,
   ):
@@ -654,6 +655,18 @@ class PairFormerIteration(hk.Module):
     self.config = config
     self.global_config = global_config
     self.with_single = with_single
+    # ESMFold2's PairUpdateBlock is tri_mul_out, tri_mul_in, pair_transition and
+    # nothing else -- no triangle attention at all. The port expressed that by
+    # filling the attention weights with zeros, which reproduces the block
+    # exactly (the act_norm scale is zero, so the whole branch evaluates to zero
+    # and lands on a residual add) but pays for two full GridSelfAttentions per
+    # block to compute it. That is 24 or 48 blocks times every recycle, and
+    # triangle attention is the same order as the triangle multiplications that
+    # are actually wanted -- so it roughly doubled the trunk.
+    #
+    # NOT inferable from with_single: the template stacks are pair-only too and
+    # their attention is real.
+    self.with_pair_attention = with_pair_attention
 
   def __call__(
       self,
@@ -719,7 +732,9 @@ class PairFormerIteration(hk.Module):
         transpose=tr,
     )(act if not parallel else pair_in, pair_mask)
 
-    if self.config.pair_attention.dual_output:
+    if not self.with_pair_attention:
+      pass
+    elif self.config.pair_attention.dual_output:
       # chai's confidence triangle attention is ONE module over both directions
       # whose output projection mixes them, then splits into a half that is kept
       # and a half that is transposed. Each direction therefore contributes to
@@ -825,10 +840,15 @@ class EvoformerIteration(hk.Module):
       config: Config,
       global_config: model_config.GlobalConfig,
       name='evoformer_iteration',
+      with_pair_attention=True,
   ):
     super().__init__(name=name)
     self.config = config
     self.global_config = global_config
+    # As in PairFormerIteration: ESMFold2's MSA encoder block has no triangle
+    # attention, and the port expressed that with zero weights -- which still
+    # costs two GridSelfAttentions per block to compute a guaranteed zero.
+    self.with_pair_attention = with_pair_attention
 
   def __call__(self, activations, masks, use_dropout=False):
 
@@ -932,12 +952,14 @@ class EvoformerIteration(hk.Module):
       # (`z20 = token_pair_repr + (pair_repr13 + tri_attn_output2)`).
       delta = _tri_mul_out(pair_act) + _tri_mul_in(pair_act) + _transition(pair_act)
       pair_act = pair_act + delta
-      pair_act = pair_act + (_attn1(pair_act) + _attn2(pair_act))
+      if self.with_pair_attention:
+        pair_act = pair_act + (_attn1(pair_act) + _attn2(pair_act))
     else:
       pair_act += _tri_mul_out(pair_act)
       pair_act += _tri_mul_in(pair_act)
-      pair_act += _attn1(pair_act)
-      pair_act += _attn2(pair_act)
+      if self.with_pair_attention:
+        pair_act += _attn1(pair_act)
+        pair_act += _attn2(pair_act)
       pair_act += _transition(pair_act)
 
     return {'msa': msa_act, 'pair': pair_act}

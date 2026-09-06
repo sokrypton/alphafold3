@@ -53,9 +53,10 @@ def _per_atom_conditioning(
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
   """computes single and pair conditioning for all atoms in each token.
 
-  need_pair=False returns None for the pair half and skips the two Linears that
-  only it uses. Its sole caller discards that half, so those parameters were
-  being created, left unmapped, and computed into a thrown-away tensor.
+  need_pair=False returns None for the pair half and skips ALL of it. Its sole
+  caller discards that half for every model, so the whole pair branch was
+  parameters created, left unmapped, and computed into a thrown-away tensor --
+  inside the diffusion denoiser, so once per sampling step per sample.
   """
 
   c = config
@@ -119,6 +120,15 @@ def _per_atom_conditioning(
     act = hm.LayerNorm(name=f'{name}_atom_features_norm')(act)
   act *= batch.ref_structure.mask.astype(jnp.float32)[:, :, None]
 
+  if not need_pair:
+    # BEFORE the row/column projections, not after. Everything below builds a
+    # (num_tokens, num_dense, num_dense, channels) tensor that the only caller
+    # discards, and this runs inside the diffusion denoiser -- once per sampling
+    # step per sample, so ~1000 times in a default fold. The earlier version of
+    # this guard returned after the broadcast, which left the two Linears and
+    # the (L, 24, 24, c) intermediate being built and thrown away anyway.
+    return act, None
+
   # Compute pair conditioning
   # shape (num_tokens, num_dense, num_dense, channels)
   # Embed single features
@@ -129,8 +139,6 @@ def _per_atom_conditioning(
       c.per_atom_pair_channels, name=f'{name}_single_to_pair_cond_col'
   )(jax.nn.relu(act))
   pair_act = row_act[:, :, None, :] + col_act[:, None, :, :]
-  if not need_pair:
-    return act, None
   # Embed pairwise offsets
   pair_act += hm.Linear(
       c.per_atom_pair_channels,
@@ -256,16 +264,14 @@ def atom_cross_att_encoder(
   # Compute single conditioning from atom meta data and convert to queries
   # layout.
   # (num_subsets, num_queries, channels)
-  # The pair half of _per_atom_conditioning is DISCARDED here -- its only call
-  # site -- so for chai1 skip building it. That was four Linears' worth of
-  # parameters left at random init and computed into a thrown-away tensor: no
-  # effect on results (atom_pair gates at 1.000000 either way), pure waste.
-  # Gated rather than removed outright because other families' converters map
-  # those names.
+  # The pair half of _per_atom_conditioning is DISCARDED here, and this is its
+  # only call site, so no model needs it built. It was gated to chai1 alone out
+  # of caution because other families' converters map those parameter names --
+  # but mapping a name costs nothing at run time, and an unused parameter in a
+  # blob is ignored on load. Verified bit-identical on chai1 (which already
+  # skipped it) and on models that did not.
   token_atoms_single_cond, _ = _per_atom_conditioning(
-      config, batch, name, global_config,
-      need_pair=global_config.model != 'chai1',
-  )
+      config, batch, name, global_config, need_pair=False)
   token_atoms_mask = batch.predicted_structure_info.atom_mask
   queries_single_cond = atom_layout.convert(
       batch.atom_cross_att.token_atoms_to_queries,

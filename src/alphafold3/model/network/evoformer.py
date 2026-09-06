@@ -490,6 +490,7 @@ class Evoformer(hk.Module):
       def lm_fn(z):
         return modules.PairFormerIteration(
             self.config.pairformer, self.global_config, with_single=False,
+            with_pair_attention=False,
             name='lm_encoder')(act=z, pair_mask=pair_mask,
                                use_dropout=use_dropout)
 
@@ -568,7 +569,10 @@ class Evoformer(hk.Module):
 
     def evoformer_fn(x):
       return modules.EvoformerIteration(
-          self.config.msa_stack, self.global_config, name='msa_stack'
+          self.config.msa_stack, self.global_config, name='msa_stack',
+          # ESMFold2's MSAEncoderBlock has no triangle attention either.
+          with_pair_attention=(self.global_config.model
+                               not in model_config.PAIR_ONLY_TRUNK),
       )(
           activations=x,
           masks=masks,
@@ -832,6 +836,9 @@ class Evoformer(hk.Module):
             self.config.pairformer,
             self.global_config,
             with_single=not pair_only,
+            # ESMFold2's blocks have no triangle attention; every other family's
+            # trunk does.
+            with_pair_attention=not pair_only,
             name='trunk_pairformer',
         )
         pair_act, single_act = x
@@ -872,6 +879,7 @@ class Evoformer(hk.Module):
         def coda_fn(z):
           return modules.PairFormerIteration(
               self.config.pairformer, self.global_config, with_single=False,
+              with_pair_attention=False,
               name='trunk_coda')(act=z, pair_mask=pair_mask, use_dropout=use_dropout)
 
         pair_activations = _stack(self.config.coda.num_layer, coda_fn,
