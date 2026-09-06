@@ -135,7 +135,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "absl-py", specifier = ">=2.3.1" },
-    { name = "dm-haiku", specifier = "==0.0.16" },
+    { name = "dm-haiku", specifier = "==0.0.17" },
     { name = "etils", extras = ["epath"] },
     { name = "gcsfs", marker = "extra == 'gcsfs'" },
     { name = "jax", specifier = "==0.10.2" },
@@ -304,7 +304,7 @@ wheels = [
 
 [[package]]
 name = "dm-haiku"
-version = "0.0.16"
+version = "0.0.17"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "absl-py", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
@@ -312,9 +312,9 @@ dependencies = [
     { name = "numpy", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
     { name = "tabulate", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/2a/fc/daf4689198f4c0af8b71611f39fcd5d68ce0ae59fa919b9e58192a7d70f5/dm_haiku-0.0.16.tar.gz", hash = "sha256:1830b0ce63c5cef2fb3a63a13033c9d8f612ee7f896f2b0b25a6ba484f5fad28", size = 263092, upload-time = "2025-12-17T15:55:35.145Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/6b/1c/0968ff6092ff510dca8dfb8ce14c4fcb6059dd680ee15e46410de993415d/dm_haiku-0.0.17.tar.gz", hash = "sha256:6daa56f3b54f43675713ef7525d1dec7327f2512b57cc2b12104f76f6d7cf581", size = 265004, upload-time = "2026-07-27T09:46:52.571Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/14/91/0f53835d0292a74e6b37e68125b669827e2a75a26e01c34741d6c13cca6c/dm_haiku-0.0.16-py3-none-any.whl", hash = "sha256:cc355d4d5aaa85af20e5a23ccd278bc751232ac8e5971261bed39318c07d744f", size = 374267, upload-time = "2025-12-17T15:55:33.9Z" },
+    { url = "https://files.pythonhosted.org/packages/54/82/7045ad957defb3bfc28b89c748a1874c73f37b9337963b52d6de48ca4648/dm_haiku-0.0.17-py3-none-any.whl", hash = "sha256:aa1394276adf59d695c910810ad90febb741503a83c32b022ce1162483904bbb", size = 377007, upload-time = "2026-07-27T09:46:51.365Z" },
 ]
 
 [[package]]
