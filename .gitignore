@@ -13,3 +13,9 @@ src/alphafold3/constants/converters/*.pickle
 
 # Jupyter leaves these next to whatever it opens.
 .ipynb_checkpoints/
+
+# dev-only: port verification harnesses (native oracles, localisation ladders,
+# fold gates), plus any other scratch. They run against locally converted
+# weights and native torch checkpoints that are not in this repo, so the whole
+# directory is kept out of tree.
+dev/

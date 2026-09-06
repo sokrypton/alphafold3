@@ -38,16 +38,6 @@ import jax
 import jax.numpy as jnp
 
 
-# per-block pair reps when CHAI_TAP_MSA_BLOCKS=1; diagnostic, default empty
-MSA_BLOCK_TAPS = []
-
-# per-block pair reps of the TRUNK stack when ESM_TAP_TRUNK_BLOCKS=1. A stack
-# comparison says a pass is wrong; this says WHICH block, and whether the error
-# is spread evenly (a per-block convention) or concentrated (a mapping error).
-# Those point at different fixes, so it is worth the tap rather than a guess.
-TRUNK_BLOCK_TAPS = []
-
-
 def _stack(num_layer, fn, remat):
   """ColabDesign2: a layer_stack, optionally gradient-checkpointed.
 
@@ -196,17 +186,6 @@ def boltz2_contact_conditioning(contact, threshold, num_channels, dtype):
   return (enc * (1 - selected)
           + unspecified * contact[..., 0:1].astype(dtype)
           + unselected * contact[..., 1:2].astype(dtype))
-
-
-# Diagnostic taps for the pair-only (ESMFold2) injection, default OFF. The
-# trunk is assembled from three stages that all look alike in the output; the
-# taps say WHICH one diverges without re-deriving the whole thing.
-ESM_TRUNK_TAPS = {}
-
-
-def _tap(name, value):
-  if os.environ.get('ESM_TRUNK_TAP') == '1':
-    ESM_TRUNK_TAPS.setdefault(name, []).append(value)
 
 
 class Evoformer(hk.Module):
@@ -596,26 +575,9 @@ class Evoformer(hk.Module):
           use_dropout=use_dropout,
       )
 
-    if os.environ.get('CHAI_TAP_MSA_BLOCKS') == '1':
-      # Diagnostic only (default OFF, like CHAI_NOCHURN). A python loop would
-      # SHARE one set of weights across all four blocks -- layer_stack gives
-      # each block its own -- so the blocks still run under layer_stack and the
-      # per-block pair reps ride out as its per-layer outputs, exactly as the
-      # atom stack's taps do.
-      MSA_BLOCK_TAPS.clear()
-
-      def tapped_fn(x):
-        out = evoformer_fn(x)
-        return out, out['pair']
-
-      evoformer_output, per_block = hk.experimental.layer_stack(
-          self.config.msa_stack.num_layer, with_per_layer_inputs=True
-      )(tapped_fn)(evoformer_input)
-      MSA_BLOCK_TAPS.append(per_block)
-    else:
-      evoformer_stack = _stack(self.config.msa_stack.num_layer, evoformer_fn,
-                               self.config.pairformer.block_remat)
-      evoformer_output = evoformer_stack(evoformer_input)
+    evoformer_stack = _stack(self.config.msa_stack.num_layer, evoformer_fn,
+                             self.config.pairformer.block_remat)
+    evoformer_output = evoformer_stack(evoformer_input)
     pair_out = evoformer_output['pair']
 
     if self.global_config.model in ('boltz2', 'chai1'):
@@ -747,13 +709,10 @@ class Evoformer(hk.Module):
         # `pair_init` stays unset: that is chai's separate business (it seeds its
         # recycle carry with the initial representation), and setting it here
         # would add a fourth entry to the scan carry and break the loop.
-        _tap('z_pair0', pair_activations)
         pair_activations = self._relative_encoding(batch, pair_activations)
-        _tap('z_relpos', pair_activations)
         pair_activations = self._embed_bonds(
             batch=batch, pair_activations=pair_activations
         )
-        _tap('z_init', pair_activations)
         msa_after = (self.global_config.model
                      in model_config.MSA_AFTER_RECYCLE)
         if self.config.msa_stack.num_layer and not msa_after:
@@ -775,7 +734,6 @@ class Evoformer(hk.Module):
         pair_activations = self._embed_lm_pair(
             batch=batch, pair_activations=pair_activations,
             pair_mask=pair_mask, key=key, use_dropout=use_dropout)
-        _tap('z_inject', pair_activations)
         pair_activations = _add_prev(pair_activations, None)
         if self.config.msa_stack.num_layer and msa_after:
           # the experimental line: after the recycle, and ADDED. Its encoder
@@ -797,7 +755,6 @@ class Evoformer(hk.Module):
             pair_activations = pair_activations + msa_out
           # with a query-only MSA `msa_track_mask` is all False and native's
           # whole update is multiplied by zero, so there is nothing to add.
-        _tap('z_parcae', pair_activations)
       elif chai:
         pair_activations = self._relative_encoding(batch, pair_activations)
         pair_init = pair_activations
@@ -892,33 +849,13 @@ class Evoformer(hk.Module):
             use_dropout=use_dropout,   # traced; captured from the enclosing call
         )
 
-      if os.environ.get('ESM_TAP_TRUNK_BLOCKS') == '1':
-        # Diagnostic only. layer_stack gives each block its OWN weights where a
-        # python loop would share one set, so the blocks still run stacked and
-        # the per-block pair reps ride out as per-layer outputs -- the same
-        # shape as the MSA tap above. One entry is APPENDED per recycle pass and
-        # nothing is cleared here: clearing would leave only the last pass, and
-        # the native dump this is compared against is pass 0. The caller clears.
+      pairformer_stack = _stack(self.config.pairformer.num_layer,
+                                pairformer_fn,
+                                self.config.pairformer.block_remat)
 
-        def tapped_pairformer(x):
-          out = pairformer_fn(x)
-          return out, out[0]
-
-        (pair_activations, single_activations), per_block = (
-            hk.experimental.layer_stack(self.config.pairformer.num_layer,
-                                        with_per_layer_inputs=True)(
-                                            tapped_pairformer)(
-                                                (pair_activations,
-                                                 single_activations)))
-        TRUNK_BLOCK_TAPS.append(per_block)
-      else:
-        pairformer_stack = _stack(self.config.pairformer.num_layer,
-                                  pairformer_fn,
-                                  self.config.pairformer.block_remat)
-
-        pair_activations, single_activations = pairformer_stack(
-            (pair_activations, single_activations)
-        )
+      pair_activations, single_activations = pairformer_stack(
+          (pair_activations, single_activations)
+      )
 
       pair_pre_coda = pair_activations
       if pair_only and self.config.coda.num_layer:

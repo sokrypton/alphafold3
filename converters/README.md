@@ -60,7 +60,7 @@ family added an offset or a bias, the converter simply never asks for the key an
 nothing anywhere fires. `audit_coverage.py` is that second direction:
 
 ```bash
-PYTHONPATH=src:. python -m converters.audit_coverage protenix2
+PYTHONPATH=src:. python dev/audit_coverage.py protenix2
 ```
 
 It wraps the state dict to record every key addressed by name, then resolves the
@@ -151,7 +151,7 @@ i/j crossing between AF3's two pair-embedding sites (see
 `../OF3_AF3_PORTING_NOTES.md`).
 
 ```bash
-PYTHONPATH=src:. python -m pytest converters/openfold3_test.py -q
+PYTHONPATH=src:. python -m pytest dev/openfold3_test.py -q
 ```
 
 ## Publishing

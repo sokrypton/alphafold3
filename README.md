@@ -332,7 +332,7 @@ Beyond them, three whose code this borrows from directly:
     built on this same Haiku graph. Two things here come straight from it. One is
     the padded-key attention mask, which protenix2 and opendde were missing. The
     other is the discipline of asserting that **every** checkpoint tensor is
-    consumed exactly once — `converters/audit_coverage.py` is that check, and it
+    consumed exactly once — `dev/audit_coverage.py` is that check (dev-only, out of tree), and it
     found four dropped distogram biases, three LayerNorm offsets and a
     single-conditioner bias that eight ports' worth of correlation gates had all
     scored as passing. Independent agreement on the rest of the Protenix config

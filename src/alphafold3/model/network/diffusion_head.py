@@ -110,16 +110,6 @@ def noise_schedule(t, smin=0.0004, smax=160.0, p=7):
   )
 
 
-# Stage taps for the ESMFold2 denoiser localisation, default OFF. Mirrors
-# evoformer.ESM_TRUNK_TAPS; see esmfold2_localise_denoise.py.
-DIFF_TAPS = {}
-
-
-def _tap(name, value):
-  if os.environ.get('ESM_DIFF_TAP') == '1':
-    DIFF_TAPS.setdefault(name, []).append(value)
-
-
 class ConditioningConfig(base_config.BaseConfig):
   pair_channel: int
   seq_channel: int
@@ -430,9 +420,6 @@ class DiffusionHead(hk.Module):
           name='diffusion',
       )
       act = enc.token_act
-      _tap('single_cond', trunk_single_cond)
-      _tap('pair_cond', trunk_pair_cond)
-      _tap('token_act', act)
 
       # Token-token attention
       act = jnp.asarray(act, dtype=jnp.float32)
@@ -457,7 +444,6 @@ class DiffusionHead(hk.Module):
           name='single_cond_embedding_projection',
       )(_s_cond_in)
 
-      _tap('act_pre_transformer', act)
       act = jnp.asarray(act, dtype=jnp.float32)
       trunk_single_cond = jnp.asarray(trunk_single_cond, dtype=jnp.float32)
       trunk_pair_cond = jnp.asarray(trunk_pair_cond, dtype=jnp.float32)
@@ -481,7 +467,6 @@ class DiffusionHead(hk.Module):
               self.global_config.model, 'output_norm'),
           name='output_norm'
       )(act)
-      _tap('act_post_transformer', act)
       # (n_tokens, per_token_channels)
 
       # (Possibly) atom-granularity decoder
@@ -495,7 +480,6 @@ class DiffusionHead(hk.Module):
           name='diffusion',
       )
 
-      _tap('r_update', position_update)
       skip_scaling = SIGMA_DATA**2 / (noise_level**2 + SIGMA_DATA**2)
       out_scaling = (
           noise_level * SIGMA_DATA / jnp.sqrt(noise_level**2 + SIGMA_DATA**2)
@@ -560,15 +544,7 @@ def sample(
     # min(S_churn / N, sqrt(2) - 1) applied wherever S_tmin <= sigma <= S_tmax,
     # keyed on the CURRENT sigma. AF3 instead switches a fixed gamma_0 on above
     # a threshold.
-    if chai and os.environ.get('CHAI_NOCHURN'):
-      # DIAGNOSTIC ONLY (env-gated, off by default): run the tail deterministically.
-      # The trajectory peaks at 3.67 A near sigma=2 and then degrades for ~55
-      # steps with churn on. Noise inflates distances, so churn cannot be
-      # shrinking bonds itself -- but it re-exposes the state to a possibly
-      # biased correction every step. If gamma=0 stops the decay, the fault is
-      # that interaction; if not, it is the denoised prediction alone.
-      gamma = jnp.zeros_like(noise_level_prev)
-    elif chai:
+    if chai:
       gamma = jnp.where(
           (noise_level_prev >= CHAI_S_TMIN) & (noise_level_prev <= CHAI_S_TMAX),
           min(CHAI_S_CHURN / config.steps, 2.0 ** 0.5 - 1.0), 0.0)

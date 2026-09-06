@@ -179,7 +179,7 @@ def main(argv=None):
   a = ap.parse_args(argv)
   seq = a.seq
   if not seq:
-    from converters.oracles.fold_check import parse_ca
+    from converters.pdb import parse_ca
     seq, _ = parse_ca(os.path.expanduser(a.pdb))
   h = embed(seq, a.model_dir)
   np.savez_compressed(os.path.expanduser(a.out), lm_hidden=h.astype(np.float32))

@@ -31,14 +31,6 @@ from jax import numpy as jnp
 import numpy as np
 import tokamax
 
-# Diagnostic tap for the chai1 port (default OFF, same pattern as the diffusion
-# head's CHAI_NOCHURN). The atom stack's per-block outputs are the one thing the
-# frozen chai graph can be tapped for that we could not otherwise see, so when
-# CHAI_TAP_ATOM_BLOCKS=1 the blocks' activations ride out through layer_stack's
-# per-layer outputs instead of being discarded.
-_TAP_ATOM_BLOCKS = os.environ.get('CHAI_TAP_ATOM_BLOCKS') == '1'
-ATOM_BLOCK_TAPS = []
-
 
 def adaptive_layernorm(x, single_cond, name, global_config=None, atom=False):
   """Adaptive LayerNorm."""
@@ -716,11 +708,11 @@ class CrossAttTransformer(hk.Module):
           atom=True,
       )
       queries_act = block_in + attn + trans
-      # the two branches separately: chai's block output is
-      # 1929 = 1777(block_in) + 1927(trans) + 1907(attn), so tapping each says
-      # WHICH branch is wrong rather than just that the block is.
-      return queries_act, ((queries_act, attn, trans) if _TAP_ATOM_BLOCKS
-                           else None)
+      # The per-layer output is unused, but layer_stack must keep
+      # with_per_layer_inputs: it names its scope after that flag, so dropping
+      # it would rename every stacked param and orphan every converted
+      # checkpoint.
+      return queries_act, None
 
     # OpenDDE applies the atom-pair LayerNorm PER BLOCK (its own layernorm_z per
     # block) rather than once shared. Gated on global_config.model so AF3/OF3/IF2
@@ -780,12 +772,7 @@ class CrossAttTransformer(hk.Module):
     # (num_block, num_subsets, num_heads, num_queries, num_keys)
     pair_logits = jnp.transpose(pair_logits, [3, 0, 4, 1, 2])
 
-    stack_in = queries_act
-    stacked, per_block = hk.experimental.layer_stack(
+    stacked, _ = hk.experimental.layer_stack(
         self.config.num_blocks, with_per_layer_inputs=True
     )(block)(queries_act, pair_logits)
-    if _TAP_ATOM_BLOCKS:
-      # the stack's INPUT rides out too: a per-block gap means nothing until the
-      # input to block 0 is known to be exact.
-      ATOM_BLOCK_TAPS.append((stack_in, per_block))
     return stacked
