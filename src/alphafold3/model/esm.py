@@ -240,6 +240,35 @@ def forward(ids, p, dims, all_states=None):
 # Loading and the CLI.
 # ---------------------------------------------------------------------------
 
+# Weights kept on the device between calls, keyed by blob path. OFF by default,
+# and the default is the point: uploading them costs ~0.6 s of a ~2.6 s call,
+# while HOLDING them costs 6.36 GB for the 6B tower -- on a 23 GB card that is
+# memory the fold itself needs, and the tower runs once per fold input, so the
+# trade is 2% of one fold against a materially higher chance of an OOM in it.
+#
+# It is worth it when the tower is called repeatedly and no fold is competing
+# for the card: a design loop, or scoring many sequences. Then the upload
+# happens once instead of per call.
+#
+#     AF3_ESM_DEVICE_CACHE=1        keep them resident
+#     esm.release_device_cache()    hand the memory back
+_DEVICE_CACHE = {}
+
+
+def release_device_cache():
+  """Drop any device-resident tower weights. Safe to call when none are held."""
+  _DEVICE_CACHE.clear()
+
+
+def _to_device(params, key):
+  if os.environ.get('AF3_ESM_DEVICE_CACHE') != '1':
+    return params
+  if key not in _DEVICE_CACHE:
+    _DEVICE_CACHE[key] = {k: jax.device_put(np.asarray(v))
+                          for k, v in params.items()}
+  return _DEVICE_CACHE[key]
+
+
 def _cache_dir(path):
   return path[: -len('.bin.zst')] + '.unpacked' if path.endswith('.bin.zst') else None
 
@@ -345,7 +374,7 @@ def load(model_dir=None, family='esmc', tower=None):
   cached = _read_cache(cache) if (cache and os.environ.get('AF3_ESM_CACHE', '1')
                                   != '0') else None
   if cached is not None:
-    return cached, _dims_from(cached, family)
+    return _to_device(cached, path), _dims_from(cached, family)
 
   per_block = collections.defaultdict(dict)
   p = {}
@@ -384,7 +413,7 @@ def load(model_dir=None, family='esmc', tower=None):
       p[key] = np.asarray(arr, np.float32)
   if cache and os.environ.get('AF3_ESM_CACHE', '1') != '0':
     _write_cache(cache, p)
-  return p, _dims_from(p, family)
+  return _to_device(p, path), _dims_from(p, family)
 
 
 def _dims_from(p, family):
