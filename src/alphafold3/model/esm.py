@@ -240,6 +240,61 @@ def forward(ids, p, dims, all_states=None):
 # Loading and the CLI.
 # ---------------------------------------------------------------------------
 
+def _cache_dir(path):
+  return path[: -len('.bin.zst')] + '.unpacked' if path.endswith('.bin.zst') else None
+
+
+def _read_cache(cache):
+  """-> the params memory-mapped, or None if the cache is absent/incomplete.
+
+  Memory-mapped rather than read: the scan uploads each block's weights to the
+  device as it reaches them, so the pages are wanted exactly once and in order,
+  and the OS is better at that than we are. Opening costs nothing measurable.
+  """
+  stamp = os.path.join(cache, 'MANIFEST')
+  if not os.path.exists(stamp):
+    return None
+  keys = open(stamp).read().split('\n')
+  out = {}
+  for key in keys:
+    if not key:
+      continue
+    f = os.path.join(cache, key.replace('/', '__') + '.npy')
+    if not os.path.exists(f):
+      return None
+    out[key] = np.load(f, mmap_mode='r')
+  return out
+
+
+def _write_cache(cache, params):
+  """Store the DECOMPRESSED weights beside the blob, once.
+
+  zstd buys 14% on top of int8 -- 5.5 GB against 6.4 -- and costs 13 s of
+  single-threaded decompression on every load, which was 59% of a 21 s load and
+  by far the largest fixed cost in the language-model path. Decompression of one
+  frame cannot be parallelised, so the only way not to pay it repeatedly is not
+  to repeat it.
+
+  Written to a temporary directory and renamed, so an interrupted write leaves
+  no half-cache for the next run to trust.
+  """
+  import shutil
+  tmp = cache + '.partial'
+  shutil.rmtree(tmp, ignore_errors=True)
+  os.makedirs(tmp, exist_ok=True)
+  try:
+    for key, arr in params.items():
+      np.save(os.path.join(tmp, key.replace('/', '__') + '.npy'), np.asarray(arr))
+    with open(os.path.join(tmp, 'MANIFEST'), 'w') as fh:
+      fh.write('\n'.join(params))
+    shutil.rmtree(cache, ignore_errors=True)
+    os.rename(tmp, cache)
+  except OSError as err:                      # a full disk is not a fold error
+    shutil.rmtree(tmp, ignore_errors=True)
+    print('esm: could not write the unpacked cache (%s); '
+          'the blob will be decompressed each run' % err)
+
+
 def load(model_dir=None, family='esmc', tower=None):
   """-> (params, dims). Weights stay INT8; the scan body dequantises per block.
 
@@ -283,6 +338,15 @@ def load(model_dir=None, family='esmc', tower=None):
     repo = model_registry.get('esmfold2' if family == 'esmc' else 'chai1')
     weights._download(weights._HF_URL.format(repo=repo.weights_repo,
                                              file='%s.bin.zst' % tower), path)
+  # The unpacked cache, if a previous run left one. Everything below this point
+  # -- decompress, parse, restack, dequantise the small tensors -- produces
+  # exactly what it stores.
+  cache = _cache_dir(path)
+  cached = _read_cache(cache) if (cache and os.environ.get('AF3_ESM_CACHE', '1')
+                                  != '0') else None
+  if cached is not None:
+    return cached, _dims_from(cached, family)
+
   per_block = collections.defaultdict(dict)
   p = {}
   with open(path, 'rb') as fh:
@@ -318,14 +382,19 @@ def load(model_dir=None, family='esmc', tower=None):
                 * sc).reshape(q.shape)
     else:
       p[key] = np.asarray(arr, np.float32)
+  if cache and os.environ.get('AF3_ESM_CACHE', '1') != '0':
+    _write_cache(cache, p)
+  return p, _dims_from(p, family)
+
+
+def _dims_from(p, family):
   n_layers = (p['blocks/qkv/weights'] if family == 'esmc'
               else p['blocks/q/weights']).shape[0]
   d_model = p['embed/weights'].shape[1]
-  dims = dict(family=family, n_layers=n_layers, d_model=d_model,
+  return dict(family=family, n_layers=n_layers, d_model=d_model,
               n_heads=d_model // 64,
               residual_scale=(float(np.sqrt(n_layers / 36.0))
                               if family == 'esmc' else 1.0))
-  return p, dims
 
 
 def embed(sequences, model_dir=None, family='esmc', tower=None):
