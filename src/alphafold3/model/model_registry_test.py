@@ -135,6 +135,43 @@ class RegistryTest(parameterized.TestCase):
     self.assertContainsSubset(padded,
                               model_config.KEY_MASKED_ATOM_ATTENTION)
 
+  def test_no_membership_names_a_model_that_does_not_exist(self):
+    """A renamed model leaving a stale entry behind is silent.
+
+    The membership tables in model_config are how a forward branch knows which
+    models take it. Rename a model -- `openbind` -> `openbind0` -- and any table
+    still naming the old spelling simply stops matching: the model quietly
+    misses that branch and folds a little worse, with nothing to attribute it
+    to. Nothing errors, because a name that matches no model is a name that
+    matches no model.
+
+    The rule avoids an allowlist: a tuple or dict that names ANY model must name
+    ONLY models. Tables keyed by something else entirely (AFFINE_LAYER_NORMS is
+    keyed by the LayerNorm's name) match no model and are skipped, while their
+    VALUES -- which are model tuples -- are checked.
+    """
+    known = set(model_config.MODELS)
+
+    def check(where, names):
+      names = [n for n in names if isinstance(n, str)]
+      if not names or not any(n in known for n in names):
+        return
+      stale = sorted(n for n in names if n not in known)
+      self.assertEmpty(stale, '%s names %s, which is not in model_config.MODELS'
+                       % (where, stale))
+
+    for attr in dir(model_config):
+      if attr.startswith('_'):
+        continue
+      value = getattr(model_config, attr)
+      if isinstance(value, tuple):
+        check('model_config.%s' % attr, list(value))
+      elif isinstance(value, dict):
+        check('model_config.%s keys' % attr, list(value))
+        for key, val in value.items():
+          if isinstance(val, tuple):
+            check('model_config.%s[%r]' % (attr, key), list(val))
+
   def test_every_featurise_knob_is_actually_consumed(self):
     """A declared knob that nothing reads is a silent no-op.
 
