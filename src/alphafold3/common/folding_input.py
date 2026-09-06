@@ -654,11 +654,16 @@ class RnaChain:
 
   def fill_missing_fields(self) -> Self:
     """Fill missing MSA fields with default values."""
+    # The private fields, NOT the properties: `sequence` returns the sequence
+    # with modifications already APPLIED (and 'N' for anything unmapped), so
+    # rebuilding from it while also passing `modifications` applies them twice
+    # and silently degrades a modified base to N. ProteinChain above always
+    # used `_sequence`; RNA was the odd one out. Fixed upstream in 97d2023.
     return RnaChain(  # pyrefly: ignore[bad-return]
-        id=self.id,
-        sequence=self.sequence,
-        modifications=self.modifications,
-        description=self.description,
+        id=self._id,
+        sequence=self._sequence,
+        modifications=self._modifications,
+        description=self._description,
         unpaired_msa=self._unpaired_msa or '',
     )
 
