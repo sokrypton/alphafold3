@@ -33,7 +33,8 @@ def _registry():
 
 _COMPANIONS = {m: ('%s.lm.npz' % m,) for m in (
     'esmfold2', 'esmfold2_fast', 'esmfold2_exp', 'esmfold2_exp_fast',
-    'esmfold2_exp_cutoff2025', 'esmfold2_exp_fast_cutoff2025')}
+    'esmfold2_exp_cutoff2025', 'esmfold2_exp_fast_cutoff2025',
+    'esmfold2_lm600m')}
 
 
 def files_for(model: str, root: pathlib.Path, precisions=('fp32',)):

@@ -748,6 +748,11 @@ class Model(hk.Module):
           num_plddt_bins=confidence_output['predicted_lddt_logits'].shape[-1],
           num_pae_bins=confidence_output['predicted_aligned_error_logits'].shape[-1],
           num_pde_bins=confidence_output['predicted_distance_error_logits'].shape[-1])
+    elif self.global_config.model in model_config.NO_CONFIDENCE_HEAD:
+      # No head in the checkpoint, so none in the graph: this model predicts a
+      # structure and nothing about it. The keys are simply absent, which is
+      # honest and is what keeps the converter's coverage exact.
+      confidence_output = {}
     else:
       # Compute dist_error_fn over all samples for distance error logging.
       confidence_output = mapping.sharded_map(

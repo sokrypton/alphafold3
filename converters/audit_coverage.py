@@ -171,7 +171,9 @@ _LOADERS = {
            ('esmfold2_exp_fast', 'ESMFold2-Experimental-Fast'),
            ('esmfold2_exp_cutoff2025', 'ESMFold2-Experimental-Cutoff2025'),
            ('esmfold2_exp_fast_cutoff2025',
-            'ESMFold2-Experimental-Fast-Cutoff2025'))},
+            'ESMFold2-Experimental-Fast-Cutoff2025'),
+           ('esmfold2_lm600m',
+            'ESMFold2-Experimental-Fast-base600M-step1500k'))},
 }
 
 _MAPPERS = {
@@ -184,7 +186,8 @@ _MAPPERS = {
     'opendde': 'convert_opendde',
     **{m: 'map_esmfold2_to_af3_graph' for m in (
         'esmfold2', 'esmfold2_fast', 'esmfold2_exp', 'esmfold2_exp_fast',
-        'esmfold2_exp_cutoff2025', 'esmfold2_exp_fast_cutoff2025')},
+        'esmfold2_exp_cutoff2025', 'esmfold2_exp_fast_cutoff2025',
+        'esmfold2_lm600m')},
 }
 
 
@@ -227,11 +230,27 @@ def main(argv=None):
   params = getattr(mod, _MAPPERS[args.model])(sd)
 
   missing = audit(args.model, sd, params, args.verbose)
-  print(f'{args.model}: {len(sd_raw)} checkpoint tensors, '
-        f'{len(missing)} never reach the graph')
+
+  # A converter may declare tensors it deliberately does not map, each with a
+  # reason. Those are ACCOUNTED FOR, not missing: the number worth reporting is
+  # the count nobody has thought about.
+  import re
+  dead = getattr(mod, 'DEAD_TENSORS', ())
+  explained, unexplained = [], []
   for k in missing:
+    reason = next((r for pat, r in dead if re.search(pat, k)), None)
+    (explained if reason else unexplained).append((k, reason))
+
+  print(f'{args.model}: {len(sd_raw)} checkpoint tensors, '
+        f'{len(unexplained)} unaccounted for'
+        + (f' ({len(explained)} deliberately unmapped)' if explained else ''))
+  for k, _ in unexplained:
     print(f'  {k}  {tuple(np.asarray(sd_raw[k]).shape)}')
-  return 1 if missing else 0
+  if explained and args.verbose:
+    print('  deliberately unmapped:')
+    for k, reason in explained:
+      print(f'    {k}\n        {reason}')
+  return 1 if unexplained else 0
 
 
 if __name__ == '__main__':

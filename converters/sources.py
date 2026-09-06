@@ -30,6 +30,9 @@ SOURCES = {
     'esmfold2_exp_cutoff2025': dict(repo='biohub/ESMFold2-Experimental-Cutoff2025'),
     'esmfold2_exp_fast_cutoff2025': dict(
         repo='biohub/ESMFold2-Experimental-Fast-Cutoff2025'),
+    # the 600M-ESM-C tier; pairs with the esmc_600m tower below
+    'esmfold2_lm600m': dict(
+        repo='biohub/ESMFold2-Experimental-Fast-base600M-step1500k'),
     # The protein language model ESMFold2 conditions on. NOT an AF3 model -- a
     # separate graph with its own loader (converters/esmc_embed.py). float32 is
     # 25.4 GB and cannot even be WRITTEN as a blob (a record header packs its

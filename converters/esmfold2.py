@@ -72,7 +72,10 @@ def derive_dims(sd):
   d = dict(
       c_z=c_z,
       s_inputs=s_inputs,
-      c_single=sd['confidence_head.s_input_to_s.weight'].shape[0],
+      # absent on the language-model-tier releases, which ship no confidence
+      # head at all (confidence_head.enabled: false)
+      c_single=(sd['confidence_head.s_input_to_s.weight'].shape[0]
+                if 'confidence_head.s_input_to_s.weight' in sd else 384),
       n_trunk=n_blocks('folding_trunk'),
       n_lm_encoder=n_blocks('lm_encoder'),
       n_coda=n_blocks('parcae_coda'),
@@ -481,6 +484,24 @@ def map_diffusion(sd, dims=None):
 CONFIDENCE_DEAD_PARAMS = ('s_inputs_to_single', 's_input_to_s', 's_norm')
 
 
+# Checkpoint tensors this converter deliberately does NOT map, with the reason.
+# audit_coverage reads it, so "N tensors never reach the graph" means N
+# UNEXPLAINED ones -- a tensor nobody has thought about, which is the only kind
+# worth reporting.
+#
+# Each entry is (regex, reason) and every entry must be earned by a proof, not
+# by an argument. The pair_norm offsets below were checked numerically: the
+# offset contributes `offset @ pair_bias_proj`, a per-head constant added to
+# EVERY logit of that head, and softmax over j removes it -- max|d| 5.6e-16 in
+# float64 (machine epsilon) against 1.5e-07 in the float32 the model runs in,
+# which is round-off in the max-subtraction and not a contribution.
+DEAD_TENSORS = (
+    (r'token_transformer\.attn_blocks\.\d+\.pair_norm\.bias',
+     'a per-head constant on every logit; cancels in the softmax over j '
+     '(float64 max|d| 5.6e-16)'),
+)
+
+
 def confidence_head(sd, dims, prefix='confidence_head'):
   g = lambda leaf: sd['%s.%s' % (prefix, leaf)]
   out = {
@@ -609,8 +630,11 @@ def check_variant_table(sd, model_name):
   d = derive_dims(sd)
   got = dict(trunk=d['n_trunk'], msa=d['n_msa'], coda=d['n_coda'],
              lm_enc=d['n_lm_encoder'], msa_w=d['msa_head_width'],
-             bins=d['num_bins'],
-             conf_bins=int(sd['confidence_head.boundaries'].shape[0]) + 1)
+             bins=d['num_bins'])
+  # the language-model-tier releases ship no confidence head, so there is no
+  # binning to check -- and `conf_bins` in the registry row is then unused
+  if 'confidence_head.boundaries' in sd:
+    got['conf_bins'] = int(sd['confidence_head.boundaries'].shape[0]) + 1
   bad = {k: (want[k], v) for k, v in got.items() if want.get(k) != v}
   if bad:
     raise ValueError(
@@ -1354,6 +1378,14 @@ def map_esmfold2_to_af3_graph(sd, dims=None):
   n_at_tok = 24                     # AF3 slot count; ESMFold2 trains 23
   def pad_atoms(w):
     return np.concatenate([w, np.zeros((1,) + w.shape[1:], w.dtype)], 0)
+  have = lambda leaf: '%s.%s' % (ch, leaf) in sd
+  if not have('row_attention_pooling.attn_proj.weight'):
+    # This release ships NO confidence head (confidence_head.enabled: false,
+    # zero confidence_head tensors). The graph does not build one either
+    # (model_config.NO_CONFIDENCE_HEAD), so there is nothing to map -- and the
+    # re-embed block below is the first thing that would read one.
+    return flat
+
   RE = CH + '/~_boltz2_reembed'
   put(RE, {
       's_inputs_norm/scale': _remap_vec(_arr(sd['%s.s_inputs_norm.weight' % ch])),

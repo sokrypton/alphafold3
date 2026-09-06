@@ -98,9 +98,13 @@ def main(argv):
         if x.ndim == 3:
           x = x[0]
         rs.append(kabsch(x[rep], native))
-      print('  %-42s CA-RMSD %s   best %.3f  plddt %.3f'
-            % (name, ' '.join('%.3f' % r for r in rs), min(rs),
-               float(o['plddt'].mean())), flush=True)
+      # the language-model-tier releases ship no confidence head at all, so
+      # native returns no plddt either -- which is the same fact our
+      # NO_CONFIDENCE_HEAD membership records, seen from the other side.
+      plddt = ('  plddt %.3f' % float(o['plddt'].mean())) if 'plddt' in o else ''
+      print('  %-42s CA-RMSD %s   best %.3f%s'
+            % (name, ' '.join('%.3f' % r for r in rs), min(rs), plddt),
+            flush=True)
       del m
       torch.cuda.empty_cache()
     except Exception as err:  # pylint: disable=broad-except

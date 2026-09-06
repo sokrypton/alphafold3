@@ -406,9 +406,18 @@ _SAMPLER_CONSTANTS = {
     # sigma 256 -- the EDM schedule opens at sigma_data * smax = 2560, so
     # running AF3's constants starts the trajectory with ten times the noise the
     # model was trained to undo, and then anneals it fourteen times too slowly.
-    # Every ESMFold2 variant samples the same way; only the trunk depth differs.
+    # Every ESMFold2 variant BUT ONE samples the same way.
     **{m: dict(steps=14, max_sigma=256.0)
        for m in model_config.ESMFOLD2_FAMILY},
+    # The 600M tier does not: its config carries a different EDM schedule
+    # entirely -- and it is Boltz-2's, constant for constant (gamma_0 0.605,
+    # gamma_min 1.107, noise_scale 0.901, step_scale 1.638, rho 8). Found by
+    # check_release_config refusing the conversion, which is exactly the failure
+    # it exists for: nothing about the wrong schedule errors, it just anneals
+    # differently and returns a plausible structure.
+    'esmfold2_lm600m': dict(steps=15, gamma_0=0.605, gamma_min=1.107,
+                            noise_scale=0.901, step_scale=1.638, rho=8.0,
+                            sigma_min=0.0004, sigma_max=160.0, max_sigma=256.0),
 }
 
 
@@ -436,21 +445,33 @@ _SAMPLER_CONSTANTS = {
 #   bins     distogram_head bins (the TRUNK head, not confidence)
 #   conf_bins classes in the confidence re-embedding distance one-hot
 #            (its trained `boundaries` has one fewer)
+#   esmc     WHICH ESM-C tower this release was trained against. Not
+#            cosmetic: the shim is per-model and so is the tower, and
+#            pairing a variant with the wrong one is silent -- the base
+#            shim on another variant's hidden states reads corr 0.026.
 ESMFOLD2_VARIANTS = {
     'esmfold2': dict(hub='ESMFold2', trunk=48, msa=4, coda=2, lm_enc=4,
-                     msa_w=16, bins=64, conf_bins=39),
+                     msa_w=16, bins=64, conf_bins=39, esmc='esmc'),
     'esmfold2_fast': dict(hub='ESMFold2-Fast', trunk=24, msa=0, coda=2, lm_enc=4,
-                          msa_w=0, bins=64, conf_bins=39),
+                          msa_w=0, bins=64, conf_bins=39, esmc='esmc'),
     'esmfold2_exp': dict(hub='ESMFold2-Experimental', trunk=48, msa=4, coda=0,
-                         lm_enc=0, msa_w=32, bins=128, conf_bins=128),
+                         lm_enc=0, msa_w=32, bins=128, conf_bins=128, esmc='esmc'),
     'esmfold2_exp_fast': dict(hub='ESMFold2-Experimental-Fast', trunk=24, msa=0,
-                              coda=0, lm_enc=0, msa_w=0, bins=128, conf_bins=128),
+                              coda=0, lm_enc=0, msa_w=0, bins=128, conf_bins=128, esmc='esmc'),
     'esmfold2_exp_cutoff2025': dict(hub='ESMFold2-Experimental-Cutoff2025',
                                     trunk=48, msa=4, coda=0, lm_enc=0, msa_w=32,
-                                    bins=128, conf_bins=128),
+                                    bins=128, conf_bins=128, esmc='esmc'),
     'esmfold2_exp_fast_cutoff2025': dict(
         hub='ESMFold2-Experimental-Fast-Cutoff2025', trunk=24, msa=0, coda=0,
-        lm_enc=0, msa_w=0, bins=128, conf_bins=128),
+        lm_enc=0, msa_w=0, bins=128, conf_bins=128, esmc='esmc'),
+    # The 600M-ESM-C tier. Architecturally identical to esmfold2_exp_fast --
+    # 24 blocks, no MSA encoder, no lm_encoder, no parcae -- and trained
+    # against a DIFFERENT tower, which is the only thing `esmc` records and the
+    # only thing that makes it a separate model. step1500k is the last
+    # checkpoint of upstream's scaling series, i.e. the best of that tier.
+    'esmfold2_lm600m': dict(
+        hub='ESMFold2-Experimental-Fast-base600M-step1500k', trunk=24, msa=0,
+        coda=0, lm_enc=0, msa_w=0, bins=128, conf_bins=128, esmc='esmc_600m'),
 }
 
 ESMFOLD2_HUB_IDS = {m: v['hub'] for m, v in ESMFOLD2_VARIANTS.items()}

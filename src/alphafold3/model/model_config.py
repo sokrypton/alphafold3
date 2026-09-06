@@ -72,6 +72,9 @@ MODELS = (
     'esmfold2_exp_fast',
     'esmfold2_exp_cutoff2025',
     'esmfold2_exp_fast_cutoff2025',
+    # the 600M-ESM-C tier: the experimental-fast architecture trained against a
+    # smaller tower, which is the only thing that differs
+    'esmfold2_lm600m',
 )
 
 
@@ -82,7 +85,8 @@ MODELS = (
 # to twelve of them would fail as a shape error that names nothing.
 ESMFOLD2_FAMILY = ('esmfold2', 'esmfold2_fast', 'esmfold2_exp',
                    'esmfold2_exp_fast', 'esmfold2_exp_cutoff2025',
-                   'esmfold2_exp_fast_cutoff2025')
+                   'esmfold2_exp_fast_cutoff2025',
+                   'esmfold2_lm600m')
 
 # ...with one real architectural split inside it. The two RELEASED models recycle
 # through the parcae SSM; the four EXPERIMENTAL ones carry `pair_loop_proj`
@@ -116,6 +120,13 @@ NO_HEAD_NORM = {'boltz2': ('*',),
 # number of CLASSES is one more than the number of edges and has to be static,
 # so it rides in ESMFOLD2_VARIANTS as `conf_bins`.
 LEARNED_CONFIDENCE_BINS = ESMFOLD2_FAMILY
+
+# Models that ship NO confidence head at all (`confidence_head.enabled: false`
+# in their config, and zero confidence_head tensors in the checkpoint).
+# ESMFold2's language-model-tier releases are structure-only. Building the head
+# anyway would leave ~100 parameters at random init and emit a pLDDT that looks
+# like a prediction and is noise -- the same trap as chai1's resolved head.
+NO_CONFIDENCE_HEAD = ('esmfold2_lm600m',)
 
 
 # Which LayerNorms carry a trained OFFSET, keyed by the norm's own name.

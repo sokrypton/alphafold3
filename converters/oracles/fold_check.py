@@ -101,6 +101,12 @@ def fold(model_name, seq, model_dir=None, seed=0, templates=None):
   # bfloat16, and that is invisible next to a gate that was measured in fp32.
   if os.environ.get('BF16'):
     cfg.global_config.bfloat16 = os.environ['BF16']
+  # STEPS overrides the sampler's step count. Needed to compare like with like:
+  # esmfold2_native_variants.py runs native at num_sampling_steps=200 whatever
+  # the release's config says, so a fold at the config's own count is not the
+  # same experiment.
+  if os.environ.get('STEPS'):
+    cfg.heads.diffusion.eval.steps = int(os.environ['STEPS'])
 
   @hk.transform
   def forward(b):
