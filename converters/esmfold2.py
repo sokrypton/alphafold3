@@ -619,6 +619,62 @@ def check_variant_table(sd, model_name):
         % (model_name, bad))
 
 
+def check_release_config(checkpoint, model_name):
+  """Check the registry row against the release's OWN config.json.
+
+  check_variant_table below reads the TENSORS, which pins the counts and widths
+  -- and those are also caught, eventually, by audit_published --apply, because
+  a wrong count changes a parameter shape. This checks the things that change no
+  parameter at all and so are invisible to every gate we have: the sampler
+  constants, the recycle count, the relative-encoding bin counts. A wrong
+  `inference_num_steps` anneals on the wrong schedule and produces a plausible
+  structure; nothing errors.
+
+  Skipped silently when the checkpoint is an .npz rather than a release
+  directory -- the oracle dumps have no config.json.
+  """
+  import json
+  import os
+  from alphafold3.model import model_registry
+
+  cfg_path = os.path.join(os.path.expanduser(str(checkpoint)), 'config.json')
+  if not os.path.isdir(os.path.expanduser(str(checkpoint))) or not os.path.exists(cfg_path):
+    return
+  cfg = json.load(open(cfg_path))
+  spec = model_registry.get(model_name)
+  sh = cfg.get('structure_head', {})
+  sampler = spec.sampler
+  want = {
+      'steps': sh.get('inference_num_steps'),
+      'gamma_0': sh.get('gamma_0'),
+      'gamma_min': sh.get('gamma_min'),
+      'noise_scale': sh.get('noise_scale'),
+      'step_scale': sh.get('step_scale'),
+      'sigma_min': sh.get('inference_s_min'),
+      'sigma_max': sh.get('inference_s_max'),
+      'rho': sh.get('inference_p'),
+  }
+  from alphafold3.model.network import diffusion_head
+  defaults = diffusion_head.SampleConfig(steps=200)
+  bad = {}
+  for k, v in want.items():
+    if v is None:
+      continue
+    got = sampler.get(k, getattr(defaults, k))
+    if abs(float(got) - float(v)) > 1e-9:
+      bad[k] = (got, v)
+  # max_sigma is NOT in config.json: it is the modeling code's own default
+  # (modeling_esmfold2_common, max_inference_sigma=256.0), so it is asserted
+  # against that constant rather than against the release.
+  if sampler.get('max_sigma') not in (None, 256.0):
+    bad['max_sigma'] = (sampler.get('max_sigma'), 256.0)
+  if bad:
+    raise ValueError(
+        'sampler constants for %r disagree with %s: %s (registry, config.json)'
+        % (model_name, cfg_path, bad))
+  return cfg
+
+
 def convert_esmfold2_weights(checkpoint, output_dir, model_name='esmfold2'):
   """Convert biohub/ESMFold2 to a loadable AF3-haiku blob dir.
 
@@ -634,6 +690,7 @@ def convert_esmfold2_weights(checkpoint, output_dir, model_name='esmfold2'):
   from pathlib import Path
   sd = load_esmfold2_checkpoint(checkpoint)
   check_variant_table(sd, model_name)
+  check_release_config(checkpoint, model_name)
   # the GRAPH map, not map_esmfold2_to_af3: the latter keys on the reference
   # implementation's own scopes and is the oracle's input, not the model's.
   flat = map_esmfold2_to_af3_graph(sd)
