@@ -643,9 +643,6 @@ class ModelRunner:
     worse, not surfacing at all.
     """
     loaded = params.get_model_haiku_params(model_dir=self._model_dir)
-    manifest = params.read_shape_manifest(self._model_dir, self.model_name)
-    if manifest is not None:
-      loaded = params.fill_from_manifest(loaded, manifest)
     return loaded
 
   @staticmethod
@@ -799,13 +796,11 @@ class ResultsForSeed:
 def _precompile(model_runner, model_name, model_dir, token_counts):
   """Compile the model for each token count, then return without folding.
 
-  A DUMMY sequence is folded through the ordinary code path rather than the
-  graph being rebuilt from stored shapes. That is deliberate: the persistent
-  cache key covers the whole jit configuration, and reconstructing it by hand
-  from <model>.shapes.json produced an executable that never matched -- among
-  other reasons because the manifest records the graph's INTERNAL dtypes
-  (bfloat16 under global_config.bfloat16='all') where the loaded parameters are
-  float32, for 125 of 369 leaves. Driving the real path cannot drift from it.
+  A DUMMY sequence is folded through the ordinary code path. That is
+  deliberate: the persistent cache key covers the whole jit configuration, so
+  rebuilding the graph some other way is a way to compile something subtly
+  different, and driving the real path cannot drift from what a fold does. By
+  the time this runs the parameters are loaded anyway.
 
   Only the token count has to match the eventual input, which is what --buckets
   makes predictable: a 68-residue protein lands in the 128 bucket.

@@ -122,7 +122,6 @@ needed — useful for pre-staging a shared filesystem or an air-gapped machine:
 BASE=https://huggingface.co/sokrypton/af3-any-model/resolve/main
 mkdir -p params/openfold3
 wget -P params/openfold3 $BASE/openfold3.bin.zst        # or openfold3.int8.bin.zst
-wget -P params/openfold3 $BASE/openfold3.shapes.json
 
 python run_alphafold.py --model=openfold3 --model_dir=params/openfold3 ...
 ```
@@ -131,12 +130,10 @@ Or with the Hugging Face CLI:
 
 ```bash
 pip install huggingface_hub
-hf download sokrypton/af3-any-model openfold3.bin.zst openfold3.shapes.json \
+hf download sokrypton/af3-any-model openfold3.bin.zst \
   --local-dir params/openfold3
 ```
 
-Take the `.shapes.json` too. It is small, and it is what reports a gap in the
-conversion at load time instead of letting it surface as an opaque failure
 mid-forward.
 
 ### Converting the weights yourself
@@ -146,7 +143,7 @@ against a checkpoint you already trust. Conversion needs PyTorch; a run never
 does.
 
 ```bash
-# fetches the published checkpoint, converts it, writes the shape manifest
+# fetches the published checkpoint and converts it
 python -m converters.convert --model openfold3 --out ./params/openfold3
 ```
 

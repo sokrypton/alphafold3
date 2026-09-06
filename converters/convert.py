@@ -76,8 +76,6 @@ def main(argv: list[str] | None = None) -> int:
                       'of TorchScript archives). Downloaded into --out if omitted.')
   p.add_argument('--out', type=pathlib.Path, required=True,
                  help='directory to write <model>.bin.zst into')
-  p.add_argument('--no_shapes', action='store_true',
-                 help='skip the parameter-shape manifest (it needs jax)')
   args = p.parse_args(argv)
 
   out_dir = str(args.out.expanduser())
@@ -94,35 +92,6 @@ def main(argv: list[str] | None = None) -> int:
   for b in blobs:
     print(f'  wrote {b} ({b.stat().st_size >> 20} MB)')
 
-  if not args.no_shapes:
-    # The parameter-shape manifest, so loading never has to run jax.eval_shape --
-    # and so a gap in the conversion is named rather than discovered.
-    from converters import shapes
-
-    print('deriving the parameter-shape manifest...', flush=True)
-    # HIDE OUR ARGV FROM ABSL. Deriving the manifest traces the graph, which
-    # reaches tokamax's lazily-read `cross_compile` flag, whose getter calls
-    # `flags.FLAGS(sys.argv)` -- and absl then aborts on the first flag it does
-    # not own: "Unknown command line flag 'model'". Nothing about conversion
-    # needs argv past this point, so blank it for the trace.
-    import sys as _sys
-
-    _argv, _sys.argv = _sys.argv, _sys.argv[:1]
-    from alphafold3.model import params as af3_params
-
-    loaded = af3_params.get_model_haiku_params(model_dir=out_dir)
-    try:
-      path = shapes.write(args.model, out_dir, params=loaded,
-                          checkpoint=ckpt)
-    finally:
-      _sys.argv = _argv
-    import json
-
-    with open(path) as fh:
-      missing = json.load(fh)['missing']
-    print(f'  wrote {path}'
-          + (f' ({len(missing)} parameters not covered by the conversion)'
-             if missing else ' (conversion covers every parameter)'))
   print(f'done in {time.time() - t0:.1f}s', flush=True)
   return 0
 

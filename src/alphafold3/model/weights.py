@@ -108,14 +108,6 @@ def ensure_weights(model_name: str, model_dir=None, *, download=True,
   os.makedirs(model_dir, exist_ok=True)
   _download(_HF_URL.format(repo=spec.weights_repo, file=wanted),
             os.path.join(model_dir, wanted), log=log)
-  # The shape manifest rides along; it is small, and without it a gap in the
-  # conversion is only discovered as an opaque failure mid-forward.
-  manifest = f'{spec.name}.shapes.json'
-  try:
-    _download(_HF_URL.format(repo=spec.weights_repo, file=manifest),
-              os.path.join(model_dir, manifest), log=log)
-  except Exception as err:  # pylint: disable=broad-except
-    log(f'note: no shape manifest published for {spec.name} ({err})')
   for extra in _COMPANIONS.get(spec.name, ()):
     dst = os.path.join(model_dir, extra)
     if os.path.exists(dst):

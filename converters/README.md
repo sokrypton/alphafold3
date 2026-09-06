@@ -28,13 +28,6 @@ PYTHONPATH=src python -m converters.convert --model openfold3 \
 | `rosettafold3.py` | RoseTTAFold3 (RosettaCommons) | `files.ipd.uw.edu/pub/rf3` |
 | `chai1.py` | chai-1 (Chai Discovery) | `chaiassets.com` (5 TorchScript archives) |
 
-Each conversion also writes `<model>.shapes.json`, the parameter tree derived
-from the graph itself (`shapes.py`). It is what a run loads instead of asking
-`jax.eval_shape`, and it is the record of what the conversion covers: any
-parameter the graph wants and the converter did not produce is listed there,
-reported at load, and filled with zeros rather than random values. All eight
-current conversions report 0 missing.
-
 `esm_lm.py` maps two whole models rather than one family's blocks: chai-1 folds
 from ESM2 3B and ESMFold2 from ESM-C, and neither runs at full fidelity without
 one. Only the WEIGHT MAPS are here — running a tower is inference, so the
@@ -62,10 +55,6 @@ originals come from. AlphaFold3's own weights are not converted: DeepMind
 publishes a haiku blob already, and its terms require you to request it.
 
 ## Coverage runs BOTH ways
-
-`<model>.shapes.json` audits the **graph** side: a parameter the graph wants and
-the converter did not produce is reported at load and filled with zeros rather
-than random values. All eight conversions report 0 missing.
 
 That check is blind to the opposite leak -- **a trained tensor in the checkpoint
 that the graph has no slot for**. Stock AF3 creates its norms with
@@ -176,13 +165,13 @@ by exact filename, over plain HTTPS. So the repo is flat:
 
 ```
 <repo>/
-  openfold3.bin.zst        openfold3.shapes.json
-  intellifold2.bin.zst     intellifold2.shapes.json
-  opendde.bin.zst          opendde.shapes.json
-  boltz2.bin.zst           boltz2.shapes.json
-  protenix2.bin.zst        protenix2.shapes.json
-  rosettafold3.bin.zst     rosettafold3.shapes.json
-  chai1.bin.zst            chai1.shapes.json   std_conformers.npz
+  openfold3.bin.zst
+  intellifold2.bin.zst
+  opendde.bin.zst
+  boltz2.bin.zst
+  protenix2.bin.zst
+  rosettafold3.bin.zst
+  chai1.bin.zst   std_conformers.npz
 ```
 
 Both files per model: without the manifest a run works but cannot tell you what
