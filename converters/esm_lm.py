@@ -193,18 +193,28 @@ def load_esm2_checkpoint(path):
           for k, v in module.state_dict().items()}
 
 
-def convert_tower(checkpoint, output_dir, family, scheme='int8'):
-  """Convert a language-model tower to an AF3-haiku blob. int8 by default.
+# The towers are int8, full stop -- not a default that can be overridden the way
+# --weights_precision overrides a model's. For ESM-C it is the only thing that
+# works at all: float32 CANNOT be written, because the record header packs the
+# payload length as a signed 32-bit int and the fused fc1 stack is a single
+# 5.27 GiB tensor, so an fp32 write dies partway through with a struct.error.
+# For both, int8 is what makes the tower GPU-resident inside the scan (6.35 GB
+# instead of 25.4 for the 6B) rather than merely smaller to download, and the
+# cost is measured, not assumed: ESM2 reads corr 0.9999498 against the traced
+# torch model, and ESM-C's hidden states are >= 0.9998 per layer.
+#
+# A precision knob here would therefore only offer choices that are broken
+# (fp32 for ESM-C) or pointless (fp16, which neither halves the residency nor
+# improves on 1e-3), so there is none.
+QUANT_SCHEME = 'int8'
 
-  For ESM-C int8 is not an optimisation, it is the only thing that works:
-  float32 CANNOT be written at all, because the record header packs the payload
-  length as a signed 32-bit int and the fused fc1 stack is a single 5.27 GiB
-  tensor, so an fp32 write dies partway through with a struct.error. int8 puts
-  the 6B tower at ~6.4 GB, which also fits a 23 GB card where fp32 (25.4 GB)
-  never did.
+
+def convert_tower(checkpoint, output_dir, family):
+  """Convert a language-model tower to an int8 AF3-haiku blob.
 
   Quantisation happens HERE rather than through converters.quantise's
-  requantise_blob, which reads an existing blob: there is no fp32 blob to read.
+  requantise_blob, which reads an existing blob: there is no fp32 blob to read,
+  and for ESM-C there could not be one.
   """
   from . import common, quantise
   if family == 'esmc':
@@ -218,18 +228,18 @@ def convert_tower(checkpoint, output_dir, family, scheme='int8'):
   del sd
   records = split_stacked_blocks(common.tree_to_records(params), dims['n_layers'])
   del params
-  records = quantise.quantise_records(records, scheme)
+  records = quantise.quantise_records(records, QUANT_SCHEME)
   return pathlib.Path(common.write_records_blob(
       pathlib.Path(output_dir) / ('%s.bin.zst' % family), records,
       identifier=family))
 
 
-def convert_esmc_weights(checkpoint, output_dir, scheme='int8'):
-  return convert_tower(checkpoint, output_dir, 'esmc', scheme)
+def convert_esmc_weights(checkpoint, output_dir):
+  return convert_tower(checkpoint, output_dir, 'esmc')
 
 
-def convert_esm2_weights(checkpoint, output_dir, scheme='int8'):
-  return convert_tower(checkpoint, output_dir, 'esm2', scheme)
+def convert_esm2_weights(checkpoint, output_dir):
+  return convert_tower(checkpoint, output_dir, 'esm2')
 
 
 def split_stacked_blocks(records, n_layers):

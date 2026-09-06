@@ -830,6 +830,9 @@ def _resolve_lm_pair(spec, fold_input, model_runner):
         f'{len(sequences)}. Precompute it instead, or fold from an MSA.')
   tower = model_registry.ESMFOLD2_VARIANTS[model_name]['esmc']
   print(f'Running the {tower} tower for {model_name} (--lm_pair auto)...')
+  # default_dir at fp32 on purpose, whatever --weights_precision says: a tower
+  # is only ever int8 (converters.esm_lm.QUANT_SCHEME), so it has one directory
+  # rather than one per precision.
   hidden = esm_lm.embed(sequences[0], weights_lib.default_dir(tower),
                         'esmc', tower)
   return esmfold2_converter.shim(hidden, shim)
