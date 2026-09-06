@@ -135,6 +135,30 @@ class RegistryTest(parameterized.TestCase):
     self.assertContainsSubset(padded,
                               model_config.KEY_MASKED_ATOM_ATTENTION)
 
+  def test_readme_lists_every_model(self):
+    """A port nobody can find is a port nobody uses.
+
+    Eleven models -- the six ESMFold2 variants and five Protenix ones -- were
+    registered, converted, gated and published while the README still listed
+    nine. Nothing errors: `--model esmfold2_fast` worked fine, you just had to
+    know it existed.
+
+    Asserted in both directions, because each catches a different mistake: a new
+    port that never reached the README, and a README row naming a model that has
+    been renamed out from under it.
+    """
+    import re
+    readme = pathlib.Path(__file__).parents[3] / 'README.md'
+    if not readme.exists():          # installed without the source tree
+      self.skipTest('no README beside the package')
+    rows = set(re.findall(r'^\| `([\w.]+)`', readme.read_text(), re.M))
+    rows.discard('--model')
+    known = set(model_registry.MODEL_SPECS)
+    self.assertEmpty(sorted(known - rows),
+                     'registered but absent from the README model table')
+    self.assertEmpty(sorted(rows - known),
+                     'named in the README but not a registered model')
+
   def test_no_membership_names_a_model_that_does_not_exist(self):
     """A renamed model leaving a stale entry behind is silent.
 
