@@ -587,11 +587,26 @@ _FEATURISE = {
 _WEIGHTS_REPO = 'sokrypton/af3-any-model'
 
 
+# One folder per family in the published repo. The families that already have a
+# membership table are read from it rather than restated; the rest are their own
+# folder. openbind0 rides with openfold3 because it IS an OpenFold3 release.
+WEIGHTS_FOLDERS = {
+    **{m: 'protenix' for m in model_config.PROTENIX_FAMILY},
+    **{m: 'esmfold2' for m in model_config.ESMFOLD2_FAMILY},
+    'openfold3': 'openfold3',
+    'openbind0': 'openfold3',
+}
+
+# The protein language models. Not ModelSpecs -- separate graphs with their own
+# loader -- so they carry their folder here.
+TOWER_FOLDER = 'lm'
+
+
 class ModelSpec:
   """Everything `global_config.model = name` implies, in one place."""
 
   __slots__ = ('name', 'full_fat', 'trained_fourier', 'featurise',
-               'weights_repo', 'weights_file', 'weights_licence',
+               'weights_repo', 'weights_file', 'weights_prefix', 'weights_licence',
                'weights_source')
 
   def __init__(self, name, full_fat=False, trained_fourier=None,
@@ -613,6 +628,10 @@ class ModelSpec:
     self.featurise = dict(_FEATURISE.get(name, {}))
     self.weights_repo = weights_repo
     self.weights_file = weights_file or f'{name}.bin.zst'
+    # Where it lives IN the repo. A flat repo of forty-odd blobs is unreadable;
+    # one folder per family is. This is the published path only -- locally a
+    # model still keeps its own directory named after itself.
+    self.weights_prefix = WEIGHTS_FOLDERS.get(name, name)
     # What the OUTPUT of a run may be used for is the weights' licence, not this
     # code's. None means we have not established it -- say so and point at the
     # source rather than guess, because guessing here would be an assurance we
@@ -625,6 +644,14 @@ class ModelSpec:
   # resolves to the same bytes; the smaller forms are additions, not
   # replacements. See converters/quantise.py for what each costs.
   PRECISIONS = ('fp32', 'fp16', 'int8')
+
+  def weights_path_for(self, precision='fp32'):
+    """The path INSIDE the weights repo, folder included."""
+    return '%s/%s' % (self.weights_prefix, self.weights_file_for(precision))
+
+  def companion_path(self, filename):
+    """The repo path of a companion artifact (an ESMFold2 shim, say)."""
+    return '%s/%s' % (self.weights_prefix, filename)
 
   def weights_file_for(self, precision='fp32'):
     """The published filename of this model's weights at `precision`."""

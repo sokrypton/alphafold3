@@ -428,8 +428,11 @@ def load(model_dir=None, family='esmc', tower=None):
     from alphafold3.model import model_registry, weights
     os.makedirs(os.path.dirname(path), exist_ok=True)
     repo = model_registry.get('esmfold2' if family == 'esmc' else 'chai1')
-    weights._download(weights._HF_URL.format(repo=repo.weights_repo,
-                                             file='%s.bin.zst' % tower), path)
+    weights._download(
+        weights._HF_URL.format(
+            repo=repo.weights_repo,
+            file='%s/%s.bin.zst' % (model_registry.TOWER_FOLDER, tower)),
+        path)
   # The unpacked cache, if a previous run left one. Everything below this point
   # -- decompress, parse, restack, dequantise the small tensors -- produces
   # exactly what it stores.

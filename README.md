@@ -115,26 +115,31 @@ is instant.
 
 ### Downloading the weights yourself
 
-The repo is flat and served over plain HTTPS, so nothing more than `wget` is
-needed — useful for pre-staging a shared filesystem or an air-gapped machine:
+The repo is grouped by family and served over plain HTTPS, so nothing more than
+`wget` is needed — useful for pre-staging a shared filesystem or an air-gapped
+machine. A model's folder is its family, not its own name: the six Protenix
+releases share `protenix/`, the seven ESMFold2 releases share `esmfold2/`,
+openbind0 sits with `openfold3/`, and the ESM2 and ESM-C towers are under `lm/`.
 
 ```bash
 BASE=https://huggingface.co/sokrypton/af3-any-model/resolve/main
 mkdir -p params/openfold3
-wget -P params/openfold3 $BASE/openfold3.bin.zst        # or openfold3.int8.bin.zst
+wget -P params/openfold3 $BASE/openfold3/openfold3.bin.zst   # or .int8.bin.zst
 
 python run_alphafold.py --model=openfold3 --model_dir=params/openfold3 ...
 ```
+
+Locally a model keeps a flat directory named after itself; only the published
+layout is grouped. `--model_dir` therefore points at a directory holding
+`<model>.bin.zst`, exactly as before.
 
 Or with the Hugging Face CLI:
 
 ```bash
 pip install huggingface_hub
-hf download sokrypton/af3-any-model openfold3.bin.zst \
-  --local-dir params/openfold3
+hf download sokrypton/af3-any-model openfold3/openfold3.bin.zst \
+  --local-dir params
 ```
-
-mid-forward.
 
 ### Converting the weights yourself
 

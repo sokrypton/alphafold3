@@ -106,14 +106,18 @@ def ensure_weights(model_name: str, model_dir=None, *, download=True,
         f'{wanted} from {spec.weights_repo}')
 
   os.makedirs(model_dir, exist_ok=True)
-  _download(_HF_URL.format(repo=spec.weights_repo, file=wanted),
+  # `wanted` is the LOCAL basename; the repo groups blobs by family, so the URL
+  # carries a folder the local directory does not.
+  _download(_HF_URL.format(repo=spec.weights_repo,
+                           file=spec.weights_path_for(precision)),
             os.path.join(model_dir, wanted), log=log)
   for extra in _COMPANIONS.get(spec.name, ()):
     dst = os.path.join(model_dir, extra)
     if os.path.exists(dst):
       continue
     try:
-      _download(_HF_URL.format(repo=spec.weights_repo, file=extra), dst, log=log)
+      _download(_HF_URL.format(repo=spec.weights_repo,
+                               file=spec.companion_path(extra)), dst, log=log)
     except Exception as err:  # pylint: disable=broad-except
       log(f'note: could not fetch {extra} for {spec.name} ({err})')
   return model_dir
