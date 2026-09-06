@@ -24,17 +24,9 @@ import jax.numpy as jnp
 
 from . import esmc as C
 
-# ESM-C's alphabet, in id order. Index 0/1/2/32 are BOS/PAD/EOS/MASK, which is
-# what converters.esmc asserts; the rest is the standard ESM residue ordering.
-VOCAB = ('<cls> <pad> <eos> <unk> L A G V S E R T I D P K Q N F Y M H W C X B '
-         'U Z O . - | <mask>').split()
-_TOKENS = {t: i for i, t in enumerate(VOCAB)}
-UNK = _TOKENS['<unk>']
-
-
-def sequence_ids(seq):
-  """One-letter sequence -> ESM-C residue token ids (no BOS/EOS)."""
-  return np.array([_TOKENS.get(c.upper(), UNK) for c in seq], np.int64)
+# the alphabet lives in esmc_vocab, which imports no jax: the native-side gate
+# runs in a torch-only environment and needs the same table.
+from .esmc_vocab import VOCAB, sequence_ids  # noqa: F401  (re-exported)
 
 
 def _layer_norm(x, scale, offset=0.0, eps=1e-5):

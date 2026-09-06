@@ -66,14 +66,7 @@ def map_esmc_to_af3(sd, dims=None):
   return p
 
 
-def lm_input_ids(token_ids):
-  """Wrap one chain's residue token ids as ESMFold2 does: [BOS, ids..., EOS].
-
-  Multi-chain inserts [EOS, BOS] between chains; padding is PAD and
-  `sequence_id = cumsum(ids == BOS) - 1`, set to -1 on PAD, restricts attention
-  to within a chain.
-  """
-  return np.concatenate([[BOS], np.asarray(token_ids, np.int64), [EOS]])
+from .esmc_vocab import lm_input_ids  # noqa: F401  (re-exported)
 
 
 def convert_esmc_weights(checkpoint, output_dir, scheme='int8'):
