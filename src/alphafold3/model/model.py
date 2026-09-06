@@ -282,6 +282,69 @@ def create_target_feat_embedding(
   return target_feat
 
 
+def _structure_only_results(result, pred_structure, num_tokens, chain_ids,
+                            res_ids):
+  """InferenceResults for a model with no confidence head.
+
+  Every confidence-derived field is NaN, because there is nothing behind it: the
+  checkpoint has no head, so the graph emits no logits (see the
+  NO_CONFIDENCE_HEAD branch in __call__). The two things that ARE measured from
+  the structure itself -- clashes and disorder -- are real, and so is the
+  distogram, which is a separate head these models do have.
+
+  Ranking is therefore arbitrary and says so: with a NaN score every `>`
+  comparison is False, so the first sample stays the representative rather than
+  an accidental winner.
+  """
+  nan = float('nan')
+  contact_probs = result['distogram']['contact_probs'][:num_tokens, :num_tokens]
+  pred_structures = pred_structure.unstack()
+  with concurrent.futures.ThreadPoolExecutor(
+      max_workers=min(len(pred_structures), 32)
+  ) as executor:
+    has_clash = list(executor.map(confidences.has_clash, pred_structures))
+    fraction_disordered = list(
+        executor.map(confidences.fraction_disordered, pred_structures)
+    )
+  empty_pair = np.full((num_tokens, num_tokens), nan, dtype=np.float32)
+  for idx, one in enumerate(pred_structures):
+    yield InferenceResult(
+        predicted_structure=one,
+        numerical_data={
+            'full_pde': empty_pair,
+            'full_pae': empty_pair,
+            'contact_probs': contact_probs,
+        },
+        metadata={
+            'predicted_distance_error': nan,
+            'ranking_score': nan,
+            'fraction_disordered': fraction_disordered[idx],
+            'has_clash': has_clash[idx],
+            'predicted_tm_score': nan,
+            'interface_predicted_tm_score': nan,
+            'chain_pair_pde_mean': np.full((1, 1), nan),
+            'chain_pair_pde_min': np.full((1, 1), nan),
+            'chain_pair_pae_min': np.full((1, 1), nan),
+            'ptm': nan,
+            'iptm': nan,
+            'ptm_iptm_average': nan,
+            'intra_chain_single_pde': nan,
+            'cross_chain_single_pde': nan,
+            'pae_ichain': nan,
+            'pae_xchain': nan,
+            'ranking_confidence': nan,
+            'ranking_confidence_pae': nan,
+            'chain_pair_iptm': np.full((1, 1), nan),
+            'iptm_ichain': nan,
+            'iptm_xchain': nan,
+            'token_chain_ids': chain_ids,
+            'token_res_ids': res_ids,
+        },
+        model_id=result['__identifier__'],
+        debug_outputs={},
+    )
+
+
 def _compute_ptm(
     result: ModelResult,
     num_tokens: int,
@@ -818,6 +881,30 @@ class Model(hk.Module):
         batch.frames.mask[:, None],  # pyrefly: ignore[missing-attribute]
         [1, batch.frames.mask.shape[0]],  # pyrefly: ignore[missing-attribute]
     )
+    asym_ids = batch.token_features.asym_id[:num_tokens]  # pyrefly: ignore[missing-attribute]
+    # Map asym IDs back to chain IDs. Asym IDs are constructed from chain IDs by
+    # iterating over the chain IDs, and for each unique chain ID incrementing
+    # the asym ID by 1 and mapping it to the particular chain ID. Asym IDs are
+    # 1-indexed, so subtract 1 to get back to the chain ID.
+    chain_ids = [pred_structure.chains[asym_id - 1] for asym_id in asym_ids]
+    res_ids = batch.token_features.residue_index[:num_tokens]  # pyrefly: ignore[missing-attribute]
+
+    # A model with no confidence head predicts a structure and nothing about
+    # it, so everything below this point has no basis. Rather than skip the
+    # outputs -- which would break every consumer, from the ranking CSV to the
+    # confidence JSONs -- the same keys are emitted filled with NaN. That is
+    # what "not predicted" looks like in a float field, and it keeps a
+    # structure-only model a first-class citizen of the same pipeline.
+    #
+    # Keyed on the RESULT, not on model_config.NO_CONFIDENCE_HEAD: this is a
+    # classmethod with no global_config to consult, and the absence of the keys
+    # is the actual fact being handled -- __call__ sets confidence_output = {}
+    # for exactly these models.
+    if 'tmscore_adjusted_pae_global' not in result:
+      yield from _structure_only_results(
+          result, pred_structure, num_tokens, chain_ids, res_ids)
+      return
+
     ptm = _compute_ptm(
         result=result,
         num_tokens=num_tokens,
@@ -833,14 +920,6 @@ class Model(hk.Module):
         interface=True,
     )
     ptm_iptm_average = 0.8 * iptm + 0.2 * ptm
-
-    asym_ids = batch.token_features.asym_id[:num_tokens]  # pyrefly: ignore[missing-attribute]
-    # Map asym IDs back to chain IDs. Asym IDs are constructed from chain IDs by
-    # iterating over the chain IDs, and for each unique chain ID incrementing
-    # the asym ID by 1 and mapping it to the particular chain ID. Asym IDs are
-    # 1-indexed, so subtract 1 to get back to the chain ID.
-    chain_ids = [pred_structure.chains[asym_id - 1] for asym_id in asym_ids]
-    res_ids = batch.token_features.residue_index[:num_tokens]  # pyrefly: ignore[missing-attribute]
 
     if len(np.unique(asym_ids[:num_tokens])) > 1:
       # There is more than one chain, hence interface pTM (i.e. ipTM) defined,
