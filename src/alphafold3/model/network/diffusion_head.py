@@ -418,6 +418,7 @@ class DiffusionHead(hk.Module):
       embeddings: dict[str, jnp.ndarray],
       use_conditioning: bool,
       pair_cond: jnp.ndarray | None = None,
+      atom_cond: tuple | None = None,
       conditioning_only: bool = False,
   ) -> jnp.ndarray:
 
@@ -436,7 +437,20 @@ class DiffusionHead(hk.Module):
             use_conditioning=use_conditioning,
             parts='pair',
         )
-        return only_pair_cond
+        # The atom encoder's conditioning is position-independent too, and it
+        # is the larger tensor: the atom pair block is
+        # (num_subsets, num_queries, num_keys, channels).
+        atom_cond = atom_cross_attention.atom_cross_att_encoder(
+            token_atoms_act=None,
+            trunk_single_cond=embeddings['single'],
+            trunk_pair_cond=only_pair_cond,
+            config=self.config,
+            global_config=self.global_config,
+            batch=batch,
+            name='diffusion',
+            conditioning_only=True,
+        )
+        return only_pair_cond, atom_cond
 
       # Get conditioning. The pair half is noise- and sample-independent, so
       # `sample` builds it once and hands it in; only the single half, which
@@ -466,6 +480,7 @@ class DiffusionHead(hk.Module):
           global_config=self.global_config,
           batch=batch,
           name='diffusion',
+          cond=atom_cond,
       )
       act = enc.token_act
 

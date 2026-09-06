@@ -257,87 +257,121 @@ def atom_cross_att_encoder(
     global_config: model_config.GlobalConfig,
     batch: feat_batch.Batch,
     name: str,
+    cond: tuple | None = None,
+    conditioning_only: bool = False,
 ) -> AtomCrossAttEncoderOutput:
-  """Cross-attention on flat atom subsets and mapping to per-token features."""
+  """Cross-attention on flat atom subsets and mapping to per-token features.
+
+  `conditioning_only` returns the position-independent half as a tuple and stops;
+  `cond` takes that tuple back and skips rebuilding it. The diffusion head uses
+  the pair to hoist that half out of its per-step, per-sample loop.
+  """
   c = config
 
-  # Compute single conditioning from atom meta data and convert to queries
-  # layout.
-  # (num_subsets, num_queries, channels)
-  # The pair half of _per_atom_conditioning is DISCARDED here, and this is its
-  # only call site, so no model needs it built. It was gated to chai1 alone out
-  # of caution because other families' converters map those parameter names --
-  # but mapping a name costs nothing at run time, and an unused parameter in a
-  # blob is ignored on load. Verified bit-identical on chai1 (which already
-  # skipped it) and on models that did not.
-  token_atoms_single_cond, _ = _per_atom_conditioning(
-      config, batch, name, global_config, need_pair=False)
-  token_atoms_mask = batch.predicted_structure_info.atom_mask
-  queries_single_cond = atom_layout.convert(
-      batch.atom_cross_att.token_atoms_to_queries,
-      token_atoms_single_cond,
-      layout_axes=(-3, -2),
-  )
-  queries_mask = atom_layout.convert(
-      batch.atom_cross_att.token_atoms_to_queries,
-      token_atoms_mask,
-      layout_axes=(-2, -1),
-  )
-
-  # Boltz-2 and RF3: the atom encoder's QUERY (q) is the per-atom ref features ONLY
-  # (q=c before s_trunk), while the CONDITIONING (c, used by the transformer's adaln) is
-  # ref + s_trunk. AF3 instead folds trunk_single_cond into queries_single_cond which feeds
-  # BOTH -> the large s_trunk swamps the query and scrambles the atom attention. So keep the
-  # pre-trunk per-atom features (q_base) for the query and add s_trunk only to the
-  # conditioning. RF3 does this explicitly: `Q_L = C_L` is taken BEFORE
-  # `C_L = C_L + process_s_trunk(S_trunk)` (af3_diffusion_transformer.py AtomAttentionEncoder).
-  # chai belongs here too: its trace builds the query as
-  # `a + prev_pos_embed(scaled_coords)` -- the per-atom features BEFORE s_trunk
-  # -- while the conditioning is `LayerNorm(a + token_to_atom_single(s_trunk))`.
-  # Exactly the q != c split boltz2 and RF3 need.
+  # A config-only flag, so it is read outside the cached region below.
+  # boltz2/RF3/chai query on the per-atom features BEFORE s_trunk while the
+  # conditioning is LayerNorm(a + token_to_atom_single(s_trunk)) -- the q != c
+  # split those three need.
   pre_trunk_query = global_config.model in ('boltz2', 'rosettafold3', 'chai1')
-  q_base = queries_single_cond
 
-  # If provided, broadcast single conditioning from trunk to all queries
-  if trunk_single_cond is not None:
-    trunk_single_cond = hm.Linear(
-        c.per_atom_channels,
-        precision='highest',
-        initializer=global_config.final_init,
-        name=f'{name}_embed_trunk_single_cond',
-    )(
-        hm.LayerNorm(
-            use_fast_variance=False,
-            # chai's token_to_atom_single.0 is an AFFINE LayerNorm carrying both
-            # weight and bias (bias absmax 0.22 -- not negligible). Without an
-            # offset the bias is silently dropped, which is a pure directional
-            # error: it survives the affine-free LN of (a + t2a) downstream, so
-            # atom_cond reads rms 1.0000 and corr 0.996 and looks like rounding.
-            create_offset=model_config.affine_norm(
-                global_config.model, 'lnorm_trunk_single_cond'),
-            name=f'{name}_lnorm_trunk_single_cond',
-        )(trunk_single_cond)
+  # Everything to `query_base` reads only reference-structure features and the
+  # trunk conditioning -- nothing position-, noise- or sample-dependent. In the
+  # diffusion head this function runs once per sampling step per sample, so a
+  # default fold rebuilt it ~1000 times. `cond` carries it in when a caller has
+  # already built it.
+  if cond is None:
+    # Compute single conditioning from atom meta data and convert to queries
+    # layout.
+    # (num_subsets, num_queries, channels)
+    # The pair half of _per_atom_conditioning is DISCARDED here, and this is its
+    # only call site, so no model needs it built. It was gated to chai1 alone out
+    # of caution because other families' converters map those parameter names --
+    # but mapping a name costs nothing at run time, and an unused parameter in a
+    # blob is ignored on load. Verified bit-identical on chai1 (which already
+    # skipped it) and on models that did not.
+    token_atoms_single_cond, _ = _per_atom_conditioning(
+        config, batch, name, global_config, need_pair=False)
+    token_atoms_mask = batch.predicted_structure_info.atom_mask
+    queries_single_cond = atom_layout.convert(
+        batch.atom_cross_att.token_atoms_to_queries,
+        token_atoms_single_cond,
+        layout_axes=(-3, -2),
     )
-    queries_single_cond += atom_layout.convert(
-        batch.atom_cross_att.tokens_to_queries,
-        trunk_single_cond,
-        layout_axes=(-2,),
+    queries_mask = atom_layout.convert(
+        batch.atom_cross_att.token_atoms_to_queries,
+        token_atoms_mask,
+        layout_axes=(-2, -1),
     )
 
-  if global_config.model == 'chai1':
-    # chai normalises the conditioning SUM:
-    # `cond = LayerNorm(a + token_to_atom_single(s_trunk))`, affine-free.
-    # This is not cosmetic. Without it the conditioning comes out 3.6x too
-    # large, and since every adaLN in the atom stacks scales by (s + 1) off
-    # this vector, the atom representation runs away -- measured 75x chai's
-    # magnitude and uncorrelated (corr 0.045) at the encoder output.
-    queries_single_cond = hm.LayerNorm(
-        use_fast_variance=False, create_scale=False, create_offset=False,
-        name=f'{name}_atom_cond_norm')(queries_single_cond)
+    # Boltz-2 and RF3: the atom encoder's QUERY (q) is the per-atom ref features ONLY
+    # (q=c before s_trunk), while the CONDITIONING (c, used by the transformer's adaln) is
+    # ref + s_trunk. AF3 instead folds trunk_single_cond into queries_single_cond which feeds
+    # BOTH -> the large s_trunk swamps the query and scrambles the atom attention. So keep the
+    # pre-trunk per-atom features (q_base) for the query and add s_trunk only to the
+    # conditioning. RF3 does this explicitly: `Q_L = C_L` is taken BEFORE
+    # `C_L = C_L + process_s_trunk(S_trunk)` (af3_diffusion_transformer.py AtomAttentionEncoder).
+    # chai belongs here too: its trace builds the query as
+    # `a + prev_pos_embed(scaled_coords)` -- the per-atom features BEFORE s_trunk
+    # -- while the conditioning is `LayerNorm(a + token_to_atom_single(s_trunk))`.
+    # Exactly the q != c split boltz2 and RF3 need.
+    q_base = queries_single_cond
 
-  queries_single_cond = queries_single_cond * queries_mask[..., None]
-  q_base = q_base * queries_mask[..., None]
-  # Boltz/RF3 query uses per-atom features without s_trunk; AF3 uses the full conditioning.
+    # If provided, broadcast single conditioning from trunk to all queries
+    if trunk_single_cond is not None:
+      trunk_single_cond = hm.Linear(
+          c.per_atom_channels,
+          precision='highest',
+          initializer=global_config.final_init,
+          name=f'{name}_embed_trunk_single_cond',
+      )(
+          hm.LayerNorm(
+              use_fast_variance=False,
+              # chai's token_to_atom_single.0 is an AFFINE LayerNorm carrying both
+              # weight and bias (bias absmax 0.22 -- not negligible). Without an
+              # offset the bias is silently dropped, which is a pure directional
+              # error: it survives the affine-free LN of (a + t2a) downstream, so
+              # atom_cond reads rms 1.0000 and corr 0.996 and looks like rounding.
+              create_offset=model_config.affine_norm(
+                  global_config.model, 'lnorm_trunk_single_cond'),
+              name=f'{name}_lnorm_trunk_single_cond',
+          )(trunk_single_cond)
+      )
+      queries_single_cond += atom_layout.convert(
+          batch.atom_cross_att.tokens_to_queries,
+          trunk_single_cond,
+          layout_axes=(-2,),
+      )
+
+    if global_config.model == 'chai1':
+      # chai normalises the conditioning SUM:
+      # `cond = LayerNorm(a + token_to_atom_single(s_trunk))`, affine-free.
+      # This is not cosmetic. Without it the conditioning comes out 3.6x too
+      # large, and since every adaLN in the atom stacks scales by (s + 1) off
+      # this vector, the atom representation runs away -- measured 75x chai's
+      # magnitude and uncorrelated (corr 0.045) at the encoder output.
+      queries_single_cond = hm.LayerNorm(
+          use_fast_variance=False, create_scale=False, create_offset=False,
+          name=f'{name}_atom_cond_norm')(queries_single_cond)
+
+    queries_single_cond = queries_single_cond * queries_mask[..., None]
+    q_base = q_base * queries_mask[..., None]
+    # Boltz/RF3 query uses per-atom features without s_trunk; AF3 uses the full conditioning.
+  else:
+    queries_single_cond = cond.get('queries_single_cond')
+    queries_mask = cond.get('queries_mask')
+    q_base = cond.get('q_base')
+    keys_single_cond = cond.get('keys_single_cond')
+    keys_mask = cond.get('keys_mask')
+    pair_act = cond.get('pair_act')
+    chai = cond.get('chai')
+    num_tokens = cond.get('num_tokens')
+    queries_to_keys = cond.get('queries_to_keys')
+    rope_k = cond.get('rope_k')
+    rope_q = cond.get('rope_q')
+    same_token_mask = cond.get('same_token_mask')
+    swa_mask = cond.get('swa_mask')
+    swa_rope = cond.get('swa_rope')
+    token_atoms_mask = cond.get('token_atoms_mask')
   query_base = q_base if pre_trunk_query else queries_single_cond
 
   if token_atoms_act is None:
@@ -382,236 +416,247 @@ def atom_cross_att_encoder(
     # reads as a 30% error that is really just the missing term.
     query_base = queries_act
 
-  # Gather the keys from the queries. RF3 attends over ALL atoms, not a window.
-  queries_to_keys = batch.atom_cross_att.queries_to_keys
-  keys_single_cond = atom_layout.convert(
-      queries_to_keys,
-      queries_single_cond,
-      layout_axes=(-3, -2),
-  )
-  keys_mask = atom_layout.convert(
-      queries_to_keys, queries_mask, layout_axes=(-2, -1)
-  )
-
-  # chai-1's atom_block_pair_mask is exactly (same token) AND (both atoms real)
-  # -- verified against the 6MRR seam over every one of its 184x32x128 entries.
-  # Build it in the same two gathers the layouts already use: a dense per-atom
-  # token index into the queries layout, then into the keys layout.
-  same_token_mask = None
-  if global_config.model == 'chai1':
-    tok_idx = jnp.broadcast_to(
-        jnp.arange(token_atoms_mask.shape[-2], dtype=jnp.int32)[:, None],
-        token_atoms_mask.shape[-2:],
+  if cond is None:
+    # Gather the keys from the queries. RF3 attends over ALL atoms, not a window.
+    queries_to_keys = batch.atom_cross_att.queries_to_keys
+    keys_single_cond = atom_layout.convert(
+        queries_to_keys,
+        queries_single_cond,
+        layout_axes=(-3, -2),
     )
-    queries_tok = atom_layout.convert(
-        batch.atom_cross_att.token_atoms_to_queries, tok_idx,
+    keys_mask = atom_layout.convert(
+        queries_to_keys, queries_mask, layout_axes=(-2, -1)
+    )
+
+    # chai-1's atom_block_pair_mask is exactly (same token) AND (both atoms real)
+    # -- verified against the 6MRR seam over every one of its 184x32x128 entries.
+    # Build it in the same two gathers the layouts already use: a dense per-atom
+    # token index into the queries layout, then into the keys layout.
+    same_token_mask = None
+    if global_config.model == 'chai1':
+      tok_idx = jnp.broadcast_to(
+          jnp.arange(token_atoms_mask.shape[-2], dtype=jnp.int32)[:, None],
+          token_atoms_mask.shape[-2:],
+      )
+      queries_tok = atom_layout.convert(
+          batch.atom_cross_att.token_atoms_to_queries, tok_idx,
+          layout_axes=(-2, -1),
+      )
+      keys_tok = atom_layout.convert(
+          queries_to_keys, queries_tok, layout_axes=(-2, -1)
+      )
+      same_token_mask = (
+          (queries_tok[..., :, None] == keys_tok[..., None, :])
+          & queries_mask[..., :, None].astype(jnp.bool_)
+          & keys_mask[..., None, :].astype(jnp.bool_)
+      )
+
+    # Embed single features into the pair conditioning.
+    # shape (num_subsets, num_queries, num_keys, ch)
+    row_act = hm.Linear(
+        c.per_atom_pair_channels, name=f'{name}_single_to_pair_cond_row'
+    )(jax.nn.relu(queries_single_cond))
+    pair_cond_keys_input = atom_layout.convert(
+        queries_to_keys,
+        queries_single_cond,
+        layout_axes=(-3, -2),
+    )
+    col_act = hm.Linear(
+        c.per_atom_pair_channels, name=f'{name}_single_to_pair_cond_col'
+    )(jax.nn.relu(pair_cond_keys_input))
+    pair_act = row_act[:, :, None, :] + col_act[:, None, :, :]
+
+    if trunk_pair_cond is not None:
+      # If provided, broadcast the pair conditioning for the trunk (evoformer
+      # pairs) to the atom pair activations. This should boost ligands, but also
+      # help for cross attention within proteins, because we always have atoms
+      # from multiple residues in a subset.
+      # Map trunk pair conditioning to per_atom_pair_channels
+      # (num_tokens, num_tokens, per_atom_pair_channels)
+      trunk_pair_cond = hm.Linear(
+          c.per_atom_pair_channels,
+          precision='highest',
+          initializer=global_config.final_init,
+          name=f'{name}_embed_trunk_pair_cond',
+      )(
+          hm.LayerNorm(
+              use_fast_variance=False,
+              # same for token_pair_to_atom_pair.0
+              create_offset=model_config.affine_norm(
+                  global_config.model, 'lnorm_trunk_pair_cond'),
+              name=f'{name}_lnorm_trunk_pair_cond',
+          )(trunk_pair_cond)
+      )
+
+      # Create the GatherInfo into a flattened trunk_pair_cond from the
+      # queries and keys gather infos.
+      num_tokens = trunk_pair_cond.shape[0]
+      # (num_subsets, num_queries)
+      tokens_to_queries = batch.atom_cross_att.tokens_to_queries
+      # (num_subsets, num_keys)
+      tokens_to_keys = batch.atom_cross_att.tokens_to_keys
+      # (num_subsets, num_queries, num_keys)
+      trunk_pair_to_atom_pair = atom_layout.GatherInfo(
+          gather_idxs=(
+              num_tokens * tokens_to_queries.gather_idxs[:, :, None]
+              + tokens_to_keys.gather_idxs[:, None, :]
+          ),
+          gather_mask=(
+              tokens_to_queries.gather_mask[:, :, None]
+              & tokens_to_keys.gather_mask[:, None, :]
+          ),
+          input_shape=jnp.array((num_tokens, num_tokens)),
+      )
+      # Gather the conditioning and add it to the atom-pair activations.
+      pair_act += atom_layout.convert(
+          trunk_pair_to_atom_pair, trunk_pair_cond, layout_axes=(-3, -2)
+      )
+
+    # Embed pairwise offsets
+    queries_ref_pos = atom_layout.convert(
+        batch.atom_cross_att.token_atoms_to_queries,
+        batch.ref_structure.positions,
+        layout_axes=(-3, -2),
+    )
+    queries_ref_space_uid = atom_layout.convert(
+        batch.atom_cross_att.token_atoms_to_queries,
+        batch.ref_structure.ref_space_uid,
         layout_axes=(-2, -1),
     )
-    keys_tok = atom_layout.convert(
-        queries_to_keys, queries_tok, layout_axes=(-2, -1)
+    keys_ref_pos = atom_layout.convert(
+        queries_to_keys,
+        queries_ref_pos,
+        layout_axes=(-3, -2),
     )
-    same_token_mask = (
-        (queries_tok[..., :, None] == keys_tok[..., None, :])
-        & queries_mask[..., :, None].astype(jnp.bool_)
-        & keys_mask[..., None, :].astype(jnp.bool_)
-    )
-
-  # Embed single features into the pair conditioning.
-  # shape (num_subsets, num_queries, num_keys, ch)
-  row_act = hm.Linear(
-      c.per_atom_pair_channels, name=f'{name}_single_to_pair_cond_row'
-  )(jax.nn.relu(queries_single_cond))
-  pair_cond_keys_input = atom_layout.convert(
-      queries_to_keys,
-      queries_single_cond,
-      layout_axes=(-3, -2),
-  )
-  col_act = hm.Linear(
-      c.per_atom_pair_channels, name=f'{name}_single_to_pair_cond_col'
-  )(jax.nn.relu(pair_cond_keys_input))
-  pair_act = row_act[:, :, None, :] + col_act[:, None, :, :]
-
-  if trunk_pair_cond is not None:
-    # If provided, broadcast the pair conditioning for the trunk (evoformer
-    # pairs) to the atom pair activations. This should boost ligands, but also
-    # help for cross attention within proteins, because we always have atoms
-    # from multiple residues in a subset.
-    # Map trunk pair conditioning to per_atom_pair_channels
-    # (num_tokens, num_tokens, per_atom_pair_channels)
-    trunk_pair_cond = hm.Linear(
-        c.per_atom_pair_channels,
-        precision='highest',
-        initializer=global_config.final_init,
-        name=f'{name}_embed_trunk_pair_cond',
-    )(
-        hm.LayerNorm(
-            use_fast_variance=False,
-            # same for token_pair_to_atom_pair.0
-            create_offset=model_config.affine_norm(
-                global_config.model, 'lnorm_trunk_pair_cond'),
-            name=f'{name}_lnorm_trunk_pair_cond',
-        )(trunk_pair_cond)
+    keys_ref_space_uid = atom_layout.convert(
+        queries_to_keys,
+        queries_ref_space_uid,
+        layout_axes=(-2, -1),
     )
 
-    # Create the GatherInfo into a flattened trunk_pair_cond from the
-    # queries and keys gather infos.
-    num_tokens = trunk_pair_cond.shape[0]
-    # (num_subsets, num_queries)
-    tokens_to_queries = batch.atom_cross_att.tokens_to_queries
-    # (num_subsets, num_keys)
-    tokens_to_keys = batch.atom_cross_att.tokens_to_keys
-    # (num_subsets, num_queries, num_keys)
-    trunk_pair_to_atom_pair = atom_layout.GatherInfo(
-        gather_idxs=(
-            num_tokens * tokens_to_queries.gather_idxs[:, :, None]
-            + tokens_to_keys.gather_idxs[:, None, :]
-        ),
-        gather_mask=(
-            tokens_to_queries.gather_mask[:, :, None]
-            & tokens_to_keys.gather_mask[:, None, :]
-        ),
-        input_shape=jnp.array((num_tokens, num_tokens)),
+    swa_rope = global_config.model in model_config.SWA_ROPE_ATOM_ATTENTION
+    rope_q = rope_k = None
+    swa_mask = None
+    if swa_rope:
+      cfg = model_config.ATOM_ROPE[global_config.model]
+      head_dim = (c.atom_transformer.attention.key_dim
+                  or c.per_atom_channels) // c.atom_transformer.attention.num_head
+      rope_q = _build_atom_rope(queries_ref_pos, queries_ref_space_uid, head_dim, cfg)
+      rope_k = _build_atom_rope(keys_ref_pos, keys_ref_space_uid, head_dim, cfg)
+      # The exact +/-64 window by RANK among valid atoms. AF3's key subset is only
+      # block-aligned, so this is what actually defines ESMFold2's window; the
+      # subset is merely wide enough to contain it.
+      q_rank = jnp.cumsum(queries_mask.reshape(-1)) - 1
+      q_rank = q_rank.reshape(queries_mask.shape)
+      k_rank = atom_layout.convert(queries_to_keys, q_rank, layout_axes=(-2, -1))
+      half = model_config.ATOM_ROPE_HALF_WINDOW
+      swa_mask = jnp.abs(q_rank[:, :, None] - k_rank[:, None, :]) <= half
+      swa_mask = swa_mask & queries_mask[:, :, None].astype(jnp.bool_)
+      swa_mask = swa_mask & keys_mask[:, None, :].astype(jnp.bool_)
+
+    offsets_valid = (
+        queries_ref_space_uid[:, :, None] == keys_ref_space_uid[:, None, :]
     )
-    # Gather the conditioning and add it to the atom-pair activations.
-    pair_act += atom_layout.convert(
-        trunk_pair_to_atom_pair, trunk_pair_cond, layout_axes=(-3, -2)
-    )
+    if global_config.model in model_config.OPENFOLD3_LINEAGE:
+      # OF3 was trained with padded keys correctly excluded from offsets_valid.
+      # Padded key atoms have ref_space_uid=0 (zero-fill), colliding with token 0.
+      offsets_valid = offsets_valid & keys_mask[:, None, :].astype(jnp.bool_)
+    offsets = queries_ref_pos[:, :, None, :] - keys_ref_pos[:, None, :, :]
+    chai = global_config.model == 'chai1'
+    if chai:
+      # chai does not embed raw offsets at all. Its atom-pair input is a 12-class
+      # DISTOGRAM one-hot plus an inverse-square distance and a validity mask, so
+      # unlike the single conditioning this cannot be folded into AF3's weights --
+      # a one-hot distogram is not a linear function of the offsets. It can still
+      # be built here rather than carried through featurisation, because AF3
+      # already computes the offsets this needs.
+      #
+      # The bin index is a LEFT searchsorted over [0,1,2,3,4,5,6,8,12,16], i.e. the
+      # number of bins strictly below the distance, and invalid pairs take the last
+      # class (11). Matches chai's own generator exactly (1.0000 agreement).
+      # The inverse-square value is NOT masked -- chai computes it on every pair
+      # and carries validity in its own column.
+      bins = jnp.array([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 12.0, 16.0],
+                       dtype=offsets.dtype)
+      sq = jnp.sum(jnp.square(offsets), axis=-1)
+      # Compare SQUARED distances against squared bin edges. The obvious spelling,
+      # `sqrt(maximum(sq, 1e-12)) > bins`, is wrong on the diagonal: the epsilon
+      # that guards the sqrt turns a self-pair's exact 0 into 1e-6, and
+      # 1e-6 > 0.0 is TRUE, so every self-pair lands in bin 1 instead of bin 0.
+      # Measured against chai's own BlockedAtomPairDistogram that cost 11.3% of the
+      # valid pairs -- exactly the self-pair fraction (573 self-pairs out of ~4800
+      # same-residue pairs), and chai's bin 1 is legitimately empty because no two
+      # distinct atoms are within 1 A. Squaring needs no epsilon and is exact.
+      idx = jnp.sum((sq[..., None] > jnp.square(bins)).astype(jnp.int32), axis=-1)
+      idx = jnp.where(offsets_valid, idx, len(bins) + 1)
+      feat = jnp.concatenate([
+          jax.nn.one_hot(idx, len(bins) + 2).astype(pair_act.dtype),
+          (1.0 / (1.0 + sq))[..., None].astype(pair_act.dtype),
+          offsets_valid[..., None].astype(pair_act.dtype),
+      ], axis=-1)
+      # chai's ATOM_PAIR projection carries a bias, and unlike the single side it
+      # cannot be folded into a mask column: it applies to invalid pairs too.
+      pair_act += hm.Linear(
+          c.per_atom_pair_channels, use_bias=True,
+          name=f'{name}_embed_atom_pair_feat'
+      )(feat)
+    else:
+      pair_act += (
+          hm.Linear(
+              c.per_atom_pair_channels,
+              precision='highest',
+              name=f'{name}_embed_pair_offsets',
+          )(offsets)
+          * offsets_valid[:, :, :, None]
+      )
 
-  # Embed pairwise offsets
-  queries_ref_pos = atom_layout.convert(
-      batch.atom_cross_att.token_atoms_to_queries,
-      batch.ref_structure.positions,
-      layout_axes=(-3, -2),
-  )
-  queries_ref_space_uid = atom_layout.convert(
-      batch.atom_cross_att.token_atoms_to_queries,
-      batch.ref_structure.ref_space_uid,
-      layout_axes=(-2, -1),
-  )
-  keys_ref_pos = atom_layout.convert(
-      queries_to_keys,
-      queries_ref_pos,
-      layout_axes=(-3, -2),
-  )
-  keys_ref_space_uid = atom_layout.convert(
-      queries_to_keys,
-      queries_ref_space_uid,
-      layout_axes=(-2, -1),
-  )
+    if not chai:
+      # Embed pairwise inverse squared distances (chai folded these into the
+      # distogram feature above)
+      sq_dists = jnp.sum(jnp.square(offsets), axis=-1)
+      pair_act += (
+          hm.Linear(c.per_atom_pair_channels, name=f'{name}_embed_pair_distances')(
+              1.0 / (1 + sq_dists[:, :, :, None])
+          )
+          * offsets_valid[:, :, :, None]
+      )
+      # Embed offsets valid mask
+      pair_act += hm.Linear(
+          c.per_atom_pair_channels, name=f'{name}_embed_pair_offsets_valid'
+      )(offsets_valid[:, :, :, None].astype(jnp.float32))
 
-  swa_rope = global_config.model in model_config.SWA_ROPE_ATOM_ATTENTION
-  rope_q = rope_k = None
-  swa_mask = None
-  if swa_rope:
-    cfg = model_config.ATOM_ROPE[global_config.model]
-    head_dim = (c.atom_transformer.attention.key_dim
-                or c.per_atom_channels) // c.atom_transformer.attention.num_head
-    rope_q = _build_atom_rope(queries_ref_pos, queries_ref_space_uid, head_dim, cfg)
-    rope_k = _build_atom_rope(keys_ref_pos, keys_ref_space_uid, head_dim, cfg)
-    # The exact +/-64 window by RANK among valid atoms. AF3's key subset is only
-    # block-aligned, so this is what actually defines ESMFold2's window; the
-    # subset is merely wide enough to contain it.
-    q_rank = jnp.cumsum(queries_mask.reshape(-1)) - 1
-    q_rank = q_rank.reshape(queries_mask.shape)
-    k_rank = atom_layout.convert(queries_to_keys, q_rank, layout_axes=(-2, -1))
-    half = model_config.ATOM_ROPE_HALF_WINDOW
-    swa_mask = jnp.abs(q_rank[:, :, None] - k_rank[:, None, :]) <= half
-    swa_mask = swa_mask & queries_mask[:, :, None].astype(jnp.bool_)
-    swa_mask = swa_mask & keys_mask[:, None, :].astype(jnp.bool_)
+    if chai:
+      # chai's atom_pair_mlp is Linear, ReLU, Linear with the residual added
+      # afterwards -- two layers, and NO relu on the way in. AF3 has three layers
+      # and relus the input first.
+      pair_act += hm.Linear(
+          c.per_atom_pair_channels, initializer='relu', name=f'{name}_pair_mlp_2'
+      )(jax.nn.relu(hm.Linear(
+          c.per_atom_pair_channels, initializer='relu', name=f'{name}_pair_mlp_1'
+      )(pair_act)))
+    else:
+      # Run a small MLP on the pair acitvations
+      pair_act2 = hm.Linear(
+          c.per_atom_pair_channels, initializer='relu', name=f'{name}_pair_mlp_1'
+      )(jax.nn.relu(pair_act))
+      pair_act2 = hm.Linear(
+          c.per_atom_pair_channels, initializer='relu', name=f'{name}_pair_mlp_2'
+      )(jax.nn.relu(pair_act2))
+      pair_act += hm.Linear(
+          c.per_atom_pair_channels,
+          initializer=global_config.final_init,
+          name=f'{name}_pair_mlp_3',
+      )(jax.nn.relu(pair_act2))
 
-  offsets_valid = (
-      queries_ref_space_uid[:, :, None] == keys_ref_space_uid[:, None, :]
-  )
-  if global_config.model in model_config.OPENFOLD3_LINEAGE:
-    # OF3 was trained with padded keys correctly excluded from offsets_valid.
-    # Padded key atoms have ref_space_uid=0 (zero-fill), colliding with token 0.
-    offsets_valid = offsets_valid & keys_mask[:, None, :].astype(jnp.bool_)
-  offsets = queries_ref_pos[:, :, None, :] - keys_ref_pos[:, None, :, :]
-  chai = global_config.model == 'chai1'
-  if chai:
-    # chai does not embed raw offsets at all. Its atom-pair input is a 12-class
-    # DISTOGRAM one-hot plus an inverse-square distance and a validity mask, so
-    # unlike the single conditioning this cannot be folded into AF3's weights --
-    # a one-hot distogram is not a linear function of the offsets. It can still
-    # be built here rather than carried through featurisation, because AF3
-    # already computes the offsets this needs.
-    #
-    # The bin index is a LEFT searchsorted over [0,1,2,3,4,5,6,8,12,16], i.e. the
-    # number of bins strictly below the distance, and invalid pairs take the last
-    # class (11). Matches chai's own generator exactly (1.0000 agreement).
-    # The inverse-square value is NOT masked -- chai computes it on every pair
-    # and carries validity in its own column.
-    bins = jnp.array([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 12.0, 16.0],
-                     dtype=offsets.dtype)
-    sq = jnp.sum(jnp.square(offsets), axis=-1)
-    # Compare SQUARED distances against squared bin edges. The obvious spelling,
-    # `sqrt(maximum(sq, 1e-12)) > bins`, is wrong on the diagonal: the epsilon
-    # that guards the sqrt turns a self-pair's exact 0 into 1e-6, and
-    # 1e-6 > 0.0 is TRUE, so every self-pair lands in bin 1 instead of bin 0.
-    # Measured against chai's own BlockedAtomPairDistogram that cost 11.3% of the
-    # valid pairs -- exactly the self-pair fraction (573 self-pairs out of ~4800
-    # same-residue pairs), and chai's bin 1 is legitimately empty because no two
-    # distinct atoms are within 1 A. Squaring needs no epsilon and is exact.
-    idx = jnp.sum((sq[..., None] > jnp.square(bins)).astype(jnp.int32), axis=-1)
-    idx = jnp.where(offsets_valid, idx, len(bins) + 1)
-    feat = jnp.concatenate([
-        jax.nn.one_hot(idx, len(bins) + 2).astype(pair_act.dtype),
-        (1.0 / (1.0 + sq))[..., None].astype(pair_act.dtype),
-        offsets_valid[..., None].astype(pair_act.dtype),
-    ], axis=-1)
-    # chai's ATOM_PAIR projection carries a bias, and unlike the single side it
-    # cannot be folded into a mask column: it applies to invalid pairs too.
-    pair_act += hm.Linear(
-        c.per_atom_pair_channels, use_bias=True,
-        name=f'{name}_embed_atom_pair_feat'
-    )(feat)
   else:
-    pair_act += (
-        hm.Linear(
-            c.per_atom_pair_channels,
-            precision='highest',
-            name=f'{name}_embed_pair_offsets',
-        )(offsets)
-        * offsets_valid[:, :, :, None]
-    )
-
-  if not chai:
-    # Embed pairwise inverse squared distances (chai folded these into the
-    # distogram feature above)
-    sq_dists = jnp.sum(jnp.square(offsets), axis=-1)
-    pair_act += (
-        hm.Linear(c.per_atom_pair_channels, name=f'{name}_embed_pair_distances')(
-            1.0 / (1 + sq_dists[:, :, :, None])
-        )
-        * offsets_valid[:, :, :, None]
-    )
-    # Embed offsets valid mask
-    pair_act += hm.Linear(
-        c.per_atom_pair_channels, name=f'{name}_embed_pair_offsets_valid'
-    )(offsets_valid[:, :, :, None].astype(jnp.float32))
-
-  if chai:
-    # chai's atom_pair_mlp is Linear, ReLU, Linear with the residual added
-    # afterwards -- two layers, and NO relu on the way in. AF3 has three layers
-    # and relus the input first.
-    pair_act += hm.Linear(
-        c.per_atom_pair_channels, initializer='relu', name=f'{name}_pair_mlp_2'
-    )(jax.nn.relu(hm.Linear(
-        c.per_atom_pair_channels, initializer='relu', name=f'{name}_pair_mlp_1'
-    )(pair_act)))
-  else:
-    # Run a small MLP on the pair acitvations
-    pair_act2 = hm.Linear(
-        c.per_atom_pair_channels, initializer='relu', name=f'{name}_pair_mlp_1'
-    )(jax.nn.relu(pair_act))
-    pair_act2 = hm.Linear(
-        c.per_atom_pair_channels, initializer='relu', name=f'{name}_pair_mlp_2'
-    )(jax.nn.relu(pair_act2))
-    pair_act += hm.Linear(
-        c.per_atom_pair_channels,
-        initializer=global_config.final_init,
-        name=f'{name}_pair_mlp_3',
-    )(jax.nn.relu(pair_act2))
+    pass  # unpacked with the rest, above
+  if conditioning_only:
+    # A dict, not a tuple: the cached regions define more than the six tensors
+    # the rest of this function reads -- masks, rope tables, the queries->keys
+    # gather -- and every one of them is position-independent too. Missing keys
+    # come back as None, which is correct for the ones that are themselves
+    # behind a model branch.
+    return {n: v for n, v in locals().items() if n in ('queries_single_cond', 'queries_mask', 'q_base', 'keys_single_cond', 'keys_mask', 'pair_act', 'chai', 'num_tokens', 'queries_to_keys', 'rope_k', 'rope_q', 'same_token_mask', 'swa_mask', 'swa_rope', 'token_atoms_mask')}
 
   # Run the atom cross attention transformer.
   queries_act = diffusion_transformer.CrossAttTransformer(
