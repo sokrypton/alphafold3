@@ -164,6 +164,40 @@ ColabDesign running the same weights — `dev/oracles/af2_fold_check.py --compar
 6MRR agrees to 0.0006 Å CA-RMSD, well inside the 0.16–0.39 Å cross-process
 autotuning floor.
 
+### Diffusion and confidence modules
+
+The trunk table above is half the graph. Coverage of the other half is thinner,
+and unevenly so — four of the seven have no diffusion or confidence module gate
+at all. Where a gate exists it is an injection: native's own captured tensors go
+in, and our module's output is compared to native's.
+
+| model | diffusion / structure | confidence head |
+|---|---|---|
+| `esmfold2` family | conditioning z/s 0.99999929 / 1.00000000; atom encoder 0.99999989; token transformer (12 blk) 0.99999783; **r_update / x_denoised 0.99999765 / 0.99999767** | pae/pde/plddt/resolved **≥ 0.99999981** |
+| `chai1` | module **1.000000000**; one denoise step 1.000000, 0.012 Å | pae 0.999937 / pde 0.999905 / pLDDT 0.999968 — bf16 floor |
+| `boltz2` | token transformer (24 blk, injected) **0.99999981** | pairformer ×8: s 1.000000 / z 0.999998; z re-embedding 0.9999996 |
+| `opendde` | atom encoder a_token 0.999955; per-step denoiser at parity across every sigma from 4608 down to 1 | not measured |
+| `openfold3` | not measured | not measured |
+| `intellifold2` | not measured | not measured |
+| `protenix2` | not measured | not measured |
+| `rosettafold3` | not measured | not measured |
+| `alphafold3` | n/a — the reference implementation | n/a |
+| `af2_*` | n/a — DeepMind's own network, run unmodified | n/a |
+
+**"Not measured" is not "not working".** All seven fold, place ligands, fold
+RNA and DNA, dock complexes and predict error — see the screens below. What is
+missing is a module-level comparison against the vendor's diffusion and
+confidence code, so a divergence there would have to be large enough to show up
+in a structure before anything caught it. The four gaps are the four models
+whose ports predate the injection-ladder method.
+
+Note that the confidence column here and the confidence column in the modality
+screens measure different things. This one asks whether our module reproduces
+NATIVE's numbers; that one asks whether the head PREDICTS ERROR at all
+(per-residue pLDDT against the actual CA deviation). A head can pass the second
+and fail the first, and a head that is a faithful port of a badly calibrated
+head passes the first and fails the second.
+
 ### Modality screens
 
 Folding 6MRR says nothing about ligands, nucleic acids or complexes. Four
