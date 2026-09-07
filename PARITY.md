@@ -403,6 +403,44 @@ silent drops: it found the missing distogram bias in four models. Both
 directions matter — native tensors we never read, AND graph parameters we never
 fill.
 
+## L0, run across the protenix family for the first time (2026-09-07)
+
+`dev/audit_coverage.py` only knew `protenix2`; the other five raised KeyError,
+so L0 had never run on them. With the family added to `_LOADERS`/`_MAPPERS`:
+
+| model | checkpoint tensors | unaccounted | what they are |
+|---|---|---|---|
+| `protenix2` | 4174 | 2 | `confidence_head.lower/upper_bins` — distance-bin EDGES, which our graph computes from config |
+| `protenix1` | 4174 | 2 | the same two |
+| `protenix05` | 4092 | 7 | the bins + **5 template-embedder tensors** |
+| `protenix_mini` | 1612 | 9 | the bins + template embedder + `layernorm_v.bias` |
+| `protenix_tiny` | 1157 | 10 | the above + **`input_embedder.linear_esm`** (449, 2560) |
+| `rosettafold3` | 4075 | 33 | every `attention_pair_bias.ln_0.bias` |
+
+Three findings, in descending order of consequence:
+
+**The protenix TEMPLATE EMBEDDER is unported for 05/mini/tiny.** Five tensors
+(`layernorm_z`, `linear_no_bias_z`, `linear_no_bias_a` over 108 template
+features, `linear_no_bias_u`, `layernorm_v`) — a single projection, not AF3's
+template pairformer. protenix2 and protenix1 DO read theirs, which is why their
+counts are 2, but the fold treats protenix2's templates as inert. So templates
+are an input modality this family does not support, and the L0 audit is what
+says so.
+
+**protenix_tiny carries an ESM input projection we never feed.**
+`input_embedder.linear_esm` is (449, 2560) — a 2560-wide language-model
+embedding, i.e. ESM2-3B. The model folds without it (1.483 A on 6MRR), so it is
+optional rather than required, but tiny is the distillation most likely to lean
+on it.
+
+**rosettafold3's 33 are provably inert, and the L2 gate is the proof.** They are
+the OFFSET of the pair-bias LayerNorm in every diffusion and atom block, and
+their values are not small (up to 10.9). They drop out anyway: `ln_0` feeds a
+BIAS-FREE projection to per-head attention logits, so the offset contributes
+`W · b`, a constant per head, identical for every (i, j) — and a constant added
+to every logit of a softmax cancels. The token-transformer gate confirms it
+empirically at corr 1.000000 against a native module that HAS those biases.
+
 ## The gates, and where they live
 
 `dev/` is gitignored (see README, "Where the harnesses live"), so these exist on
