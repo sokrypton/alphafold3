@@ -147,13 +147,53 @@ def _deq(w, k, dtype):
   return w[k].astype(dtype)
 
 
+def _attention_implementation():
+  """Which attention kernel this machine can run, resolved once.
+
+  The same helper the rest of the package uses, so the tower is not the one
+  place that has to be told about a GPU separately. On a consumer Ada card that
+  is cuDNN rather than Triton (Triton cannot launch there), and since
+  COMPUTE_DTYPE is float32, components.attention's own guard then routes cuDNN
+  to XLA -- cuDNN's fused attention takes 16-bit only.
+  """
+  global _ATTN_IMPL
+  if _ATTN_IMPL is _UNSET:
+    try:
+      from alphafold3.model.components.platform import attention_config
+
+      _ATTN_IMPL = attention_config()['attention']
+    except Exception:
+      _ATTN_IMPL = 'xla'
+  return _ATTN_IMPL
+
+
+_UNSET = object()
+_ATTN_IMPL = _UNSET
+
+
 def _attend(q, k, v, pos, heads, head_dim):
+  """Rotary attention over one sequence, on the SHARED kernel.
+
+  This used to materialise the full (heads, i, j) logits matrix and softmax it
+  by hand. That shared nothing: every improvement to `components.attention` --
+  the flash dispatch, the odd-length padding guard, the float32 fallback --
+  reached the AF3 trunk and AF2 and stopped here, at the tower nine of the
+  models depend on. Now one kernel serves all three.
+
+  No mask or bias to pass: the towers run one sequence at a time at its exact
+  length, so there is no padding to exclude. `scale` is tokamax's logits scale
+  and takes the head_dim**-0.5 that used to multiply the logits.
+  """
+  from alphafold3.model.components.attention import dot_product_attention
+
   n_len = q.shape[0]
   q = _rope(q.reshape(n_len, heads, head_dim), pos)
   k = _rope(k.reshape(n_len, heads, head_dim), pos)
   v = v.reshape(n_len, heads, head_dim)
-  logits = jnp.einsum('ihd,jhd->hij', q, k) * head_dim ** -0.5
-  return jnp.einsum('hij,jhd->ihd', jax.nn.softmax(logits, -1), v).reshape(n_len, -1)
+  out = dot_product_attention(
+      q, k, v, scale=head_dim ** -0.5,
+      implementation=_attention_implementation())
+  return out.reshape(n_len, -1)
 
 
 def _esmc_forward_block(x, w, pos, heads, head_dim, scale, dtype):
