@@ -742,6 +742,16 @@ class DnaChain:
         (self._id, self._sequence, self._modifications, self._description)
     )
 
+  # UPSTREAM BUG: this decorator is missing in AlphaFold 3's own
+  # folding_input.py, so `DnaChain.modifications` is a bound METHOD where
+  # ProteinChain.ptms and RnaChain.modifications are properties. Anything that
+  # reads it like the other two -- `pipeline.py` and `msa_server.py` in this
+  # repo, and our `_modified_residue_positions` -- gets the method object. The
+  # last of those iterates it, so every model with a `featurise` spec (that is,
+  # every port except stock alphafold3) raised `TypeError: 'method' object is
+  # not iterable` on ANY DNA input. Found by dev/oracles/modality_check.py's
+  # 1LMB case, which is the first DNA fold this repository could run.
+  @property
   def modifications(self) -> Sequence[tuple[str, int]]:
     return self._modifications
 
