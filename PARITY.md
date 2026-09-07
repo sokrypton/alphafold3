@@ -46,9 +46,11 @@ need the vendor's forward pass, so coverage tracks which natives are installed.
 | `esmfold2` family | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a — protein only |
 | `af2_ptm` / `af2_multimer` | n/a | n/a | n/a | n/a | n/a | ✓ | n/a — protein only |
 
-`~` at L2 now covers the **token transformer** (ten models) and the
-**diffusion conditioning** (protenix's six plus rosettafold3); what is still
-unmeasured in that column is the ATOM encoder/decoder.
+L2 is now covered in all three of its parts for protenix: the **token
+transformer** (ten models), the **diffusion conditioning** (protenix's six plus
+rosettafold3) and the **atom encoder** (protenix2, corr 1.000000 on the
+per-atom conditioning, the per-atom output and the per-token output). The atom
+DECODER and the other families' atom paths remain unmeasured.
 
 The token-transformer half: ten models run their own vendor's
 `DiffusionTransformer` and ours side by side on identical synthetic
@@ -508,6 +510,45 @@ BIAS-FREE projection to per-head attention logits, so the offset contributes
 `W · b`, a constant per head, identical for every (i, j) — and a constant added
 to every logit of a softmax cancels. The token-transformer gate confirms it
 empirically at corr 1.000000 against a native module that HAS those biases.
+
+## L2's atom half, and a third harness fault of the same shape (2026-09-07)
+
+`dev/oracles/atom_parity.py` runs our atom cross-attention encoder against
+protenix's `AtomAttentionEncoder` on a REAL featurised batch -- the windows and
+the atom ordering cannot be synthesised. Final numbers on protenix2:
+
+| tensor | what it is | corr | max\|d\|/rms |
+|---|---|---|---|
+| `c_atom_cond` | the per-atom conditioning, before any attention | 1.000000 | 8.1e-07 |
+| `q_atom` | the per-atom output of the 3-block atom stack | 1.000000 | 7.1e-05 |
+| `a_token` | pooled to tokens, what the token transformer eats | 1.000000 | 1.3e-05 |
+
+It did not start there. The first run read `a_token` 0.968, and the localisation
+ladder -- zero the trunk conditioning, zero the noisy coordinates, then keep ONE
+reference feature at a time -- put it precisely:
+
+| feature kept | `c_atom_cond` |
+|---|---|
+| positions | 1.000000 |
+| charge | 1.000000 |
+| atom-name chars | 1.000000 |
+| **element** | **0.832** |
+
+**And it was the harness, not the port.** protenix featurises an element as
+`GetAtomicNum() - 1`; our batch stores AF3's 1-indexed `GetAtomicNum()`, and
+`converters/common.py::fold_element_index_shift` folds that -1 into the
+embedding ROWS rather than shifting the input. So native has to be fed the
+shifted index, and feeding it ours moved every atom's element embedding by one
+row. That is the THIRD fault of this shape today, after intellifold2's bf16
+storage and rosettafold3's alphabet: each time, the port compensates for a
+vendor convention somewhere the harness did not know about, and the harness
+looks like the bug.
+
+`p_atom_pair` stays at 0.94 while the outputs it feeds are exact to 1e-5. Our
+windows clamp an out-of-range key onto atom 0 -- a real atom, repeated -- where
+protenix pads with zeros, and both sides mask those cells out of the attention.
+The outputs agreeing to 1e-5 IS the evidence that those cells never reach the
+result.
 
 ## L1b, the trunk's other half (2026-09-07)
 
