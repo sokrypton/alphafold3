@@ -219,7 +219,7 @@ PROTENIX_FAMILY = ('protenix05', 'protenix1', 'protenix1_20250630',
 # openbind keeps this lineage while reverting them to AlphaFold 3's:
 # the per-block pair LayerNorm (PER_BLOCK_PAIR_LAYER_NORM, below) and the
 # swapped column-attention pair bias (an explicit list at modules.py, where the
-# open question about openbind's direction is recorded).
+# openbind's direction, once an open question, is now measured -- see modules.py).
 OPENFOLD3_LINEAGE = (
     'openfold3', 'openbind0', 'opendde', 'boltz2', 'rosettafold3',
 ) + PROTENIX_FAMILY
@@ -369,7 +369,7 @@ DIFFUSION_PROJECTED_RELPOS = (('boltz2', 'rosettafold3') + ESMFOLD2_FAMILY
 
 # Models that compute the column-attention pair bias from the TRANSPOSED pair
 # representation, as OpenFold3 preview-2 does. openbind is deliberately absent;
-# see the note at modules.py, where the open question about its direction lives.
+# see the note at modules.py, where the measurement that settled openbind0 lives.
 TRANSPOSED_COLUMN_PAIR_BIAS = ('openfold3', 'openbind0', 'opendde', 'boltz2') + PROTENIX_FAMILY
 
 

@@ -11,7 +11,7 @@ Read `README.md` for the numbers. This file is the plan.
 | level | what it compares | needs a native? |
 |---|---|---|
 | **L0** conversion coverage | every checkpoint tensor read, every graph parameter filled — in BOTH directions | no, checkpoint + graph only |
-| **L1** trunk | our single / pair against native's, same inputs | yes |
+| **L1** trunk pairformer | our single / pair out of the PAIRFORMER STACK against native's, on identical synthetic activations | yes |
 | **L2** diffusion conditioning | conditioning z/s, atom encoder, token transformer | yes |
 | **L3** denoise step | `r_update` / `x_denoised` for one step, EDM undone | yes |
 | **L4** confidence heads | pae / pde / plddt / resolved logits | yes |
@@ -25,7 +25,7 @@ need the vendor's forward pass, so coverage tracks which natives are installed.
 
 `✓` gated, `·` not measured, `n/a` no vendor to compare against.
 
-| model | L0 | L1 trunk | L2 diff-cond | L3 denoise | L4 conf | L5 fold | L6 modality |
+| model | L0 | L1 pairformer | L2 diff-cond | L3 denoise | L4 conf | L5 fold | L6 modality |
 |---|---|---|---|---|---|---|---|
 | `alphafold3` | n/a | n/a | n/a | n/a | n/a | ✓ | · |
 | `openfold3` | ✓ | ✓ | · | · | · | ✓ | ✓ |
@@ -49,6 +49,43 @@ the reference implementation, and the second runs DeepMind's own network
 unmodified. AF2's equivalent gate is a known-answer test against ColabDesign on
 the same weights (`dev/oracles/af2_fold_check.py --compare`), agreeing to
 0.0006 Å inside a 0.16–0.39 Å autotuning floor.
+
+## What a green L1 actually verifies -- and what it does not
+
+`dev/oracles/trunk_parity.py` runs `layer_stack(PairFormerIteration)` on
+synthetic s/z. So a ✓ in the L1 column means the PAIRFORMER STACK matches
+native: its triangle multiplications, triangle attentions, attention-pair-bias
+and transitions, together with every convention consumed inside them. It does
+NOT mean "the trunk is verified", and reading it that way is how the next
+convention bug hides.
+
+Checked by grepping each `model_config` table to the class that consumes it:
+
+**Covered by L1** (inside the pairformer block)
+  * `TRANSPOSED_COLUMN_PAIR_BIAS` -- `GridSelfAttention`. This is the one L1
+    caught wrong for openbind0.
+
+**NOT covered by L1, though they are trunk conventions**
+  * `CLAMPED_OPM_NORM` -- `OuterProductMean`, in the MSA module
+  * `NO_MSA_ROW_UPDATE` -- `EvoformerIteration`, the MSA stack
+  * `MSA_AFTER_RECYCLE`, `SSM_RECYCLE`, `PAIR_ONLY_TRUNK`, `LM_PAIR_DROPOUT` --
+    evoformer level, outside the stack
+  * the template embedder entirely
+
+**NOT covered by any level, for the models lacking L2-L4.** Nine tables feed the
+diffusion path alone -- `PER_BLOCK_PAIR_LAYER_NORM`,
+`KEY_MASKED_ATOM_ATTENTION`, `SWA_ROPE_ATOM_ATTENTION`, `REALIGN_SAMPLER`,
+`NORMED_ATOM_FEATURES`, `ATOM_ROPE`, `ATOM_ROPE_HALF_WINDOW`,
+`DIFFUSION_PROJECTED_RELPOS`, `PER_BLOCK_ATOM_PAIR_LAYER_NORM` -- and six feed
+the confidence head. For `openfold3`, `intellifold2`, `protenix2` and
+`rosettafold3` none of those fifteen has an activation-level check.
+
+**This is the real exposure, and openbind0 showed why it matters.** A membership
+decision that changes no weight is invisible to L0 by construction, and folding
+could not discriminate the one bug found (the correct setting was marginally
+WORSE on 6MRR, and two seeds disagreed). There is no reason to think the
+diffusion-path tables are safer than the trunk one was -- only that nothing has
+looked.
 
 ## Native availability — the actual constraint on L1–L4
 
