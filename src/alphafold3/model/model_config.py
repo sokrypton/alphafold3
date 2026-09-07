@@ -435,6 +435,27 @@ DISTOGRAM_BIAS = (('opendde', 'rosettafold3', 'boltz2') + ESMFOLD2_FAMILY
 PRE_SYMMETRISED_PDE = PROTENIX_FAMILY
 
 
+# Models whose diffusion SINGLE conditioning normalises over the vendor's 833
+# channels rather than our 831, so the two residue classes AF3 lacks have to be
+# re-inserted as zero columns before `single_cond_initial_norm`.
+#
+# Everywhere else those columns are simply dropped from the weights, because a
+# zero input contributes nothing to a bias-free Linear. Not here: a LayerNorm
+# maps a zero input to -mean/std, so the vendor always contributes them through
+# their trained scale and weight rows AND normalises over a wider vector.
+#
+# openfold3 has done this from the start. protenix and rosettafold3 were left on
+# the 831 path deliberately ("this graph's single_cond_initial_norm spans the
+# AF3-width block"), which the L2 conditioning gate priced: single_cond corr
+# 0.999989, rms ours/native 0.9987, max|d|/rms 0.11 for protenix2. The pair half
+# of the same conditioner is 1.000000 at 3e-06, so this was the whole of the
+# difference. Adding a model here REQUIRES its converter to emit the padded
+# (833-row) scale and projection -- `_reorder_features_1d(pad_unk_dna=True)` --
+# and therefore a re-conversion; the shape mismatch is loud if you forget.
+PADDED_SINGLE_COND = (('openfold3', 'openbind0', 'rosettafold3')
+                      + PROTENIX_FAMILY)
+
+
 class GlobalConfig(base_config.BaseConfig):
   """Global configuration for the AlphaFold3 model."""
 

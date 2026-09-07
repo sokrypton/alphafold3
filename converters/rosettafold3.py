@@ -437,9 +437,16 @@ def map_rosettafold3_diffusion_conditioning_and_token(sd, params, *, n_token=24,
   _rosettafold3_cond_transition(sd, params, scope, f'{dc}.transition_1.1', 'pair_transition_1')
   # single conditioning (to_si 833->384, remapped 833->831) + noise + fourier
   from .openfold3 import _reorder_features_1d as _of3_rf1
-  # 831, not openfold3's 833: this graph's single_cond_initial_norm
-  # spans the AF3-width block, so the two classes AF3 lacks are dropped.
-  _rf1 = lambda a, **kw: _of3_rf1(a, pad_unk_dna=False, **kw)
+  # 833, like openfold3: `single_cond_initial_norm` is a LayerNorm, so the two
+  # classes AF3 lacks contribute -mean/std through their trained rows and widen
+  # the normalisation. Dropping them (what this did) cost single_cond corr
+  # 0.999989 / rms 0.9987 against native -- measured by
+  # dev/oracles/conditioning_parity.py, whose pair half is 1.000000 at 3e-06.
+  # model_config.PADDED_SINGLE_COND is the matching graph branch.
+  # RF3'S OWN ALPHABET here too. This call used of3's, which transposes G/C and
+  # DG/DC against rf3's -- invisible to every protein gate, wrong for RNA/DNA.
+  _rf1 = lambda a, **kw: _of3_rf1(a, pad_unk_dna=True,
+                                  remap=_AF3_TO_RF3_AATYPE, **kw)
   _set(params, f'{scope}/single_cond_initial_norm', 'scale', _rf1(_get(sd, f'{dc}.to_si.0.weight')))
   _set(params, f'{scope}/single_cond_initial_norm', 'offset', _rf1(_get(sd, f'{dc}.to_si.0.bias')))
   _set(params, f'{scope}/single_cond_initial_projection', 'weights', _rf1(_t(_get(sd, f'{dc}.to_si.1.weight'))))

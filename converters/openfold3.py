@@ -151,7 +151,8 @@ def _reorder_aatype_weights(w: np.ndarray) -> np.ndarray:
 
 
 def _reorder_features_1d(arr: np.ndarray, c_single: int = 384,
-                         pad_unk_dna: bool = True) -> np.ndarray:
+                         pad_unk_dna: bool = True,
+                         remap: np.ndarray | None = None) -> np.ndarray:
     """Reorder features_1d (single_emb + target_feat) along axis 0 to AF3 layout.
 
     source layout: [single(c_single), atom_cross_att(384), aatype(32), profile(32), del_mean(1)]
@@ -165,17 +166,23 @@ def _reorder_features_1d(arr: np.ndarray, c_single: int = 384,
     input into -mean/std. The source model therefore always contributes those two
     columns through their trained weights AND normalises over 833 channels rather
     than 831. `diffusion_head` re-inserts matching zero columns for the models
-    whose converter sets this (see the model == 'openfold3' branch there);
-    dropping them costs ~1.6e-3 relative error in the single conditioning.
+    whose converter sets this (see model_config.PADDED_SINGLE_COND); dropping
+    them costs ~1.6e-3 relative error in the single conditioning on openfold3,
+    and measured on protenix2 by dev/oracles/conditioning_parity.py, single_cond
+    corr 0.999989 -> 1.000000 and rms ours/native 0.9987 -> 1.0000.
 
     Works for 1-D (LayerNorm scale, shape c_single+449) and 2-D (Linear weights,
     shape (c_single+449, c_out)) arrays — reorders along axis 0.
     """
-    remap = _AF3_TO_OF3_AATYPE
+    # `remap` defaults to OF3's alphabet, which protenix shares. rosettafold3
+    # does NOT: it transposes G/C and DG/DC, and reusing OF3's permutation here
+    # embedded every G as C and every C as G in the diffusion single
+    # conditioning -- the same bug, in the same lineage, that once folded 1EHZ
+    # to 16.8 A (see converters/rosettafold3.py `_AF3_TO_RF3_AATYPE`). Protein
+    # indices coincide, so no protein gate could see it. The unknown-DNA class
+    # is index 30 in both alphabets, so `unk` needs no parameter.
+    remap = _AF3_TO_OF3_AATYPE if remap is None else remap
     unk = _OF3_UNK_DNA_AATYPE
-    # Default True: this is openfold3's own layout. Families that reuse this
-    # helper but whose graph runs the 831-wide block (protenix2, rosettafold3)
-    # pass False.
     aatype = [arr[c_single + 384 + remap]]
     profile = [arr[c_single + 416 + remap]]
     if pad_unk_dna:

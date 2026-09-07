@@ -637,9 +637,13 @@ def map_diffusion(sd, params, *, n_token=24, n_super=6, diff_H=16, diff_D=48,
   _p_flat_swiglu(sd, params, scope, f'{dc}.transition_z2', 'pair_transition_1')
   # --- diffusion conditioning: single path ---
   from .openfold3 import _reorder_features_1d as _of3_rf1
-  # 831, not openfold3's 833: this graph's single_cond_initial_norm
-  # spans the AF3-width block, so the two classes AF3 lacks are dropped.
-  _rf1 = lambda a, **kw: _of3_rf1(a, pad_unk_dna=False, **kw)
+  # 833, like openfold3: `single_cond_initial_norm` is a LayerNorm, so the two
+  # classes AF3 lacks contribute -mean/std through their trained rows and widen
+  # the normalisation. Dropping them (what this did) cost single_cond corr
+  # 0.999989 / rms 0.9987 against native -- measured by
+  # dev/oracles/conditioning_parity.py, whose pair half is 1.000000 at 3e-06.
+  # model_config.PADDED_SINGLE_COND is the matching graph branch.
+  _rf1 = lambda a, **kw: _of3_rf1(a, pad_unk_dna=True, **kw)
   _set(params, f'{scope}/single_cond_initial_norm', 'scale', _rf1(_get(sd, f'{dc}.layernorm_s.weight')))
   _set(params, f'{scope}/single_cond_initial_projection', 'weights', _rf1(_t(_get(sd, f'{dc}.linear_no_bias_s.weight'))))
   _set(params, f'{scope}/noise_embedding_initial_norm', 'scale', _get(sd, f'{dc}.layernorm_n.weight'))

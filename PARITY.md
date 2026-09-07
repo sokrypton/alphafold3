@@ -45,7 +45,11 @@ need the vendor's forward pass, so coverage tracks which natives are installed.
 | `esmfold2` family | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a — protein only |
 | `af2_ptm` / `af2_multimer` | n/a | n/a | n/a | n/a | n/a | ✓ | n/a — protein only |
 
-`~` at L2 is the **token transformer only**: ten models run their own vendor's
+`~` at L2 now covers the **token transformer** (ten models) and the
+**diffusion conditioning** (protenix's six plus rosettafold3); what is still
+unmeasured in that column is the ATOM encoder/decoder.
+
+The token-transformer half: ten models run their own vendor's
 `DiffusionTransformer` and ours side by side on identical synthetic
 `a`/`s`/`z`, all at corr 1.000000 and `rms ours/native` 1.0000
 (`dev/oracles/diffusion_parity.py`, table under plan item 2a). The conditioning
@@ -233,6 +237,43 @@ its windowed atom-attention branch instead.
 This is one of the nine diffusion-path convention tables, across every model
 family that had no L2 at all. It does NOT close L2 for these models: the
 conditioning projections and the atom encoder/decoder are untouched by it.
+
+**2d. L2 CONDITIONING gated, and it found two more bugs (2026-09-07).**
+`dev/oracles/conditioning_parity.py`. protenix's `DiffusionConditioning` and
+rf3's are both standalone-constructible, and the relative-position features are
+built by the VENDOR's own code from OUR batch's token features -- so a
+disagreement in the relative encoding is inside the gate rather than assumed
+away. That matters: `DIFFUSION_PROJECTED_RELPOS` had no activation check.
+
+  * **pair conditioning is exact**: protenix2 corr 1.000000, `max|d|/rms`
+    3.2e-06, over trunk pair + relative encoding + LN + projection + two
+    transitions. That gates `DIFFUSION_PROJECTED_RELPOS` and the
+    `pair_cond_initial_norm` offset convention.
+  * **single conditioning was NOT**: corr 0.999989, `rms ours/native` 0.9987,
+    `max|d|/rms` 0.11.
+
+**BUG 1: the 833-vs-831 LayerNorm, on seven models.** `single_cond_initial_norm`
+normalises `[s_trunk(384), s_inputs(449)]` = 833 channels in protenix and rf3,
+where our target_feat is 447 wide = 831. Everywhere else those two residue
+classes can be dropped, because a zero input contributes nothing to a bias-free
+Linear -- but a LayerNorm maps a zero input to `-mean/std`, so the vendor always
+contributes them through their trained rows AND normalises over a wider vector.
+openfold3 had handled this from the start; protenix and rosettafold3 were left
+on the 831 path deliberately. Fixed: `model_config.PADDED_SINGLE_COND` plus
+`_reorder_features_1d(pad_unk_dna=True)` in both converters. single_cond
+0.999989 -> **1.000000**, `max|d|/rms` 0.11 -> 1.1e-05. 6MRR unmoved (protenix2
+0.706 against a 0.702 baseline).
+
+**BUG 2: rf3's diffusion conditioning was remapped with OF3's alphabet.**
+`_reorder_features_1d` hardcoded `_AF3_TO_OF3_AATYPE`, and rf3 transposes G/C
+and DG/DC -- the same transposition that once folded 1EHZ to 16.8 A against
+native's 0.94. Protein indices coincide, so no protein gate could see it. The
+helper now takes the permutation and rosettafold3 passes its own.
+
+**Both fixes CHANGE THE BLOBS**: the seven affected models
+(six protenix + rosettafold3) must be re-converted, and the published weights
+for them are stale until re-published. A stale blob fails loudly -- 831 rows
+where the graph wants 833 -- rather than folding quietly.
 
 **2b. L4 GATED for all six protenix models (2026-09-07), and it found a
 bug.** `dev/oracles/confidence_parity.py`. protenix's `ConfidenceHead` is

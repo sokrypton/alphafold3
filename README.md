@@ -200,8 +200,8 @@ vendor's own standalone module on synthetic conditioning.
 | `opendde` | atom encoder a_token 0.999955; per-step denoiser at parity across every sigma from 4608 down to 1 | pae/plddt/resolved **1.000000**, pde 0.999999 — its own structural-token head |
 | `openfold3` | token transformer (24 blk) **1.000000**, max|d|/rms 4.0e-03; conditioning + atom path not measured | pae/pde/plddt/resolved **1.000000** — and the same for `openbind0` |
 | `intellifold2` | token transformer (24 blk) **1.000000**, max|d|/rms 1.2e-04; conditioning + atom path not measured | pae/pde/plddt/resolved **1.000000**, once native is rounded to bf16 — which is how this blob stores its trunk weights |
-| `protenix2` | token transformer (24 blk) **1.000000**, max|d|/rms 7.4e-05 — and the same for all six protenix variants; conditioning + atom path not measured | pae/pde/plddt/resolved **≥ 0.999985** across all six — and the gate found protenix's PDE head symmetrises the pair, not the logits (pde 0.870 → 0.999989) |
-| `rosettafold3` | token transformer (24 blk) **1.000000**, max|d|/rms 2.7e-05; conditioning + atom path not measured | pae/pde **0.999999**, plddt/resolved **1.000000** |
+| `protenix2` | token transformer (24 blk) **1.000000**, max|d|/rms 7.4e-05 — and the same for all six protenix variants; conditioning pair/single **1.000000**; atom path not measured | pae/pde/plddt/resolved **≥ 0.999985** across all six — and the gate found protenix's PDE head symmetrises the pair, not the logits (pde 0.870 → 0.999989) |
+| `rosettafold3` | token transformer (24 blk) **1.000000**, max|d|/rms 2.7e-05; conditioning pair/single gated; atom path not measured | pae/pde **0.999999**, plddt/resolved **1.000000** |
 | `alphafold3` | n/a — the reference implementation | n/a |
 | `af2_*` | n/a — DeepMind's own network, run unmodified | n/a |
 
@@ -245,6 +245,7 @@ different repository entirely. What ships here is the model code, the
 | `dev/oracles/trunk_parity.py` | here, gitignored | L1: pairformer stack vs the vendor's own module (7 models) |
 | `dev/oracles/diffusion_parity.py`, `l2_all.sh` | here, gitignored | L2: token diffusion transformer vs the vendor's own module (10 models) |
 | `dev/oracles/confidence_parity.py`, `l4_all.sh` | here, gitignored | L4: confidence head vs the vendor's own module (11 models — every port) |
+| `dev/oracles/conditioning_parity.py` | here, gitignored | L2: diffusion pair/single conditioning vs the vendor's own module |
 | `dev/oracles/af2_fold_check.py` | here, gitignored | AF2 against ColabDesign on the same weights |
 | `tools/oracles/<model>/cmp_trunk_parity.py` | ColabDesign2 | single/pair vs the vendor's torch module |
 | `tools/oracles/{ligand,multimer,rna,dna,confidence}_parity.py` | ColabDesign2 | the modality screens |
