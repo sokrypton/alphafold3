@@ -1,0 +1,122 @@
+# Parity testing: what is gated, at which level, for which model
+
+A port can be wrong in places a fold never reveals. This is the map of what is
+actually checked against each vendor's own implementation, organised by LEVEL of
+the graph, plus what it would take to fill each gap.
+
+Read `README.md` for the numbers. This file is the plan.
+
+## The levels
+
+| level | what it compares | needs a native? |
+|---|---|---|
+| **L0** conversion coverage | every checkpoint tensor read, every graph parameter filled — in BOTH directions | no, checkpoint + graph only |
+| **L1** trunk | our single / pair against native's, same inputs | yes |
+| **L2** diffusion conditioning | conditioning z/s, atom encoder, token transformer | yes |
+| **L3** denoise step | `r_update` / `x_denoised` for one step, EDM undone | yes |
+| **L4** confidence heads | pae / pde / plddt / resolved logits | yes |
+| **L5** end-to-end fold | CA-RMSD on a known target | no |
+| **L6** modality | ligand, complex, RNA, DNA — behaviour, not activations | no |
+
+L0 and L5–L6 need no vendor code, which is why they cover every model. L1–L4
+need the vendor's forward pass, so coverage tracks which natives are installed.
+
+## Current coverage
+
+`✓` gated, `·` not measured, `n/a` no vendor to compare against.
+
+| model | L0 | L1 trunk | L2 diff-cond | L3 denoise | L4 conf | L5 fold | L6 modality |
+|---|---|---|---|---|---|---|---|
+| `alphafold3` | n/a | n/a | n/a | n/a | n/a | ✓ | · |
+| `openfold3` | ✓ | ✓ | · | · | · | ✓ | ✓ |
+| `openbind0` | ✓ | · | · | · | · | ✓ | · |
+| `intellifold2` | ✓ | ✓ | · | · | · | ✓ | ✓ |
+| `protenix2` | ✓ | ✓ | · | · | · | ✓ | ✓ |
+| `protenix05` | ✓ | · | · | · | · | ✓ | · |
+| `protenix1` | ✓ | · | · | · | · | ✓ | · |
+| `protenix1_20250630` | ✓ | · | · | · | · | ✓ | · |
+| `protenix_mini` | ✓ | · | · | · | · | ✓ | · |
+| `protenix_tiny` | ✓ | · | · | · | · | ✓ | · |
+| `boltz2` | ✓ | ✓ | ✓ | · | ✓ | ✓ | ✓ |
+| `opendde` | ✓ | ✓ | ✓ | ✓ | · | ✓ | ✓ |
+| `rosettafold3` | ✓ | ✓ | · | · | · | ✓ | ✓ |
+| `chai1` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `esmfold2` family | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a — protein only |
+| `af2_ptm` / `af2_multimer` | n/a | n/a | n/a | n/a | n/a | ✓ | n/a — protein only |
+
+`alphafold3` and the AF2 pair are `n/a` at L0–L4 by construction: the first IS
+the reference implementation, and the second runs DeepMind's own network
+unmodified. AF2's equivalent gate is a known-answer test against ColabDesign on
+the same weights (`dev/oracles/af2_fold_check.py --compare`), agreeing to
+0.0006 Å inside a 0.16–0.39 Å autotuning floor.
+
+## Native availability — the actual constraint on L1–L4
+
+| vendor code | present | checkpoints present |
+|---|---|---|
+| `~/protenix` | yes | **all six**: `protenix-v2`, `protenix_base_default_v0.5.0`, `protenix_base_default_v1.0.0`, `protenix_base_20250630_v1.0.0`, `protenix_mini_default_v0.5.0`, `protenix_tiny_default_v0.5.0` |
+| `~/openfold-3` | yes | **both**: `of3-p2-155k.pt` (openfold3), `of3-ob-174k.pt` (openbind0) |
+| `~/OpenDDE` | yes | `opendde_weights/opendde.pt` |
+| `~/BoltzDesign1/boltz2` | yes | `boltz2_weights/boltz2_conf.ckpt` |
+| esmfold2 (HF transformers) | yes | `~/esmfold2_variants` |
+| chai-lab | **no** | activation dumps survive in `~/chai_*` |
+| RoseTTAFold3 | **no** | — |
+
+## The plan, cheapest first
+
+**1. Six models at L1 for the cost of two harness edits.** Every `·` in the L1
+column shares a native with a model already gated: the five other protenix
+variants use `~/protenix`, and `openbind0` uses `~/openfold-3`. Both harnesses
+currently hardcode the checkpoint as a module constant
+(`protenix2/cmp_trunk_parity.py:23`, `openfold3/cmp_trunk_parity.py:22`), so the
+work is to parameterise by model name and run each. This is the highest
+coverage-per-effort item by a wide margin.
+
+**2. L2–L4 for the four trunk-only models** — `openfold3`, `intellifold2`,
+`protenix2`, `rosettafold3`. These need new oracles, and they are the four whose
+ports predate the injection-ladder method (dump native's own tensors, inject
+them, compare our module's output). `rosettafold3` is blocked: no native
+installed. The recipe to copy is `esmfold2`'s, which is the most completely
+gated model here.
+
+**3. L6 for the protenix variants and `openbind0`** — no vendor code needed,
+just runs of the existing modality screens.
+
+**4. L0 for everything, continuously.** Cheapest level and the one that catches
+silent drops: it found the missing distogram bias in four models. Both
+directions matter — native tensors we never read, AND graph parameters we never
+fill.
+
+## Two harness confounds, non-negotiable at L1–L4
+
+Without both switched off, an L1–L4 number is meaningless. These cost six false
+leads on `protenix2` alone, whose trunk read 0.9929/0.9376 with a port that
+turned out to be exact.
+
+```
+FP32=1 JAX_DEFAULT_MATMUL_PRECISION=highest \
+  PYTHONPATH=/path/to/protenix:/path/to/ColabDesign2 \
+  python tools/oracles/protenix2/cmp_trunk_parity.py
+```
+
+`FP32=1` reaches `models.build(..., fp32=True)`; parameters otherwise come back
+bfloat16-rounded, and flipping `global_config.bfloat16` after `build()` does
+nothing because `jax.eval_shape` already fixed the dtype.
+`JAX_DEFAULT_MATMUL_PRECISION=highest` disables tf32 (~5e-4 per matmul,
+compounded over 48 blocks).
+
+## Method notes that make these numbers trustworthy
+
+  * **Validate the tap before comparing anything.** Recompute native's own
+    output from native's own captured tensors and gate on THAT first. It is what
+    separated weights (6e-7) from convention (3e-6) from our module (2.5e-3) on
+    protenix2, pinning the residual on tf32.
+  * **Compare the UPDATE, not the output**, when localising a trunk gap. An
+    ESMFold2 block's output read corr 0.971, the worst of 24, while its own
+    update read 0.9985, the best.
+  * **Run ONE block on native's own input.** That is what settles whether a
+    divergence is the block or its input.
+  * **Correlation hides a constant.** A dropped bias reads ~1.0 by rank
+    correlation. Check the standard deviation and the mean separately.
+  * **A duplex cannot detect an alphabet transposition** — G↔C in both strands
+    stays Watson–Crick. Check the nucleotide alphabet statically instead.
