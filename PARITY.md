@@ -29,9 +29,9 @@ need the vendor's forward pass, so coverage tracks which natives are installed.
 | model | L0 | L1 pairformer | L2 diff-cond | L3 denoise | L4 conf | L5 fold | L6 modality |
 |---|---|---|---|---|---|---|---|
 | `alphafold3` | n/a | n/a | n/a | n/a | n/a | ✓ | · |
-| `openfold3` | ✓ | ✓ | · | · | · | ✓ | ✓ |
-| `openbind0` | ✓ | ✓ | · | · | · | ✓ | · |
-| `intellifold2` | ✓ | ✓ | · | · | · | ✓ | ✓ |
+| `openfold3` | ✓ | ✓ | ~ | · | · | ✓ | ✓ |
+| `openbind0` | ✓ | ✓ | ~ | · | · | ✓ | · |
+| `intellifold2` | ✓ | ✓ | ~ | · | · | ✓ | ✓ |
 | `protenix2` | ✓ | ✓ | ~ | · | · | ✓ | ✓ |
 | `protenix05` | ✓ | ✓ | ~ | · | · | ✓ | · |
 | `protenix1` | ✓ | ✓ | ~ | · | · | ✓ | · |
@@ -40,18 +40,17 @@ need the vendor's forward pass, so coverage tracks which natives are installed.
 | `protenix_tiny` | ✓ | ✓ | ~ | · | · | ✓ | · |
 | `boltz2` | ✓ | ✓ | ✓ | · | ✓ | ✓ | ✓ |
 | `opendde` | ✓ | ✓ | ✓ | ✓ | · | ✓ | ✓ |
-| `rosettafold3` | ✓ | ✓ | · | · | · | ✓ | ✓ |
+| `rosettafold3` | ✓ | ✓ | ~ | · | · | ✓ | ✓ |
 | `chai1` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `esmfold2` family | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a — protein only |
 | `af2_ptm` / `af2_multimer` | n/a | n/a | n/a | n/a | n/a | ✓ | n/a — protein only |
 
-The protenix family's `~` at L2 is the **token transformer only**: all six
-checkpoints run their 24- (or 8-) block `DiffusionTransformer` at corr
-1.000000, `rms ours/native` 1.0000, `max|d|` 0.00025-0.00429 against
-protenix's own module on identical synthetic `a`/`s`/`z`
-(`dev/oracles/diffusion_parity.py`). The conditioning projections and the
-atom encoder/decoder in the same column are still unmeasured, so this is a
-third of L2, not L2.
+`~` at L2 is the **token transformer only**: ten models run their own vendor's
+`DiffusionTransformer` and ours side by side on identical synthetic
+`a`/`s`/`z`, all at corr 1.000000 and `rms ours/native` 1.0000
+(`dev/oracles/diffusion_parity.py`, table under plan item 2a). The conditioning
+projections and the atom encoder/decoder in the same column are still
+unmeasured, so this is a third of L2, not L2.
 
 `alphafold3` and the AF2 pair are `n/a` at L0–L4 by construction: the first IS
 the reference implementation, and the second runs DeepMind's own network
@@ -106,7 +105,13 @@ looked.
 | `~/BoltzDesign1/boltz2` | yes | `boltz2_weights/boltz2_conf.ckpt` |
 | esmfold2 (HF transformers) | yes | `~/esmfold2_variants` |
 | chai-lab | **no** | activation dumps survive in `~/chai_*` |
-| RoseTTAFold3 | **no** | — |
+| `~/IntelliFold` | yes | `~/model_v2/intellifold_v2.pt` |
+| RoseTTAFold3 | **yes**, `~/foundry_rf3` | `rf3_weights/rf3_foundry_01_24_latest_remapped.ckpt` |
+
+`~/IntelliFold` and `~/foundry_rf3` import as PYTHONPATH overlays rather
+than installed packages; rf3 additionally needs its dependency overlay
+`~/rf3_extra` prepended. The rf3 row read **no** until an L2 gate was
+actually attempted against it.
 
 ## The plan, cheapest first
 
@@ -156,8 +161,7 @@ was a transposed column pair bias: v0.5.0 transposes
 and 6MRR moved 1.637 -> 1.649 -- the CORRECT setting being marginally worse is
 why L5 could not see it either. This is the concrete case for L1 existing.
 
-**2a. L2 token transformer GATED for all six protenix models
-(2026-09-07).** `dev/oracles/diffusion_parity.py`. protenix's
+**2a. L2 token transformer GATED for TEN models (2026-09-07).** `dev/oracles/diffusion_parity.py`. protenix's
 `DiffusionTransformer` is standalone-constructible exactly like
 `PairformerStack`, so an L2 gate follows the L1 pattern. Established, so the
 next attempt starts here rather than exploring:
@@ -183,28 +187,58 @@ next attempt starts here rather than exploring:
     `[:n_blocks]` slice inapplicable.
 
 Results, identical synthetic `a`/`s`/`z`, `corr` and `rms ours/native` all
-1.000000 / 1.0000:
+1.000000 / 1.0000. Read `max|d|/rms` not `max|d|`: the latter tracks the
+reference's own scale (`rms(native)` spans 32 to 1074 across these models) and
+the stack depth, not fidelity.
 
-| model | blocks | `c_z` | `max|d|` |
-|---|---|---|---|
-| `protenix2` | 24 | 256 | 0.00242 |
-| `protenix1` | 24 | 128 | 0.00414 |
-| `protenix1_20250630` | 24 | 128 | 0.00414 |
-| `protenix05` | 24 | 128 | 0.00025 |
-| `protenix_mini` | 8 | 128 | 0.00410 |
-| `protenix_tiny` | 8 | 128 | 0.00429 |
+| model | native | blocks | `c_z` | `rms(native)` | `max|d|` | `max|d|/rms` |
+|---|---|---|---|---|---|---|
+| `protenix2` | `~/protenix` | 24 | 256 | 32.7 | 0.00242 | 7.4e-05 |
+| `protenix1` | " | 24 | 128 | 45.8 | 0.00342 | 7.5e-05 |
+| `protenix1_20250630` | " | 24 | 128 | 54.2 | 0.00472 | 8.7e-05 |
+| `protenix05` | " | 24 | 128 | 24.0 | 0.00025 | 1.0e-05 |
+| `protenix_mini` | " | 8 | 128 | 88.4 | 0.00410 | 4.6e-05 |
+| `protenix_tiny` | " | 8 | 128 | 103.5 | 0.00371 | 3.6e-05 |
+| `openfold3` | `~/openfold-3` | 24 | 128 | 1020.9 | 4.03400 | 4.0e-03 |
+| `openbind0` | " | 24 | 128 | 1073.9 | 1.75635 | 1.6e-03 |
+| `intellifold2` | `~/IntelliFold` | 24 | 512 | 60.7 | 0.00702 | 1.2e-04 |
+| `rosettafold3` | `~/foundry_rf3` | 24 | 128 | 267.1 | 0.00708 | 2.7e-05 |
 
-This is one of the nine diffusion-path convention tables, on one of the four
-model families that had no L2 at all. It does NOT close L2 for these models:
-the conditioning projections and the atom encoder/decoder are untouched by it.
+`max|d|` moves ~20% between processes on identical input (protenix1 read
+0.00414 then 0.00342; XLA autotunes by timing, so two processes can run
+different kernels). In-process reruns are bit-identical. Do not treat a single
+`max|d|` as a threshold; `dev/oracles/l2_all.sh` reruns the whole table.
 
-**2. L2–L4 for the four trunk-only models** — `openfold3`, `intellifold2`,
-`protenix2` (conditioning + atom path; the token transformer is done, 2a),
-`rosettafold3`. These need new oracles, and they are the four whose
-ports predate the injection-ladder method (dump native's own tensors, inject
-them, compare our module's output). `rosettafold3` is blocked: no native
-installed. The recipe to copy is `esmfold2`'s, which is the most completely
-gated model here.
+Conventions this DID settle at activation level, each previously supported only
+by a fold number:
+
+  * `PER_BLOCK_PAIR_LAYER_NORM` in both directions. openfold3 preview-2 carries
+    24 `blocks.N.attention_pair_bias.layer_norm_z.weight`; openbind0 (v0.5.0)
+    carries a single top-level one, having "moved the pair layer norm out of
+    attention pair bias ... to match the AlphaFold3 SI". Both now measured.
+  * rf3's `no_residual_connection_between_attention_and_transition` (the
+    transition reads the PRE-attention act, one shared residual add) and its
+    `kq_norm`, at 2.7e-05 -- the tightest number here.
+
+**rf3 is NOT blocked for native comparison**, which PARITY.md previously said:
+foundry imports as a PYTHONPATH overlay with its deps in `~/rf3_extra`. Two
+rf3-only handles: `force_bfloat16 = True` on every
+`AttentionPairBiasDiffusion` must be switched off (otherwise the gate measures
+bf16 rounding, ~1e-2 relative), and `Beta_II` must be None or the module takes
+its windowed atom-attention branch instead.
+
+This is one of the nine diffusion-path convention tables, across every model
+family that had no L2 at all. It does NOT close L2 for these models: the
+conditioning projections and the atom encoder/decoder are untouched by it.
+
+**2. L3–L4, and L2's other two thirds, for the four trunk-only models** —
+`openfold3`, `intellifold2`, `protenix2`, `rosettafold3`. Their token
+transformers are now gated (2a); what remains is the diffusion CONDITIONING and
+the atom encoder/decoder, then the denoise step and the confidence head. These
+need new oracles, and they are the four whose ports predate the injection-ladder
+method (dump native's own tensors, inject them, compare our module's output).
+The recipe to copy is `esmfold2`'s, which is the most completely gated model
+here.
 
 **3. L6 for the protenix variants and `openbind0`** — no vendor code needed,
 just runs of the existing modality screens.

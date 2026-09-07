@@ -187,9 +187,10 @@ autotuning floor.
 ### Diffusion and confidence modules
 
 The trunk table above is half the graph. Coverage of the other half is thinner,
-and unevenly so — four of the seven have no diffusion or confidence module gate
-at all. Where a gate exists it is an injection: native's own captured tensors go
-in, and our module's output is compared to native's.
+and unevenly so. Where a gate exists it is either an injection (native's own
+captured tensors go in, and our module's output is compared to native's) or —
+for the token transformer, now across ten models — a side-by-side run of the
+vendor's own standalone module on synthetic conditioning.
 
 | model | diffusion / structure | confidence head |
 |---|---|---|
@@ -197,19 +198,24 @@ in, and our module's output is compared to native's.
 | `chai1` | module **1.000000000**; one denoise step 1.000000, 0.012 Å | pae 0.999937 / pde 0.999905 / pLDDT 0.999968 — bf16 floor |
 | `boltz2` | token transformer (24 blk, injected) **0.99999981** | pairformer ×8: s 1.000000 / z 0.999998; z re-embedding 0.9999996 |
 | `opendde` | atom encoder a_token 0.999955; per-step denoiser at parity across every sigma from 4608 down to 1 | not measured |
-| `openfold3` | not measured | not measured |
-| `intellifold2` | not measured | not measured |
-| `protenix2` | not measured | not measured |
-| `rosettafold3` | not measured | not measured |
+| `openfold3` | token transformer (24 blk) **1.000000**, max|d|/rms 4.0e-03; conditioning + atom path not measured | not measured |
+| `intellifold2` | token transformer (24 blk) **1.000000**, max|d|/rms 1.2e-04; conditioning + atom path not measured | not measured |
+| `protenix2` | token transformer (24 blk) **1.000000**, max|d|/rms 7.4e-05 — and the same for all six protenix variants; conditioning + atom path not measured | not measured |
+| `rosettafold3` | token transformer (24 blk) **1.000000**, max|d|/rms 2.7e-05; conditioning + atom path not measured | not measured |
 | `alphafold3` | n/a — the reference implementation | n/a |
 | `af2_*` | n/a — DeepMind's own network, run unmodified | n/a |
 
 **"Not measured" is not "not working".** All seven fold, place ligands, fold
 RNA and DNA, dock complexes and predict error — see the screens below. What is
-missing is a module-level comparison against the vendor's diffusion and
-confidence code, so a divergence there would have to be large enough to show up
-in a structure before anything caught it. The four gaps are the four models
-whose ports predate the injection-ladder method.
+still missing for those four is the diffusion CONDITIONING, the atom
+encoder/decoder and the confidence head, so a divergence there would have to be
+large enough to show up in a structure before anything caught it.
+
+The token-transformer row is worth reading for what it settled beyond the
+numbers: OpenFold3 preview-2 LayerNorms the pair conditioning once per block
+while v0.5.0 (`openbind0`) moved it out and runs it once for the stack, and both
+directions are now measured rather than inferred from a fold; so are
+RosettaFold3's shared attention/transition residual and its q/k LayerNorm.
 
 Note that the confidence column here and the confidence column in the modality
 screens measure different things. This one asks whether our module reproduces
@@ -231,6 +237,8 @@ different repository entirely. What ships here is the model code, the
 | `dev/bench/sweep22.sh` | here, gitignored | the 22-model 6MRR regression sweep |
 | `dev/oracles/fold_check.py` | here, gitignored | one model, one target, CA-RMSD |
 | `dev/oracles/grad_check.py` | here, gitignored | sequence-differentiability, either engine |
+| `dev/oracles/trunk_parity.py` | here, gitignored | L1: pairformer stack vs the vendor's own module (7 models) |
+| `dev/oracles/diffusion_parity.py`, `l2_all.sh` | here, gitignored | L2: token diffusion transformer vs the vendor's own module (10 models) |
 | `dev/oracles/af2_fold_check.py` | here, gitignored | AF2 against ColabDesign on the same weights |
 | `tools/oracles/<model>/cmp_trunk_parity.py` | ColabDesign2 | single/pair vs the vendor's torch module |
 | `tools/oracles/{ligand,multimer,rna,dna,confidence}_parity.py` | ColabDesign2 | the modality screens |
