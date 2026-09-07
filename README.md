@@ -45,61 +45,56 @@ under `alphafold3.af2`, reached through the same CLI and the same output writer.
 Check `model_registry.get(name).engine` rather than testing the name.
 
 `6MRR` is best-of-5 CA-RMSD, de novo from a single sequence, 68 aa — the shared
-regression gate (`dev/bench/sweep22.sh`). `|grad|` is the design gradient
-magnitude at a fixed contact-map projection (`dev/oracles/grad_check.py`); it
-spans 215x across the library and does NOT track folding accuracy, so a design
-loop tuned on one model will take a very different effective step on another.
+regression gate (`dev/bench/sweep22.sh`). It says how well a model folds, not
+how faithfully it was ported; for that see [Parity status](#parity-status).
 
 ### AlphaFold 3 lineage
 
-| `--model` | model | weights | 6MRR Å | \|grad\| |
-|---|---|---|---|---|
-| `alphafold3` | AlphaFold 3 (Google DeepMind) | request from DeepMind | 0.632 | 6.3e-2 |
-| `openfold3` | [OpenFold3 preview-2](https://github.com/aqlaboratory/openfold3) (AlQuraishi Lab) | Apache 2.0 | 1.541 | 7.5e-2 |
-| `openbind0` | [OpenFold3 v0.5.0 "OpenBind"](https://github.com/aqlaboratory/openfold-3/releases/tag/v0.5.0) | Apache 2.0 | 1.637 | 4.7e-1 |
-| `intellifold2` | [IntelliFold-v2](https://huggingface.co/intelligenAI/intellifold) (IntelligenAI) | see upstream | 1.514 | 2.0e-1 |
+| `--model` | model | weights | 6MRR Å |
+|---|---|---|---|
+| `alphafold3` | AlphaFold 3 (Google DeepMind) | request from DeepMind | 0.632 |
+| `openfold3` | [OpenFold3 preview-2](https://github.com/aqlaboratory/openfold3) (AlQuraishi Lab) | Apache 2.0 | 1.541 |
+| `openbind0` | [OpenFold3 v0.5.0 "OpenBind"](https://github.com/aqlaboratory/openfold-3/releases/tag/v0.5.0) | Apache 2.0 | 1.637 |
+| `intellifold2` | [IntelliFold-v2](https://huggingface.co/intelligenAI/intellifold) (IntelligenAI) | see upstream | 1.514 |
 
 ### Protenix family
 
 Nine published model types that differ only in counts and widths, so
 `derive_dims` + `PROTENIX_FAMILY` make each one close to a one-liner. `mini` and
-`tiny` are genuinely small — 16 and 8 pairformer blocks against 48 — and carry
-the largest gradients in the library, ~60x stock AF3.
+`tiny` are genuinely small — 16 and 8 pairformer blocks against 48.
 
-| `--model` | model | weights | 6MRR Å | \|grad\| |
-|---|---|---|---|---|
-| `protenix2` | [Protenix-v2](https://github.com/bytedance/Protenix) (ByteDance) | Apache 2.0 | 0.702 | 2.5e-1 |
-| `protenix1` | Protenix-v1 | Apache 2.0 | 1.694 | 9.9e-1 |
-| `protenix1_20250630` | Protenix-v1, 2025-06-30 training run of the same graph | Apache 2.0 | 1.695 | 9.4e-1 |
-| `protenix05` | Protenix v0.5.0 — templateless | Apache 2.0 | 1.380 | 3.4e-1 |
-| `protenix_mini` | Protenix mini — 16 blocks | Apache 2.0 | 1.541 | 4.2e+0 |
-| `protenix_tiny` | Protenix tiny — 8 blocks | Apache 2.0 | 1.484 | 3.7e+0 |
+| `--model` | model | weights | 6MRR Å |
+|---|---|---|---|
+| `protenix2` | [Protenix-v2](https://github.com/bytedance/Protenix) (ByteDance) | Apache 2.0 | 0.702 |
+| `protenix1` | Protenix-v1 | Apache 2.0 | 1.694 |
+| `protenix1_20250630` | Protenix-v1, 2025-06-30 training run of the same graph | Apache 2.0 | 1.695 |
+| `protenix05` | Protenix v0.5.0 — templateless | Apache 2.0 | 1.380 |
+| `protenix_mini` | Protenix mini — 16 blocks | Apache 2.0 | 1.541 |
+| `protenix_tiny` | Protenix tiny — 8 blocks | Apache 2.0 | 1.484 |
 
 ### Other AF3-architecture models
 
-| `--model` | model | weights | 6MRR Å | \|grad\| |
-|---|---|---|---|---|
-| `boltz2` | [Boltz-2](https://github.com/jwohlwend/boltz) | MIT | 0.434 | 2.0e-1 |
-| `opendde` | [OpenDDE](https://huggingface.co/aurekaresearch/OpenDDE) (Aureka Research) | see upstream | 0.767 | 1.0e-1 |
-| `rosettafold3` | [RoseTTAFold3](https://files.ipd.uw.edu/pub/rf3/) (RosettaCommons) | see upstream | 0.986 | 8.5e-2 |
-| `chai1` | [chai-1](https://github.com/chaidiscovery/chai-lab) (Chai Discovery) | Apache 2.0 | 1.719 | 6.2e-2 |
+| `--model` | model | weights | 6MRR Å |
+|---|---|---|---|
+| `boltz2` | [Boltz-2](https://github.com/jwohlwend/boltz) | MIT | 0.434 |
+| `opendde` | [OpenDDE](https://huggingface.co/aurekaresearch/OpenDDE) (Aureka Research) | see upstream | 0.767 |
+| `rosettafold3` | [RoseTTAFold3](https://files.ipd.uw.edu/pub/rf3/) (RosettaCommons) | see upstream | 0.986 |
+| `chai1` | [chai-1](https://github.com/chaidiscovery/chai-lab) (Chai Discovery) | Apache 2.0 | 1.719 |
 
 ### ESMFold2 family — folds from ESM-C, not an MSA
 
-Pair-only trunk conditioned on an ESM-C language model. `|grad|` here is
-measured WITH each model's own ESM-C input supplied, which matters: without it
-the numbers read up to 38x higher and describe a different model.
+Pair-only trunk conditioned on an ESM-C language model.
 
-| `--model` | model | weights | 6MRR Å | \|grad\| |
-|---|---|---|---|---|
-| `esmfold2` | [ESMFold2](https://huggingface.co/biohub/ESMFold2) (Arc / CZ Biohub) | MIT | 1.483 | 6.7e-2 |
-| `esmfold2_fast` | [ESMFold2-Fast](https://huggingface.co/biohub/ESMFold2-Fast) — half the trunk | MIT | 1.245 | 1.9e-2 |
-| `esmfold2_exp` | [ESMFold2-Experimental](https://huggingface.co/biohub/ESMFold2-Experimental) | MIT | 0.722 | 1.1e-1 |
-| `esmfold2_exp_fast` | [ESMFold2-Experimental-Fast](https://huggingface.co/biohub/ESMFold2-Experimental-Fast) | MIT | 1.267 | 2.9e-1 |
-| `esmfold2_exp_cutoff2025` | […-Cutoff2025](https://huggingface.co/biohub/ESMFold2-Experimental-Cutoff2025) | MIT | 1.611 | 1.9e-1 |
-| `esmfold2_exp_fast_cutoff2025` | […-Fast-Cutoff2025](https://huggingface.co/biohub/ESMFold2-Experimental-Fast-Cutoff2025) | MIT | 1.423 | 1.7e-1 |
-| `esmfold2_lm600m` | […-base600M-step1500k](https://huggingface.co/biohub/ESMFold2-Experimental-Fast-base600M-step1500k) — **ESM-C 600M** | MIT | 0.858 | 2.8e-1 |
-| `esmfold2_lm300m` | […-base300M-step1500k](https://huggingface.co/biohub/ESMFold2-Experimental-Fast-base300M-step1500k) — **ESM-C 300M** | MIT | 1.753 | 2.0e-1 |
+| `--model` | model | weights | 6MRR Å |
+|---|---|---|---|
+| `esmfold2` | [ESMFold2](https://huggingface.co/biohub/ESMFold2) (Arc / CZ Biohub) | MIT | 1.483 |
+| `esmfold2_fast` | [ESMFold2-Fast](https://huggingface.co/biohub/ESMFold2-Fast) — half the trunk | MIT | 1.245 |
+| `esmfold2_exp` | [ESMFold2-Experimental](https://huggingface.co/biohub/ESMFold2-Experimental) | MIT | 0.722 |
+| `esmfold2_exp_fast` | [ESMFold2-Experimental-Fast](https://huggingface.co/biohub/ESMFold2-Experimental-Fast) | MIT | 1.267 |
+| `esmfold2_exp_cutoff2025` | […-Cutoff2025](https://huggingface.co/biohub/ESMFold2-Experimental-Cutoff2025) | MIT | 1.611 |
+| `esmfold2_exp_fast_cutoff2025` | […-Fast-Cutoff2025](https://huggingface.co/biohub/ESMFold2-Experimental-Fast-Cutoff2025) | MIT | 1.423 |
+| `esmfold2_lm600m` | […-base600M-step1500k](https://huggingface.co/biohub/ESMFold2-Experimental-Fast-base600M-step1500k) — **ESM-C 600M** | MIT | 0.858 |
+| `esmfold2_lm300m` | […-base300M-step1500k](https://huggingface.co/biohub/ESMFold2-Experimental-Fast-base300M-step1500k) — **ESM-C 300M** | MIT | 1.753 |
 
 All but the last two condition on ESM-C 6B; those use the 600M and 300M towers
 and cost 0.5 GB and 0.3 GB against 5.1. Upstream ships the "Experimental" line
@@ -114,10 +109,10 @@ Supplying neither is the one broken configuration.
 
 ### AlphaFold 2 — a sibling network, not the AF3 graph
 
-| `--model` | model | weights | 6MRR Å | \|grad\| |
-|---|---|---|---|---|
-| `af2_ptm` | AlphaFold 2 monomer pTM (`params_model_*_ptm.npz`) | CC BY 4.0 | 1.712 | 1.1e-1 |
-| `af2_multimer` | AlphaFold 2 multimer v3 (`params_model_*_multimer_v3.npz`) | CC BY 4.0 | 1.788 | 8.6e-2 |
+| `--model` | model | weights | 6MRR Å |
+|---|---|---|---|
+| `af2_ptm` | AlphaFold 2 monomer pTM (`params_model_*_ptm.npz`) | CC BY 4.0 | 1.712 |
+| `af2_multimer` | AlphaFold 2 multimer v3 (`params_model_*_multimer_v3.npz`) | CC BY 4.0 | 1.788 |
 
 DeepMind's own AlphaFold 2 parameters, read from `--model_dir` as
 `params/params_model_*.npz` — nothing is converted or republished. Monomer and
@@ -133,11 +128,49 @@ against the AF3 lineage.
 
 ## Parity status
 
+### Trunk parity — single and pair, against each model's own native module
+
+This is the number that says whether a port is faithful. Each row is the
+correlation of OUR single (`s`) and pair (`z`) trunk representations against the
+vendor's own torch module, run on the same inputs
+(`tools/oracles/<model>/cmp_trunk_parity.py` in ColabDesign2).
+
+| model | single | pair | notes |
+|---|---|---|---|
+| `boltz2` | 1.000000 | 1.000000 | |
+| `protenix2` | 1.000000 | 1.000000 | was 0.9929/0.9376 — harness confounds, never a port defect |
+| `opendde` | 1.000000 | 1.000000 | |
+| `openfold3` | 1.000000 | 1.000000 | |
+| `rosettafold3` | 0.999997 | 0.999996 | |
+| `intellifold2` | 1.000000 | 0.998994 | over 48 blocks; ONE block is 1.000000/1.000000 and every op bisects to ≥0.999997, so the residual is fp compounding |
+| `chai1` | 0.999945 | 0.999918 | at the floor — native chai's TorchScript is bf16 |
+| `esmfold2` family | — | — | whole trunk corr **0.99961** from raw features (not split s/z); the eight variants share this graph |
+| `alphafold3` | n/a | n/a | this IS the reference implementation — nothing to compare against |
+| `openbind0` | not measured | not measured | shares openfold3's converter, different release |
+| other `protenix*` | not measured | not measured | same graph as `protenix2`, `derive_dims` reports byte-identical dims; weights-only variants |
+| `af2_*` | n/a | n/a | DeepMind's own AF2 network, run unmodified — see below |
+
+**Two harness confounds dominated these numbers and cost six false leads on
+protenix2 alone.** Anyone re-running them needs both switched off, or the
+result is meaningless: parameters come back **bfloat16**-rounded unless
+`models.build(..., fp32=True)` (flipping `global_config.bfloat16` after `build()`
+does nothing), and XLA uses **tf32** for float32 matmuls on this hardware
+(~5e-4 each, compounded over 48 blocks) unless
+`JAX_DEFAULT_MATMUL_PRECISION=highest`.
+
+For AlphaFold 2 the equivalent check is different in kind: the network is
+DeepMind's own, run unmodified, so the gate is a known-answer test against
+ColabDesign running the same weights — `dev/oracles/af2_fold_check.py --compare`.
+6MRR agrees to 0.0006 Å CA-RMSD, well inside the 0.16–0.39 Å cross-process
+autotuning floor.
+
+### Modality screens
+
 Folding 6MRR says nothing about ligands, nucleic acids or complexes. Four
-modality screens cover those, and **they were run on seven models, not all
+screens cover those, and **they were run on seven models, not all
 twenty-four** — the protenix variants, `openbind0` and the ESMFold2 family have
-a 6MRR number and a gradient and nothing else. That is a gap in the testing, not
-a statement about those models.
+a 6MRR number and nothing else here. That is a gap in the testing, not a
+statement about those models.
 
 | model | protein+ligand | complex | RNA | DNA | confidence |
 |---|---|---|---|---|---|
@@ -166,8 +199,10 @@ a statement about those models.
   * `esmfold2_lm600m` and `esmfold2_lm300m` ship no confidence head at all
     (`NO_CONFIDENCE_HEAD`), and are structure-only by design.
 
-Every model is differentiable in the sequence — 24/24, all finite and dense,
-each agreeing with a directional finite difference at its best step.
+Every model is also differentiable in the sequence (24/24, verified with
+`dev/oracles/grad_check.py`), which is what the design path needs; the
+magnitudes vary widely between models and are recorded in
+`dev/bench/grad_sweep_2026-09-07.txt` rather than here.
 
 ### Getting the weights
 
