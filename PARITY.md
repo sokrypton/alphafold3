@@ -457,6 +457,18 @@ no longer line up with the coordinates, i.e. a screen that folds the wrong
 molecule and scores it against a shifted reference. The parent comes from the
 CCD's own `mon_nstd_parent_comp_id`.
 
+**DNA is where this screen paid for itself immediately.** The 1LMB duplex is
+the first DNA fold this repository could run in-tree, and it died on every
+model except stock `alphafold3` with `TypeError: 'method' object is not
+iterable`. `DnaChain.modifications` is missing its `@property` decorator in
+upstream AlphaFold 3's `folding_input.py` -- `ProteinChain.ptms` and
+`RnaChain.modifications` both have it -- so it returns a bound METHOD, and our
+`_modified_residue_positions` iterates it. Every model with a `featurise` spec
+(every port) went through that path; stock alphafold3 skips `model_features`
+entirely, which is exactly why it was the one model that worked and why nothing
+had caught this. Two more call sites, `data/pipeline.py` and
+`data/msa_server.py`, pass the method through as a value.
+
 **Modified residues are their own case.** `ptm_5k9p` is ubiquitin
 phosphorylated at Ser20 (SEP): AF3 ATOMISES a modified residue, so it reaches a
 path no plain-protein fold does, and `--write` then checks that SEP survives
