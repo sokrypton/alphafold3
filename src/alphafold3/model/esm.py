@@ -279,6 +279,40 @@ def _forward_impl(ids, p, *, family, heads, head_dim, scale, all_states):
   return states.at[-1].set(final).astype(jnp.float32)
 
 
+
+def lm_pair_in_graph(ids, tower_params, dims, shim_params):
+  """(ids or soft one-hot) -> lm_pair, TRACED INTO THE CALLER'S GRAPH.
+
+  The same computation `embed()` + `shim()` perform, minus the jit and minus the
+  round trip to the host. That round trip is the reason `lm_pair` reaches the AF3
+  graph as a constant even now that the tower is differentiable at its input
+  (see _forward_impl): the hidden states are pulled back to numpy and re-attached
+  by `model_features._attach_lm_pair`, which severs the chain. Called from inside
+  a haiku transform this keeps it, so one jax.grad can run
+  soft_seq -> tower -> shim -> trunk.
+
+  Deliberately NOT jitted. `forward()` has its own jit and its own cache, which
+  is right for a standalone call and wrong here -- a nested jit would compile the
+  tower separately and hand back a constant again.
+
+  ESM-C post-processing matches `embed()` exactly: drop BOS/EOS and move the
+  layer axis so the result is (num_tokens, num_layers, lm_width), which is what
+  `shim` expects.
+  """
+  _require_jax()
+  family = dims.get('family', 'esmc')
+  heads, head_dim = dims['n_heads'], dims['d_model'] // dims['n_heads']
+  hidden = _forward_impl(
+      jnp.asarray(ids), tower_params, family=family, heads=heads,
+      head_dim=head_dim, scale=float(dims.get('residual_scale', 1.0)),
+      all_states=family == 'esmc')
+  if family == 'esmc':
+    hidden = jnp.transpose(hidden[:, 1:-1, :], (1, 0, 2))
+  else:
+    hidden = hidden[1:-1, :]
+  return shim(hidden, shim_params)
+
+
 _JIT_CACHE = {}
 
 
@@ -709,5 +743,11 @@ def _shim(hidden, params):
   z = jnp.concatenate([x[:, None] * x[None, :], x[:, None] - x[None, :]], -1)
   z = z @ p['pair_mlp_1/weights'] + p['pair_mlp_1/bias']
   z = jax.nn.gelu(z, approximate=False) @ p['pair_mlp_2/weights'] + p['pair_mlp_2/bias']
-  return np.asarray(
-      _layer_norm(z, p['pair_norm/scale'], p['pair_norm/offset']))
+  # A jax array, NOT np.asarray. This return was the last host round trip in the
+  # chain: converting here severed soft_seq -> tower -> shim -> trunk, so the
+  # tower could be differentiable at its input (see _forward_impl) and lm_pair
+  # would still reach the graph as a constant. Every host-side caller converts
+  # anyway -- model_features._attach_lm_pair does np.asarray(..., np.float32) --
+  # so handing back a jax array costs them nothing and lets the in-graph caller
+  # keep the gradient. See lm_pair_in_graph.
+  return _layer_norm(z, p['pair_norm/scale'], p['pair_norm/offset'])
