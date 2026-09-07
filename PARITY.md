@@ -278,8 +278,13 @@ and both are now asserted or documented in the harness:
     fp32 -- so no config flag can lift our side to fp32. Rounding NATIVE the
     same way (LayerNorms and the four logit heads excepted, which the blob keeps
     fp32) gives 1.000000 on all four. `intellifold2` is the ONLY port that ships
-    bf16 weights; of3 and protenix blobs are all-fp32. Whether that costs if2
-    accuracy is untested and worth one experiment.
+    bf16 weights; of3 and protenix blobs are all-fp32. **It costs nothing**:
+    the same checkpoint converted at fp32 folds 6MRR to best 1.519 / mean 1.611
+    A against 1.517 / 1.611 for the bf16 blob, at 3010 MB instead of 1683 --
+    `global_config.bfloat16` is 'all' by default, so the trunk casts to bf16 at
+    inference whatever the storage says. It does mean a run with
+    `bfloat16='none'` (a gradient or design run) still gets bf16-rounded trunk
+    weights out of this blob.
   * **rosettafold3 read pae/pde 0.983.** The harness built our 447-wide
     target_feat from native's 449 using OF3's alphabet, but rf3 transposes G/C
     and DG/DC and its converter correctly uses its own
