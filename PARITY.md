@@ -440,6 +440,11 @@ no longer line up with the coordinates, i.e. a screen that folds the wrong
 molecule and scores it against a shifted reference. The parent comes from the
 CCD's own `mon_nstd_parent_comp_id`.
 
+**Modified residues are their own case.** `ptm_5k9p` is ubiquitin
+phosphorylated at Ser20 (SEP): AF3 ATOMISES a modified residue, so it reaches a
+path no plain-protein fold does, and `--write` then checks that SEP survives
+into the emitted mmCIF rather than being quietly written back as serine.
+
 **`--write` validates the OUTPUT too.** It writes the model's own mmCIF and
 re-reads it: chains present, component types, finite coordinates, pLDDT within
 [0, 100], and for a ligand case that the ligand actually survived into the file.
