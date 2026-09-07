@@ -291,6 +291,15 @@ read_bin = C.read_blob
 # logits. Everything else in the trunk region is bfloat16 (layernorms excepted); the
 # diffusion region is entirely float32. This mirrors AF3's param dtype policy, which
 # the published blob follows.
+#
+# MEASURED (2026-09-07), because if2 is the only port that stores bf16 and the L4
+# confidence gate had to round native to match: converting the whole blob at fp32
+# instead gives 6MRR best 1.519 / mean 1.611 A against 1.517 / 1.611 for the bf16
+# blob -- the same numbers, at 3010 MB instead of 1683. It costs nothing because
+# `global_config.bfloat16` is 'all' by default, so the trunk casts to bf16 at
+# inference whatever the storage dtype. The one caveat: a run that sets
+# bfloat16='none' (a gradient or design run) gets bf16-ROUNDED trunk weights from
+# this blob and cannot get anything better out of it.
 _F32_TRUNK_WEIGHTS = {
     'diffuser/distogram_head/half_logits',
     'diffuser/confidence_head/pae_logits',
