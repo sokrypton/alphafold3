@@ -403,6 +403,49 @@ silent drops: it found the missing distogram bias in four models. Both
 directions matter — native tensors we never read, AND graph parameters we never
 fill.
 
+## L6 modality, in this repository at last (2026-09-07)
+
+`dev/oracles/modality_check.py`. Until now the RNA / DNA / ligand / complex
+screens lived in another repository, so this one could fold those inputs but
+could not SCORE them. Numbers below are best-of-5 samples, seed 0, on the same
+featurisation a real run uses.
+
+Each modality is scored on the right atom, which is the part that is easy to get
+silently wrong: protein CA, nucleic C1', a ligand on its own heavy atoms after
+superposing on the protein, and a complex in ONE shared frame so that a
+correct-but-misplaced chain fails.
+
+| model | 1EHZ tRNA (C1') | 1STP protein (CA) | BTN ligand (in-frame) |
+|---|---|---|---|
+| `alphafold3` | 1.412 | 0.564 | |
+| `openfold3` | 1.334 | 0.494 | |
+| `openbind0` | 1.496 | 0.499 | |
+| `intellifold2` | 1.472 | 0.316 | 0.436 |
+| `rosettafold3` | 1.047 | 0.322 | |
+
+(Blank ligand cells ran before the atom-pairing fix below and are re-run
+separately.)
+
+**Pairing a predicted ligand to its reference is model-dependent.** Most models
+featurise a CCD ligand with its real atom names (`C11`, `O11`, ...), which pair
+directly; `rosettafold3` rewrites them to the ELEMENT (`C`, `O`), leaving only
+ORDER to match on. The harness tries names, falls back to order, and in the
+fallback requires the two element sequences to agree atom for atom -- which is
+what makes pairing by order a check rather than an assumption.
+
+**Modified residues have to resolve to their parent.** 1EHZ is tRNA-Phe: 14 of
+its 76 residues are modified (PSU, 2MG, H2U, 1MA, 7MG, ...). Skipping them --
+what a plain A/G/C/U table does -- yields a 62-residue "sequence" whose indices
+no longer line up with the coordinates, i.e. a screen that folds the wrong
+molecule and scores it against a shifted reference. The parent comes from the
+CCD's own `mon_nstd_parent_comp_id`.
+
+**`--write` validates the OUTPUT too.** It writes the model's own mmCIF and
+re-reads it: chains present, component types, finite coordinates, pLDDT within
+[0, 100], and for a ligand case that the ligand actually survived into the file.
+A model can place a ligand correctly and still emit a file that drops it, and no
+RMSD above would notice.
+
 ## L0, run across the protenix family for the first time (2026-09-07)
 
 `dev/audit_coverage.py` only knew `protenix2`; the other five raised KeyError,
