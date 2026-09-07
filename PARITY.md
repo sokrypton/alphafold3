@@ -23,7 +23,8 @@ need the vendor's forward pass, so coverage tracks which natives are installed.
 
 ## Current coverage
 
-`✓` gated, `·` not measured, `n/a` no vendor to compare against.
+`✓` gated, `~` partially gated (see the footnote), `·` not measured,
+`n/a` no vendor to compare against.
 
 | model | L0 | L1 pairformer | L2 diff-cond | L3 denoise | L4 conf | L5 fold | L6 modality |
 |---|---|---|---|---|---|---|---|
@@ -31,18 +32,26 @@ need the vendor's forward pass, so coverage tracks which natives are installed.
 | `openfold3` | ✓ | ✓ | · | · | · | ✓ | ✓ |
 | `openbind0` | ✓ | ✓ | · | · | · | ✓ | · |
 | `intellifold2` | ✓ | ✓ | · | · | · | ✓ | ✓ |
-| `protenix2` | ✓ | ✓ | · | · | · | ✓ | ✓ |
-| `protenix05` | ✓ | ✓ | · | · | · | ✓ | · |
-| `protenix1` | ✓ | ✓ | · | · | · | ✓ | · |
-| `protenix1_20250630` | ✓ | ✓ | · | · | · | ✓ | · |
-| `protenix_mini` | ✓ | ✓ | · | · | · | ✓ | · |
-| `protenix_tiny` | ✓ | ✓ | · | · | · | ✓ | · |
+| `protenix2` | ✓ | ✓ | ~ | · | · | ✓ | ✓ |
+| `protenix05` | ✓ | ✓ | ~ | · | · | ✓ | · |
+| `protenix1` | ✓ | ✓ | ~ | · | · | ✓ | · |
+| `protenix1_20250630` | ✓ | ✓ | ~ | · | · | ✓ | · |
+| `protenix_mini` | ✓ | ✓ | ~ | · | · | ✓ | · |
+| `protenix_tiny` | ✓ | ✓ | ~ | · | · | ✓ | · |
 | `boltz2` | ✓ | ✓ | ✓ | · | ✓ | ✓ | ✓ |
 | `opendde` | ✓ | ✓ | ✓ | ✓ | · | ✓ | ✓ |
 | `rosettafold3` | ✓ | ✓ | · | · | · | ✓ | ✓ |
 | `chai1` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `esmfold2` family | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a — protein only |
 | `af2_ptm` / `af2_multimer` | n/a | n/a | n/a | n/a | n/a | ✓ | n/a — protein only |
+
+The protenix family's `~` at L2 is the **token transformer only**: all six
+checkpoints run their 24- (or 8-) block `DiffusionTransformer` at corr
+1.000000, `rms ours/native` 1.0000, `max|d|` 0.00025-0.00429 against
+protenix's own module on identical synthetic `a`/`s`/`z`
+(`dev/oracles/diffusion_parity.py`). The conditioning projections and the
+atom encoder/decoder in the same column are still unmeasured, so this is a
+third of L2, not L2.
 
 `alphafold3` and the AF2 pair are `n/a` at L0–L4 by construction: the first IS
 the reference implementation, and the second runs DeepMind's own network
@@ -147,7 +156,8 @@ was a transposed column pair bias: v0.5.0 transposes
 and 6MRR moved 1.637 -> 1.649 -- the CORRECT setting being marginally worse is
 why L5 could not see it either. This is the concrete case for L1 existing.
 
-**2a. L2 native half PROVEN for protenix2 (2026-09-07).** protenix's
+**2a. L2 token transformer GATED for all six protenix models
+(2026-09-07).** `dev/oracles/diffusion_parity.py`. protenix's
 `DiffusionTransformer` is standalone-constructible exactly like
 `PairformerStack`, so an L2 gate follows the L1 pattern. Established, so the
 next attempt starts here rather than exploring:
@@ -165,13 +175,32 @@ next attempt starts here rather than exploring:
     the diffusion path also calls `forward_none_affine`. Dispatch on ARITY
     rather than enumerating. Probe: `dev/bench/l2_native_probe_protenix.py`.
 
-What remains is OUR side: our token transformer's parameters sit under NESTED
-layer_stacks (super-blocks inside blocks), so the flat `[:n_blocks]` slice the
-L1 harness uses does not apply. boltz2's equivalent injected gate reached
-0.99999981, so the target is known-achievable.
+  * dims are per-model (`c_z` 256 on protenix2, 128 on the other five; 24
+    blocks except 8 on mini/tiny), so derive them from the checkpoint. Ours are
+    mapped by the LAST path segment under
+    `diffuser/~/diffusion_head/transformer/`, which sidesteps the nested
+    layer_stack (super-blocks inside blocks) that makes the L1 harness's flat
+    `[:n_blocks]` slice inapplicable.
+
+Results, identical synthetic `a`/`s`/`z`, `corr` and `rms ours/native` all
+1.000000 / 1.0000:
+
+| model | blocks | `c_z` | `max|d|` |
+|---|---|---|---|
+| `protenix2` | 24 | 256 | 0.00242 |
+| `protenix1` | 24 | 128 | 0.00414 |
+| `protenix1_20250630` | 24 | 128 | 0.00414 |
+| `protenix05` | 24 | 128 | 0.00025 |
+| `protenix_mini` | 8 | 128 | 0.00410 |
+| `protenix_tiny` | 8 | 128 | 0.00429 |
+
+This is one of the nine diffusion-path convention tables, on one of the four
+model families that had no L2 at all. It does NOT close L2 for these models:
+the conditioning projections and the atom encoder/decoder are untouched by it.
 
 **2. L2–L4 for the four trunk-only models** — `openfold3`, `intellifold2`,
-`protenix2`, `rosettafold3`. These need new oracles, and they are the four whose
+`protenix2` (conditioning + atom path; the token transformer is done, 2a),
+`rosettafold3`. These need new oracles, and they are the four whose
 ports predate the injection-ladder method (dump native's own tensors, inject
 them, compare our module's output). `rosettafold3` is blocked: no native
 installed. The recipe to copy is `esmfold2`'s, which is the most completely
