@@ -137,6 +137,39 @@ currently hardcode the checkpoint as a module constant
 work is to parameterise by model name and run each. This is the highest
 coverage-per-effort item by a wide margin.
 
+**1c. DONE for openbind0 (2026-09-07), and it found a real bug.** L1 read
+s 0.999113 / z 0.471977 against `~/openfold-3`, with openfold3 itself at
+1.000000 through the same adapter as a control -- so not the harness. The cause
+was a transposed column pair bias: v0.5.0 transposes
+(`TriangularAttention(transpose_bias=True)` from `base_blocks.py:397`) and
+`TRANSPOSED_COLUMN_PAIR_BIAS` omitted openbind0. Fixed; L1 is now
+1.000000 / 1.000000. Neither setting changes a weight, so L0 could never see it,
+and 6MRR moved 1.637 -> 1.649 -- the CORRECT setting being marginally worse is
+why L5 could not see it either. This is the concrete case for L1 existing.
+
+**2a. L2 native half PROVEN for protenix2 (2026-09-07).** protenix's
+`DiffusionTransformer` is standalone-constructible exactly like
+`PairformerStack`, so an L2 gate follows the L1 pattern. Established, so the
+next attempt starts here rather than exploring:
+
+  * weights under `module.diffusion_module.diffusion_transformer.` -- 552
+    tensors, `load_state_dict` reports 0 missing / 0 unexpected;
+  * dims off the checkpoint: 24 blocks, `c_a` 768, `c_s` 384, `c_z` 256, 16
+    heads. Keys: `blocks.0.attention_pair_bias.attention.linear_q.weight`,
+    `...layernorm_a.layernorm_s.weight`, `...layernorm_z.weight`,
+    `...linear_nobias_z.weight`. PRINT them -- four successive guesses at these
+    names were wrong.
+  * `DiffusionTransformer(c_a, c_s, c_z, n_blocks, n_heads)` with
+    `forward(a, s, z)`, verified on synthetic input to `(1, 68, 768)`.
+  * the fused-LayerNorm stub needs MORE entry points than the trunk's did --
+    the diffusion path also calls `forward_none_affine`. Dispatch on ARITY
+    rather than enumerating. Probe: `dev/bench/l2_native_probe_protenix.py`.
+
+What remains is OUR side: our token transformer's parameters sit under NESTED
+layer_stacks (super-blocks inside blocks), so the flat `[:n_blocks]` slice the
+L1 harness uses does not apply. boltz2's equivalent injected gate reached
+0.99999981, so the target is known-achievable.
+
 **2. L2–L4 for the four trunk-only models** — `openfold3`, `intellifold2`,
 `protenix2`, `rosettafold3`. These need new oracles, and they are the four whose
 ports predate the injection-ladder method (dump native's own tensors, inject
