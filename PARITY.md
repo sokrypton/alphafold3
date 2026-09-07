@@ -403,6 +403,25 @@ silent drops: it found the missing distogram bias in four models. Both
 directions matter — native tensors we never read, AND graph parameters we never
 fill.
 
+## The gates, and where they live
+
+`dev/` is gitignored (see README, "Where the harnesses live"), so these exist on
+the machine that runs them and NOT in the repository. Each is listed with what
+it covers, because the file itself is the only other record:
+
+| gate | level | covers |
+|---|---|---|
+| `dev/oracles/trunk_parity.py` | L1 | pairformer stack vs the vendor's module — 7 models |
+| `dev/oracles/prot_parity.py` | L1b | protenix mini/tiny/05 trunk AND MSA module |
+| `dev/oracles/conditioning_parity.py` | L2 | diffusion pair + single conditioning — 6 protenix, rf3 |
+| `dev/oracles/atom_parity.py` | L2 | atom cross-attention encoder, real batch, windowed |
+| `dev/oracles/diffusion_parity.py`, `l2_all.sh` | L2 | token diffusion transformer — 10 models |
+| `dev/oracles/confidence_parity.py`, `l4_all.sh` | L4 | confidence head — every port |
+| `dev/oracles/fold_check.py` | L5 | one model, one target, CA-RMSD (`MODEL_DIR=` to compare blobs) |
+| `dev/oracles/modality_check.py` | L6 | RNA / DNA / ligand / complex folds scored against a reference, and `--write` validates the mmCIF the model emits |
+| `dev/oracles/grad_check.py` | — | sequence-differentiability, either engine |
+| `dev/oracles/af2_fold_check.py` | — | AF2 against ColabDesign on the same weights |
+
 ## Two harness confounds, non-negotiable at L1–L4
 
 Without both switched off, an L1–L4 number is meaningless. These cost six false
