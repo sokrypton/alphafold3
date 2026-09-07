@@ -419,13 +419,18 @@ so L0 had never run on them. With the family added to `_LOADERS`/`_MAPPERS`:
 
 Three findings, in descending order of consequence:
 
-**The protenix TEMPLATE EMBEDDER is unported for 05/mini/tiny.** Five tensors
+**The 05/mini/tiny template tensors are VESTIGIAL, and dropping them is
+correct.** Their checkpoints carry the five loose template tensors
 (`layernorm_z`, `linear_no_bias_z`, `linear_no_bias_a` over 108 template
-features, `linear_no_bias_u`, `layernorm_v`) — a single projection, not AF3's
-template pairformer. protenix2 and protenix1 DO read theirs, which is why their
-counts are 2, but the fold treats protenix2's templates as inert. So templates
-are an input modality this family does not support, and the L0 audit is what
-says so.
+features, `linear_no_bias_u`, `layernorm_v`) and **zero** pairformer blocks
+under `template_embedder.pairformer_stack` — protenix's own
+`TemplateEmbedder.forward` returns early on `n_blocks < 1` ("Compatible with the
+Protenix 0.5.0 model series"), so the vendor disabled templates in that lineage
+and the loose weights are never used. protenix2 by contrast carries 89 template
+tensors including a real stack, and all of them ARE read, which is why its count
+is 2. So this row is a clean bill, not a gap — but it is the L0 audit that
+distinguishes "unported" from "unused upstream", and only after opening the
+checkpoint.
 
 **protenix_tiny carries an ESM input projection we never feed.**
 `input_embedder.linear_esm` is (449, 2560) — a 2560-wide language-model
