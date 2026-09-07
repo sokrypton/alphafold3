@@ -486,6 +486,27 @@ the copies to their common residues -- but only when that trim leaves something,
 because the two DNA strands are complementary with disjoint numbering and the
 first version silently trimmed the DNA out of the complex entirely.
 
+**The protein-DNA complex case measures single-sequence FOLDING more than
+assembly, and must be read that way.** Scored symmetry-aware (1LMB's two protein
+chains are one protein, so a perfect dimer with the copies swapped otherwise
+reads ~17 A):
+
+| model | protein chains (CA) | DNA strands (C1') | whole complex |
+|---|---|---|---|
+| `boltz2` | 0.390 / 0.235 | 0.272 / 0.278 | **0.424** |
+| `rosettafold3` | 1.141 / 1.361 | 0.838 / 0.928 | 1.293 |
+| `openfold3` | 11.347 / 11.308 | 1.060 / 1.172 | 12.721 |
+| `protenix2` | 11.763 / 11.669 | 1.819 / 1.801 | 17.454 |
+| `opendde` | ~11.3 | 1.265 / 1.353 | 17.880 |
+
+The split is exact: every model that folds the 87-residue lambda-repressor
+domain from a single sequence docks the complex, and every model that does not,
+fails it. The harness gives those chains a SELF-MSA only. So protenix2's 17 A is
+its protein chains at 11.7 A -- its DNA in the same run is 1.8 A -- and not a
+docking defect, still less a port defect: protenix2's whole diffusion module
+reproduces native to 0.0000 A per atom at L3. Give this case a real MSA before
+reading it as a docking number.
+
 **DNA is where this screen paid for itself immediately.** The 1LMB duplex is
 the first DNA fold this repository could run in-tree, and it died on every
 model except stock `alphafold3` with `TypeError: 'method' object is not
