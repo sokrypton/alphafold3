@@ -234,7 +234,29 @@ _ESM2_TOKEN_DROPOUT = 1.0 - 0.15 * 0.8
 def _forward_impl(ids, p, *, family, heads, head_dim, scale, all_states):
   dtype = COMPUTE_DTYPE
   n_len = ids.shape[0]
-  embed = jnp.asarray(p['embed/weights']).astype(dtype)[ids]
+  table = jnp.asarray(p['embed/weights']).astype(dtype)
+  # (n_len,) integer ids, or (n_len, vocab) a DISTRIBUTION over the vocabulary.
+  #
+  # The gather is why the tower was not differentiable at its input, and that
+  # single line is the whole reason `lm_pair` enters the AF3 graph as a
+  # CONSTANT: a design loop changes soft_seq and the ESM-C hidden states do not
+  # move. That is the structural cause of the gradient attenuation measured for
+  # the ESMFold2 family (see the gradient sweep -- esmfold2_fast loses 38x once
+  # its real ESM-C input is supplied).
+  #
+  # A matmul against the embedding table is the same arithmetic for a one-hot --
+  # every other term is exactly 0 * x -- and it carries a gradient. The caller
+  # owns the BOS/EOS rows: build them as hard one-hots at the ends, exactly as
+  # lm_input_ids places those tokens.
+  # precision='highest' is REQUIRED, not tidiness. A plain matmul goes through
+  # TF32 on an Ampere-or-later GPU, and at a 10-bit mantissa even 1.0 * x loses
+  # precision: measured against the gather it read max 9.15e-04 on values of
+  # scale 0.209, ~4e-03 relative. The gather is exact, so the soft path has to
+  # be too or it is a different tower.
+  if ids.ndim == 2:
+    embed = jnp.matmul(ids.astype(dtype), table, precision='highest')
+  else:
+    embed = table[ids]
   if family == 'esm2':
     embed = embed * _ESM2_TOKEN_DROPOUT
   pos = jnp.arange(n_len, dtype=jnp.float32)
@@ -245,7 +267,11 @@ def _forward_impl(ids, p, *, family, heads, head_dim, scale, all_states):
     out = block(carry, w, pos, heads, head_dim, scale, dtype)
     return out, (out if all_states else None)
 
-  x, states = jax.lax.scan(body, embed, xs)
+  # Checkpoint the block, for the same reason the trunk stacks do: a backward
+  # pass through an unrematerialised scan stores all 80 blocks' activations and
+  # asked for 10.55 GiB on a 70-token sequence. Free when there is no backward
+  # pass -- jax.checkpoint only recomputes during one.
+  x, states = jax.lax.scan(jax.checkpoint(body), embed, xs)
   final = _layer_norm(x, p['final_norm/scale'], p.get('final_norm/offset', 0.0))
   if not all_states:
     return final.astype(jnp.float32)
