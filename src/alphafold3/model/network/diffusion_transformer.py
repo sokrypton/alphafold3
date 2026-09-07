@@ -336,19 +336,35 @@ def self_attention(
   return output
 
 
+def _stack(num_layer, fn, remat, **kwargs):
+  """A layer_stack, optionally gradient-checkpointed. Mirrors evoformer._stack.
+
+  `block_remat` was declared in this file's config and consumed nowhere -- the
+  same dead knob the evoformer had. Wiring it up matters for any objective that
+  reads the SAMPLED structure (pLDDT, PAE, an interface score), because that is
+  when the diffusion transformer is differentiated; the distogram-only design
+  path never builds it at all (`structure=False`).
+
+  hk.remat is scope-transparent -- it wraps a function without creating a module
+  -- so this does not move any parameter path. That is what makes it safe to
+  turn on for weights that were converted before it existed.
+  """
+  if remat:
+    fn = hk.remat(fn)
+  return hk.experimental.layer_stack(num_layer, **kwargs)(fn)
+
+
 class Transformer(hk.Module):
   """Simple transformer stack."""
 
   class Config(base_config.BaseConfig):
     attention: SelfAttentionConfig = base_config.autocreate()
     num_blocks: int = 24
-    # UNCONSUMED -- nothing in this file reads it, so setting it does nothing.
-    # Left at False rather than flipped with the evoformer's, because a knob
-    # that looks like it turns on checkpointing and does not is exactly what
-    # cost a day here. Wiring it up is a separate change: the diffusion module
-    # is not even built on the design path (`structure=False`), so it only
-    # matters for an objective that reads the sampled structure.
-    block_remat: bool = False
+    # Now CONSUMED (see _stack). On by default for the same reason as the
+    # evoformer's: hk.remat only recomputes during a backward pass, so it is
+    # free to a forward-only fold, and it is what lets an objective that reads
+    # the sampled structure be differentiated at all.
+    block_remat: bool = True
     super_block_size: int = 4
     num_intermediate_factor: int = 2
 
@@ -428,9 +444,10 @@ class Transformer(hk.Module):
         return act
 
       def super_block(act):  # pylint: disable=function-redefined
-        return hk.experimental.layer_stack(self.config.super_block_size)(block)(act)
+        return _stack(self.config.super_block_size, block,
+                      self.config.block_remat)(act)
 
-      return hk.experimental.layer_stack(num_super_blocks)(super_block)(act)
+      return _stack(num_super_blocks, super_block, False)(act)
 
     # Original AF3 mode: single shared pair LayerNorm precomputed before all blocks.
     def block(act, pair_logits):
@@ -471,13 +488,12 @@ class Transformer(hk.Module):
             name='pair_logits_projection',
         )(pair_act)
         pair_logits = jnp.transpose(pair_logits, [2, 3, 0, 1])
-      return hk.experimental.layer_stack(
-          self.config.super_block_size, with_per_layer_inputs=True
-      )(block)(act, pair_logits)
+      return _stack(self.config.super_block_size, block,
+                    self.config.block_remat,
+                    with_per_layer_inputs=True)(act, pair_logits)
 
-    return hk.experimental.layer_stack(
-        num_super_blocks, with_per_layer_inputs=True
-    )(super_block)(act)[0]
+    return _stack(num_super_blocks, super_block, False,
+                  with_per_layer_inputs=True)(act)[0]
 
 
 class CrossAttentionConfig(base_config.BaseConfig):
