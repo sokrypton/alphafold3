@@ -81,7 +81,16 @@ gate.
 
 `max|d|` grows with DEPTH, not with fidelity -- 0.0087 at 8 blocks, 0.068 at 16,
 0.88 at 48, all at corr 1.000000 -- so read it against models of the same depth
-or not at all.
+or not at all. protenix05 reads 1.741 at 48 blocks where its two same-depth,
+same-width siblings read 0.875 and 0.879; at ONE block (`--blocks 1`, which
+truncates BOTH stacks) it reads corr 1.000000 / max|d| 0.00211, so that 2x is
+compounding of a slightly different activation scale and not a divergent block.
+
+The `--blocks` diagnostic is only meaningful because it truncates the NATIVE
+stack too. Omitting that compared our 1 block against native's 48 and read
+corr -0.019 with max|d| 15062 -- which looks exactly like a catastrophic port
+bug. The tell was that it got WORSE with fewer blocks, which less accumulation
+cannot do.
 
 **1b. Six models at L1 for the cost of two harness edits (original estimate).** Every `·` in the L1
 column shares a native with a model already gated: the five other protenix
