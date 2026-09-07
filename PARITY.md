@@ -12,6 +12,7 @@ Read `README.md` for the numbers. This file is the plan.
 |---|---|---|
 | **L0** conversion coverage | every checkpoint tensor read, every graph parameter filled — in BOTH directions | no, checkpoint + graph only |
 | **L1** trunk pairformer | our single / pair out of the PAIRFORMER STACK against native's, on identical synthetic activations | yes |
+| **L1b** MSA module | the MSA stack's contribution to the pair, against native's MSABlock | yes |
 | **L2** diffusion conditioning | conditioning z/s, atom encoder, token transformer | yes |
 | **L3** denoise step | `r_update` / `x_denoised` for one step, EDM undone | yes |
 | **L4** confidence heads | pae / pde / plddt / resolved logits | yes |
@@ -507,6 +508,25 @@ BIAS-FREE projection to per-head attention logits, so the offset contributes
 `W · b`, a constant per head, identical for every (i, j) — and a constant added
 to every logit of a softmax cancels. The token-transformer gate confirms it
 empirically at corr 1.000000 against a native module that HAS those biases.
+
+## L1b, the trunk's other half (2026-09-07)
+
+`dev/oracles/prot_parity.py` gates the MSA MODULE as well as the trunk, which is
+what closes `CLAMPED_OPM_NORM` and `NO_MSA_ROW_UPDATE` -- two of the four trunk
+conventions L1 explicitly does NOT cover. All three protenix releases that carry
+an MSA stack agree with native:
+
+| model | pairformer blocks | MSA blocks | single | pair | msa -> pair |
+|---|---|---|---|---|---|
+| `protenix05` | 48 | 4 | 1.00000000 (4.3e-07) | 1.00000000 (9.3e-05) | 1.00000000 (2.6e-05) |
+| `protenix_mini` | 16 | 1 | 1.00000000 (5.0e-06) | 1.00000000 (1.8e-05) | 1.00000000 (6.2e-07) |
+| `protenix_tiny` | 8 | 1 | 1.00000000 (7.7e-06) | 1.00000000 (1.5e-05) | 1.00000000 (8.0e-07) |
+
+(corr, with max relative error in brackets.) It needed the same
+dims-from-constants fix as everything else here: `PairformerStack` builds
+`c_hidden` 128 whatever `c_z` is, so protenix2 died in `load_state_dict` until
+the harness passed `hidden_scale_up=True` -- which trunk_parity.py had been
+passing all along.
 
 ## The gates, and where they live
 
