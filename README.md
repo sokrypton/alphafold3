@@ -198,6 +198,47 @@ NATIVE's numbers; that one asks whether the head PREDICTS ERROR at all
 and fail the first, and a head that is a faithful port of a badly calibrated
 head passes the first and fails the second.
 
+### Where the harnesses live, and what ships
+
+Worth saying plainly, because the numbers above cite scripts a reader will not
+find: **none of the verification harnesses are in this repository.** `dev/` is
+gitignored (`.gitignore:21`), and the per-model parity oracles live in a
+different repository entirely. What ships here is the model code, the
+`converters/`, and `run_alphafold.py`.
+
+| harness | where | what it gates |
+|---|---|---|
+| `dev/bench/sweep22.sh` | here, gitignored | the 22-model 6MRR regression sweep |
+| `dev/oracles/fold_check.py` | here, gitignored | one model, one target, CA-RMSD |
+| `dev/oracles/grad_check.py` | here, gitignored | sequence-differentiability, either engine |
+| `dev/oracles/af2_fold_check.py` | here, gitignored | AF2 against ColabDesign on the same weights |
+| `tools/oracles/<model>/cmp_trunk_parity.py` | ColabDesign2 | single/pair vs the vendor's torch module |
+| `tools/oracles/{ligand,multimer,rna,dna,confidence}_parity.py` | ColabDesign2 | the modality screens |
+| `tools/module_trace/` | ColabDesign2 | the tap/compare harness the above build on |
+
+That split is a wart, not a design. The oracles depend on ColabDesign2's af3
+facade (`AF3Runner`, `featurise_spec`) and on `tools/module_trace`, so they
+cannot move here until that facade does — 48 of 107 oracle files import
+`AF3Runner` directly, and `module_trace` imports it too. The facade itself is
+close to movable: of its four dependencies outside `af3/`, three
+(`platform`, `sequence`, `residue_constants`) are already vendored here, leaving
+one function.
+
+**Re-running any trunk-parity number requires two switches**, or the result is
+meaningless — both cost six false leads on protenix2 alone:
+
+```
+FP32=1 JAX_DEFAULT_MATMUL_PRECISION=highest \
+  PYTHONPATH=/path/to/protenix:/path/to/ColabDesign2 \
+  python tools/oracles/protenix2/cmp_trunk_parity.py
+```
+
+`FP32=1` reaches `models.build(..., fp32=True)`: parameters otherwise come back
+bfloat16-rounded, and flipping `global_config.bfloat16` after `build()` does
+nothing because the dtype was already fixed by `jax.eval_shape`.
+`JAX_DEFAULT_MATMUL_PRECISION=highest` disables tf32, which is ~5e-4 per matmul
+and compounds over 48 blocks.
+
 ### Modality screens
 
 Folding 6MRR says nothing about ligands, nucleic acids or complexes. Four
