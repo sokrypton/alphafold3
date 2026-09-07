@@ -519,6 +519,38 @@ entirely, which is exactly why it was the one model that worked and why nothing
 had caught this. Two more call sites, `data/pipeline.py` and
 `data/msa_server.py`, pass the method through as a value.
 
+**OPEN: protenix2 does not reproduce native on a MODIFIED residue.** The one
+place in this whole session where our port and native end-to-end disagree.
+Phospho-ubiquitin (5K9P, SEP-20), native seed 101, native settings (10 recycles
+x 200 sampling steps), no MSA on either side:
+
+| | ours | native protenix2 |
+|---|---|---|
+| 5K9P plain | 7.161 | 9.648 |
+| 5K9P + SEP-20 | 7.584 | **1.080** |
+
+Natively the modification transforms the fold (9.6 -> 1.1 A, all five samples);
+for us it changes nothing (7.16 -> 7.58). On the PLAIN target we are better than
+native, so this is specific to the modified-residue path. What has been excluded:
+
+  * SEEDS -- ours reads 7.2-8.3 across seeds 1, 7 and 101, native's own seed 101
+    gives 1.08. Not sampling noise.
+  * THE MSA -- ours is 7.99 with a self-MSA and 7.99 with none.
+  * TOKENISATION -- both sides atomise a modified residue (protenix's
+    `add_centre_atom_mask` cites the same AF3 SI rule), 76 tokens -> 85.
+  * RESTYPE -- both give the atomised tokens the PARENT type: protenix maps
+    `SEP -> S -> SER` in `add_cano_seq_resname`, which is what we do.
+  * The junction BONDS an atomised residue loses. `atomized_backbone_bonds` is
+    rf3-only in our registry and protenix builds its bonds from the atom array,
+    so it looked like the answer; enabling it moves nothing (7.584 -> 7.225,
+    inside noise). Reverted rather than kept on a hunch.
+
+Next instrument, and the one that decided this for rf3: compare the token_bond
+COUNT and content against native's featuriser for this input, rather than
+comparing folds. Every protenix2 MODULE is exact against native (L1, L2
+conditioning including 4-chain, L2 token transformer, L2 atom encoder, L3 a full
+denoise step at 0.0000 A, L4), so whatever this is, it is an input difference.
+
 **Modified residues are their own case.** `ptm_5k9p` is ubiquitin
 phosphorylated at Ser20 (SEP): AF3 ATOMISES a modified residue, so it reaches a
 path no plain-protein fold does, and `--write` then checks that SEP survives
