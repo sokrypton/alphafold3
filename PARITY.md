@@ -417,14 +417,28 @@ correct-but-misplaced chain fails.
 
 | model | 1EHZ tRNA (C1') | 1STP protein (CA) | BTN ligand (in-frame) |
 |---|---|---|---|
-| `alphafold3` | 1.412 | 0.564 | |
-| `openfold3` | 1.334 | 0.494 | |
-| `openbind0` | 1.496 | 0.499 | |
+| `rosettafold3` | **1.047** | 0.322 | 0.450 |
+| `boltz2` | 1.196 | **0.276** | 0.457 |
+| `opendde` | 1.327 | 0.298 | 0.876 |
+| `openfold3` | 1.334 | 0.494 | — |
+| `protenix05` | 1.409 | 0.307 | **0.426** |
+| `alphafold3` | 1.412 | 0.564 | — |
 | `intellifold2` | 1.472 | 0.316 | 0.436 |
-| `rosettafold3` | 1.047 | 0.322 | |
+| `openbind0` | 1.496 | 0.499 | — |
+| `protenix1` | 1.737 | 1.867 | 0.918 |
+| `protenix2` | 1.754 | 2.090 | 1.253 |
+| `protenix_tiny` | 1.774 | 0.387 | 0.871 |
+| `protenix_mini` | 2.129 | 0.339 | 0.439 |
 
-(Blank ligand cells ran before the atom-pairing fix below and are re-run
-separately.)
+Twelve models, where seven had a modality number before and five had only a
+6MRR fold. The three em-dashes ran before the ligand-pairing fix below.
+
+**The protenix v1/v2 line is the weak row on 1STP** (protein 1.9-2.1 Å where
+everything else is 0.28-0.56), and it is NOT something this session's changes
+caused: the recorded number for protenix2 before today was 2.497 / 1.147 on the
+same target, and native protenix is worse than our port there. Its own 0.5.0
+lineage -- protenix05, mini, tiny -- is among the best on it, which is what
+makes this a property of those two checkpoints rather than of the port.
 
 **Pairing a predicted ligand to its reference is model-dependent.** Most models
 featurise a CCD ligand with its real atom names (`C11`, `O11`, ...), which pair

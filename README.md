@@ -292,6 +292,34 @@ statement about those models.
 | `chai1` | 0.335 / 0.993 | 1.57 | 1.648 | 1.89 | 78.9 / r .543 |
 | `openfold3` | 0.348 / 0.894 | 1.60 | 1.441 | 2.22 | 83.2 / r .678 |
 
+**These screens now also run IN THIS REPOSITORY** (`dev/oracles/modality_check.py`,
+added 2026-09-07), which is what closes the "seven models, not twenty-four" gap
+above for RNA and ligands. Different measurement from the table above — default
+recycles, best of 5 samples, seed 0 — so read it as its own column, not as a
+correction:
+
+| model | 1EHZ tRNA (C1') | 1STP protein (CA) | BTN ligand (in-frame) |
+|---|---|---|---|
+| `alphafold3` | 1.412 | 0.564 | — |
+| `openfold3` | 1.334 | 0.494 | — |
+| `openbind0` | 1.496 | 0.499 | — |
+| `intellifold2` | 1.472 | 0.316 | 0.436 |
+| `protenix2` | 1.754 | 2.090 | 1.253 |
+| `protenix05` | 1.409 | 0.307 | 0.426 |
+| `protenix1` | 1.737 | 1.867 | 0.918 |
+| `protenix_mini` | 2.129 | 0.339 | 0.439 |
+| `protenix_tiny` | 1.774 | 0.387 | 0.871 |
+| `boltz2` | 1.196 | 0.276 | 0.457 |
+| `opendde` | 1.327 | 0.298 | 0.876 |
+| `rosettafold3` | 1.047 | 0.322 | 0.450 |
+
+RNA is single-sequence here; the ligand case takes its MSA from the same JSON
+the older screen used, and streptavidin from a single sequence lands at 3-5 Å,
+which measures the missing MSA rather than the ligand. The harness also covers
+DNA, a protein-DNA complex scored in one shared frame, and a modified residue
+(ubiquitin phospho-Ser20), and `--write` re-reads the mmCIF the model emits to
+check the ligand or the modified residue survived into it.
+
   * **protein+ligand** — 1STP chain A + biotin, 10 recycles, protein-superposed
     so a ligand in the wrong pocket cannot hide. Two numbers: protein Å / BTN Å.
     All seven handle it.
