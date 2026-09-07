@@ -153,7 +153,10 @@ class RegistryTest(parameterized.TestCase):
       self.skipTest('no README beside the package')
     rows = set(re.findall(r'^\| `([\w.]+)`', readme.read_text(), re.M))
     rows.discard('--model')
-    known = set(model_registry.MODEL_SPECS)
+    # BOTH registries. This test predates the second engine, so it read only
+    # MODEL_SPECS and reported the two AlphaFold 2 rows as "named in the README
+    # but not a registered model" -- they are registered, in AF2_SPECS.
+    known = set(model_registry.MODEL_SPECS) | set(model_registry.AF2_SPECS)
     self.assertEmpty(sorted(known - rows),
                      'registered but absent from the README model table')
     self.assertEmpty(sorted(rows - known),

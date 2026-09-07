@@ -370,7 +370,7 @@ DIFFUSION_PROJECTED_RELPOS = (('boltz2', 'rosettafold3') + ESMFOLD2_FAMILY
 # Models that compute the column-attention pair bias from the TRANSPOSED pair
 # representation, as OpenFold3 preview-2 does. openbind is deliberately absent;
 # see the note at modules.py, where the open question about its direction lives.
-TRANSPOSED_COLUMN_PAIR_BIAS = ('openfold3', 'opendde', 'boltz2') + PROTENIX_FAMILY
+TRANSPOSED_COLUMN_PAIR_BIAS = ('openfold3', 'openbind0', 'opendde', 'boltz2') + PROTENIX_FAMILY
 
 
 # Models whose ATOM cross-attention transformer LayerNorms the atom-pair

@@ -29,7 +29,7 @@ need the vendor's forward pass, so coverage tracks which natives are installed.
 |---|---|---|---|---|---|---|---|
 | `alphafold3` | n/a | n/a | n/a | n/a | n/a | ✓ | · |
 | `openfold3` | ✓ | ✓ | · | · | · | ✓ | ✓ |
-| `openbind0` | ✓ | · | · | · | · | ✓ | · |
+| `openbind0` | ✓ | ✓ | · | · | · | ✓ | · |
 | `intellifold2` | ✓ | ✓ | · | · | · | ✓ | ✓ |
 | `protenix2` | ✓ | ✓ | · | · | · | ✓ | ✓ |
 | `protenix05` | ✓ | ✓ | · | · | · | ✓ | · |

@@ -308,25 +308,35 @@ class GridSelfAttention(hk.Module):
     # TriangleAttention (end-node) computes to_b from the NON-transposed pair and does
     # NOT transpose the bias (it transposes only the pair before attention), so it is
     # excluded from the list below.
-    # 'openbind0' (OpenFold3 >= 0.5.0) is deliberately ABSENT, following AF3's own
-    # Algorithm 15 -- and this is the one openbind convention still taken on
-    # reading rather than measurement. Upstream made the end-node transposition
-    # explicit in v0.5.0 (TriangularAttention gained `transpose_bias`, passed True
-    # from tri_att_start_end), but their release notes do not mention it and
-    # NEITHER SETTING CHANGES ANY WEIGHT -- linear_z is still per block and
-    # identically shaped -- so no shape gate and no coverage audit can see it.
+    # openbind0 (OpenFold3 >= 0.5.0) IS in the list, and this was the one
+    # openbind convention taken on reading rather than measurement until
+    # 2026-09-07. It is now settled three ways, and the answer was the opposite
+    # of the documented default:
     #
-    # FOLDING CANNOT DISCRIMINATE IT EITHER, measured rather than assumed:
+    #   1. UPSTREAM SOURCE. v0.5.0's TriangularAttention gained a
+    #      `transpose_bias` argument (triangular_attention.py:109) which selects
+    #      permute_final_dims(linear_z(x), (2, 1, 0)) over (2, 0, 1) at :166 --
+    #      and base_blocks.py:397 passes it True for the end node. v0.5.0
+    #      transposes.
+    #   2. ACTIVATION COMPARISON. dev/oracles/trunk_parity.py openbind0 against
+    #      native OpenFold3: without the transposition s 0.999113 / z 0.471977,
+    #      with it s 1.000000 / z 1.000000. The whole divergence was this one
+    #      axis swap; the rest of the trunk was already exact. Note the SHAPE of
+    #      that failure -- single nearly intact, pair destroyed -- which is what
+    #      a transposed pair bias looks like.
+    #   3. Its sibling release, openfold3, was already in the list.
+    #
+    # Why it survived: NEITHER SETTING CHANGES ANY WEIGHT (linear_z is still per
+    # block and identically shaped), so no shape gate and no coverage audit can
+    # see it. And folding cannot discriminate it -- measured at the time:
     #
     #   6MRR, single sequence     1.702 A (absent)  vs 1.712 A (present)
     #   1STP + MSA, seed 1        0.548 A           vs 0.763 A
     #   1STP + MSA, seed 7        0.532 A           vs 0.460 A
     #
-    # The two seeds disagree about which is better, so the gap is inside the
-    # sampling spread and one seed would have "confirmed" either answer. What
-    # would settle it is an activation-level comparison against native OpenFold3
-    # running openbind -- the trunk pair bias, before it is averaged away by a
-    # diffusion sample. Until then this is the documented default, not a result.
+    # The two seeds disagreed about which was better, so one seed would have
+    # "confirmed" either answer. The correct setting is very slightly WORSE on
+    # 6MRR best-of-5, which is the point: fold quality was never the evidence.
     if (self.transpose
         and self.global_config.model in model_config.TRANSPOSED_COLUMN_PAIR_BIAS):
       nonbatched_bias = jnp.swapaxes(nonbatched_bias, -1, -2)

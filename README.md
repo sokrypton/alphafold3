@@ -54,7 +54,7 @@ how faithfully it was ported; for that see [Parity status](#parity-status).
 |---|---|---|---|
 | `alphafold3` | AlphaFold 3 (Google DeepMind) | request from DeepMind | 0.632 |
 | `openfold3` | [OpenFold3 preview-2](https://github.com/aqlaboratory/openfold3) (AlQuraishi Lab) | Apache 2.0 | 1.541 |
-| `openbind0` | [OpenFold3 v0.5.0 "OpenBind"](https://github.com/aqlaboratory/openfold-3/releases/tag/v0.5.0) | Apache 2.0 | 1.637 |
+| `openbind0` | [OpenFold3 v0.5.0 "OpenBind"](https://github.com/aqlaboratory/openfold-3/releases/tag/v0.5.0) | Apache 2.0 | 1.649 |
 | `intellifold2` | [IntelliFold-v2](https://huggingface.co/intelligenAI/intellifold) (IntelligenAI) | see upstream | 1.514 |
 
 ### Protenix family
@@ -146,8 +146,12 @@ vendor's own torch module, run on the same inputs
 | `chai1` | 0.999945 | 0.999918 | at the floor — native chai's TorchScript is bf16 |
 | `esmfold2` family | — | — | whole trunk corr **0.99961** from raw features (not split s/z); the eight variants share this graph |
 | `alphafold3` | n/a | n/a | this IS the reference implementation — nothing to compare against |
-| `openbind0` | not measured | not measured | shares openfold3's converter, different release |
-| other `protenix*` | not measured | not measured | same graph as `protenix2`, `derive_dims` reports byte-identical dims; weights-only variants |
+| `openbind0` | 1.000000 | 1.000000 | v0.5.0 weights vs `~/openfold-3`; found and fixed a transposed column pair bias — see below |
+| `protenix1` | 1.000000 | 1.000000 | 48 blocks, c_z 128 |
+| `protenix1_20250630` | 1.000000 | 1.000000 | same graph as protenix1, later training run |
+| `protenix05` | 1.000000 | 1.000000 | exact at ONE block (max\|d\| 0.0021); its larger full-depth max\|d\| is accumulation |
+| `protenix_mini` | 1.000000 | 1.000000 | 16 blocks |
+| `protenix_tiny` | 1.000000 | 1.000000 | 8 blocks |
 | `af2_*` | n/a | n/a | DeepMind's own AF2 network, run unmodified — see below |
 
 **Two harness confounds dominated these numbers and cost six false leads on
@@ -157,6 +161,22 @@ result is meaningless: parameters come back **bfloat16**-rounded unless
 does nothing), and XLA uses **tf32** for float32 matmuls on this hardware
 (~5e-4 each, compounded over 48 blocks) unless
 `JAX_DEFAULT_MATMUL_PRECISION=highest`.
+
+**This level found a real bug that no other level could see.** `openbind0` was
+running an untransposed column pair bias: OpenFold3 v0.5.0 transposes it
+(`TriangularAttention(transpose_bias=...)` selecting
+`permute_final_dims(..., (2,1,0))`, passed `True` for the end node from
+`base_blocks.py`), and our `TRANSPOSED_COLUMN_PAIR_BIAS` table omitted the
+model. Trunk parity read s 0.999113 / z **0.471977**; with the transposition it
+reads 1.000000 / 1.000000, so that single axis swap was the whole divergence —
+and note the shape of the failure, single nearly intact and pair destroyed,
+which is what a transposed pair bias looks like.
+
+It survived every other gate for a structural reason: **neither setting changes
+any weight**, so no shape gate and no conversion audit can see it, and folding
+could not discriminate it either — 6MRR best-of-5 is 1.637 wrong against 1.649
+right, i.e. the CORRECT setting is marginally worse, and two 1STP seeds
+disagreed about which was better. Fold quality was never the evidence.
 
 For AlphaFold 2 the equivalent check is different in kind: the network is
 DeepMind's own, run unmodified, so the gate is a known-answer test against
