@@ -457,6 +457,35 @@ no longer line up with the coordinates, i.e. a screen that folds the wrong
 molecule and scores it against a shifted reference. The parent comes from the
 CCD's own `mon_nstd_parent_comp_id`.
 
+First DNA and PTM numbers (best of 5, seed 0):
+
+| model | 1LMB duplex (C1', both strands in one frame) | phospho-ubiquitin 5K9P (CA) |
+|---|---|---|
+| `openfold3` | **1.914** | **1.502** |
+| `opendde` | 1.992 | 1.812 |
+| `alphafold3` | 2.025 | — |
+| `protenix2` | 2.079 | — |
+| `intellifold2` | — | 1.556 |
+| `rosettafold3` | — | 1.801 |
+| `chai1` | — | 1.934 |
+
+The PTM case also proves the WRITER: `SEP` comes back in the emitted mmCIF with
+all ten of its atoms, so the modified residue is not quietly written out as
+serine.
+
+**Two scoring traps this case exposed, both in the harness.** A modified residue
+is ATOMISED -- one token per atom -- so token index stops equalling residue
+index after it, and matching by position scored ubiquitin at 12.4 A on every
+model (identical to three digits across models, which is the tell). Scoring now
+matches on the batch's own `residue_index`. And for the protein-DNA COMPLEX,
+1LMB's two protein chains are one protein: a model that builds a perfect dimer
+with the copies swapped scored 17 A while every chain read ~1 A (rosettafold3
+does exactly this -- protein 1.141/1.361, DNA 0.838/0.928, joint 17.084). The
+joint score now tries the assignments identical sequences allow, after trimming
+the copies to their common residues -- but only when that trim leaves something,
+because the two DNA strands are complementary with disjoint numbering and the
+first version silently trimmed the DNA out of the complex entirely.
+
 **DNA is where this screen paid for itself immediately.** The 1LMB duplex is
 the first DNA fold this repository could run in-tree, and it died on every
 model except stock `alphafold3` with `TypeError: 'method' object is not
