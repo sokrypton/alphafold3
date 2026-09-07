@@ -39,7 +39,7 @@ need the vendor's forward pass, so coverage tracks which natives are installed.
 | `protenix_mini` | ✓ | ✓ | ~ | · | ✓ | ✓ | · |
 | `protenix_tiny` | ✓ | ✓ | ~ | · | ✓ | ✓ | · |
 | `boltz2` | ✓ | ✓ | ✓ | · | ✓ | ✓ | ✓ |
-| `opendde` | ✓ | ✓ | ✓ | ✓ | · | ✓ | ✓ |
+| `opendde` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `rosettafold3` | ✓ | ✓ | ~ | · | ✓ | ✓ | ✓ |
 | `chai1` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `esmfold2` family | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a — protein only |
@@ -256,10 +256,17 @@ plausible correlation.
 | `protenix_mini` | 1.000000 | 1.000000 | 1.000000 | 1.000000 |
 | `protenix_tiny` | 1.000000 | 1.000000 | 1.000000 | 1.000000 |
 
-**2c. L4 for the other four (same day).** openfold3, openbind0, intellifold2,
-rosettafold3 -- so L4 now covers ten models, everything except `opendde` (which
-has its own head, `opendde_confidence.py`) and the three already gated by
-injection.
+**2c. L4 for the other five (same day).** openfold3, openbind0, intellifold2,
+rosettafold3, opendde -- so with the six protenix models and the three gated by
+injection (boltz2, chai1, esmfold2), **every port now has an L4 gate**.
+
+`opendde` is the odd one: its confidence runs on the STRUCTURAL token set at
+c_s = c_z = 384 through its own module (`network/opendde_confidence.py`), and
+both sides take the atom layout as explicit arguments -- so that gate needs no
+featurised batch at all, it synthesises the layout `model.py` builds (token
+index repeated, slot index tiled, rep atom at slot 0) and hands the same one to
+both. It reads pae 1.000000 / pde 0.999999 / plddt 1.000000 / resolved
+1.000000.
 
 | model | `full_pae` | `full_pde` | `plddt` | `resolved` |
 |---|---|---|---|---|
