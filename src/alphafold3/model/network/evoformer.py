@@ -224,7 +224,22 @@ class Evoformer(hk.Module):
   """Creates 'single' and 'pair' embeddings."""
 
   class PairformerConfig(modules.PairFormerIteration.Config):  # pytype: disable=invalid-function-definition
-    block_remat: bool = False
+    # ON by default. Gradient checkpointing on the trunk (see _stack) is what
+    # decides whether a backward pass fits: without it AF3 stores all 48
+    # pairformer blocks, and a 68-residue chain at zero recycles wants 20.2 GiB
+    # in float32 -- XLA's automatic rematerialisation gets to 15.8 GiB and gives
+    # up. With it on, the same gradient runs in float32 with no remat warning at
+    # all. AF3's default of False is a PREDICTION default, and it made every
+    # caller who took a gradient hit an OOM that reads like a hardware limit.
+    #
+    # It is free when it is not needed. hk.remat only recomputes during a
+    # backward pass, and a forward-only fold is unaffected -- measured on
+    # openfold3/6MRR over three runs each: compile 80.7-81.8 s and run
+    # 47.3-49.3 s with it either way, peak 1.71 GB either way, and the output
+    # difference (max 1.39-1.42 A on the sampler's trajectory) sits inside the
+    # same-config cross-process noise band (max 1.33-1.39 A). So this changes
+    # what fits, not what is computed.
+    block_remat: bool = True
     remat_block_size: int = 8
 
   class Config(base_config.BaseConfig):

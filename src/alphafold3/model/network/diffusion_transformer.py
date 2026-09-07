@@ -342,6 +342,12 @@ class Transformer(hk.Module):
   class Config(base_config.BaseConfig):
     attention: SelfAttentionConfig = base_config.autocreate()
     num_blocks: int = 24
+    # UNCONSUMED -- nothing in this file reads it, so setting it does nothing.
+    # Left at False rather than flipped with the evoformer's, because a knob
+    # that looks like it turns on checkpointing and does not is exactly what
+    # cost a day here. Wiring it up is a separate change: the diffusion module
+    # is not even built on the design path (`structure=False`), so it only
+    # matters for an objective that reads the sampled structure.
     block_remat: bool = False
     super_block_size: int = 4
     num_intermediate_factor: int = 2
