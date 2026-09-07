@@ -346,7 +346,10 @@ class ConfidenceHead(hk.Module):
         pair_act = masked_global_norm(
             pair_act, seq_mask_bool[:, None] & seq_mask_bool[None, :])
         single_act = masked_global_norm(single_act, seq_mask_bool)
-        target_feat = masked_global_norm(target_feat, seq_mask_bool)
+        # RF3's s_inputs is 449 wide where our target_feat is 447; see
+        # masked_global_norm on why the width is passed and what it buys.
+        target_feat = masked_global_norm(target_feat, seq_mask_bool,
+                                         width=449)
 
       num_residues = seq_mask.shape[0]
       num_pair_channels = pair_act.shape[2]
@@ -659,7 +662,7 @@ def tmscore_adjusted_pae(
   return global_apae, interface_apae
 
 
-def masked_global_norm(x, mask):
+def masked_global_norm(x, mask, width=None):
   """Normalise x by the mean and variance over the REAL tokens only.
 
   RoseTTAFold3's confidence head layer-norms each detached trunk input over the
@@ -670,10 +673,31 @@ def masked_global_norm(x, mask):
   confidence output by however many the bucket happened to add.
 
   mask broadcasts over x's leading axes; the feature axis is always last.
+
+  `width` is the VENDOR's feature width where it differs from ours, and it
+  matters only because this statistic spans the feature axis: RF3's s_inputs is
+  449 wide, ours 447, the missing two being residue-vocabulary classes our
+  alphabet does not carry. They are zero on the inputs we compare, but they
+  still enter native's mean and variance, so normalising over 447 elements is a
+  different function from normalising over 449. Measured on rf3's confidence
+  head: it halves the residual, pae max|d| 0.047 -> 0.022 (corr 0.999998 ->
+  0.999999). Small, but it is the one term left after the port matched
+  everything else, and converters/opendde.py flags the same 831-vs-833 mismatch
+  as "minor; confirm via e2e" -- this is that confirmation.
+
+  The correction assumes the dropped columns are ZERO, which is what makes them
+  contribute mean**2 apiece. That holds for the inputs our featurisation
+  produces; it would not hold for an input our alphabet mapped INTO one of the
+  dropped classes, which is why this is opt-in per call site rather than the
+  default.
   """
   xf = x.astype(jnp.float32)
   m = mask.astype(jnp.float32)[..., None]
-  n = jnp.maximum(jnp.sum(m) * xf.shape[-1], 1.0)
+  width = xf.shape[-1] if width is None else width
+  n = jnp.maximum(jnp.sum(m) * width, 1.0)
   mean = jnp.sum(xf * m) / n
-  var = jnp.sum(jnp.square(xf - mean) * m) / n
+  # each dropped column is zero, so it contributes mean**2 to the variance sum,
+  # once per real token
+  pad = (width - xf.shape[-1]) * jnp.sum(mask.astype(jnp.float32))
+  var = (jnp.sum(jnp.square(xf - mean) * m) + pad * jnp.square(mean)) / n
   return ((xf - mean) / jnp.sqrt(var + 1e-5)).astype(x.dtype)

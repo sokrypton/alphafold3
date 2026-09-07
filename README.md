@@ -198,19 +198,18 @@ vendor's own standalone module on synthetic conditioning.
 | `chai1` | module **1.000000000**; one denoise step 1.000000, 0.012 Å | pae 0.999937 / pde 0.999905 / pLDDT 0.999968 — bf16 floor |
 | `boltz2` | token transformer (24 blk, injected) **0.99999981** | pairformer ×8: s 1.000000 / z 0.999998; z re-embedding 0.9999996 |
 | `opendde` | atom encoder a_token 0.999955; per-step denoiser at parity across every sigma from 4608 down to 1 | not measured |
-| `openfold3` | token transformer (24 blk) **1.000000**, max|d|/rms 4.0e-03; conditioning + atom path not measured | not measured |
-| `intellifold2` | token transformer (24 blk) **1.000000**, max|d|/rms 1.2e-04; conditioning + atom path not measured | not measured |
+| `openfold3` | token transformer (24 blk) **1.000000**, max|d|/rms 4.0e-03; conditioning + atom path not measured | pae/pde/plddt/resolved **1.000000** — and the same for `openbind0` |
+| `intellifold2` | token transformer (24 blk) **1.000000**, max|d|/rms 1.2e-04; conditioning + atom path not measured | pae/pde/plddt/resolved **1.000000**, once native is rounded to bf16 — which is how this blob stores its trunk weights |
 | `protenix2` | token transformer (24 blk) **1.000000**, max|d|/rms 7.4e-05 — and the same for all six protenix variants; conditioning + atom path not measured | pae/pde/plddt/resolved **≥ 0.999985** across all six — and the gate found protenix's PDE head symmetrises the pair, not the logits (pde 0.870 → 0.999989) |
-| `rosettafold3` | token transformer (24 blk) **1.000000**, max|d|/rms 2.7e-05; conditioning + atom path not measured | not measured |
+| `rosettafold3` | token transformer (24 blk) **1.000000**, max|d|/rms 2.7e-05; conditioning + atom path not measured | pae/pde **0.999999**, plddt/resolved **1.000000** |
 | `alphafold3` | n/a — the reference implementation | n/a |
 | `af2_*` | n/a — DeepMind's own network, run unmodified | n/a |
 
 **"Not measured" is not "not working".** All seven fold, place ligands, fold
 RNA and DNA, dock complexes and predict error — see the screens below. What is
-still missing is the diffusion CONDITIONING and the atom encoder/decoder for
-those four, plus the confidence head for three of them, so a divergence there
-would have to be large enough to show up in a structure before anything caught
-it. That is not hypothetical: the confidence gate, the first time it ran, found
+still missing for those four is the diffusion CONDITIONING and the atom
+encoder/decoder, so a divergence there would have to be large enough to show up
+in a structure before anything caught it. That is not hypothetical: the confidence gate, the first time it ran, found
 that protenix's PDE head symmetrises the pair activation before its LayerNorm
 where AlphaFold 3 symmetrises the logits after the projection. LayerNorm is not
 linear, so those differ; `full_pde` read 0.870 and now reads 0.999989. Six
@@ -245,7 +244,7 @@ different repository entirely. What ships here is the model code, the
 | `dev/oracles/grad_check.py` | here, gitignored | sequence-differentiability, either engine |
 | `dev/oracles/trunk_parity.py` | here, gitignored | L1: pairformer stack vs the vendor's own module (7 models) |
 | `dev/oracles/diffusion_parity.py`, `l2_all.sh` | here, gitignored | L2: token diffusion transformer vs the vendor's own module (10 models) |
-| `dev/oracles/confidence_parity.py`, `l4_all.sh` | here, gitignored | L4: confidence head vs the vendor's own module (6 models) |
+| `dev/oracles/confidence_parity.py`, `l4_all.sh` | here, gitignored | L4: confidence head vs the vendor's own module (10 models) |
 | `dev/oracles/af2_fold_check.py` | here, gitignored | AF2 against ColabDesign on the same weights |
 | `tools/oracles/<model>/cmp_trunk_parity.py` | ColabDesign2 | single/pair vs the vendor's torch module |
 | `tools/oracles/{ligand,multimer,rna,dna,confidence}_parity.py` | ColabDesign2 | the modality screens |

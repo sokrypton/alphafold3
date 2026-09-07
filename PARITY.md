@@ -29,9 +29,9 @@ need the vendor's forward pass, so coverage tracks which natives are installed.
 | model | L0 | L1 pairformer | L2 diff-cond | L3 denoise | L4 conf | L5 fold | L6 modality |
 |---|---|---|---|---|---|---|---|
 | `alphafold3` | n/a | n/a | n/a | n/a | n/a | ✓ | · |
-| `openfold3` | ✓ | ✓ | ~ | · | · | ✓ | ✓ |
-| `openbind0` | ✓ | ✓ | ~ | · | · | ✓ | · |
-| `intellifold2` | ✓ | ✓ | ~ | · | · | ✓ | ✓ |
+| `openfold3` | ✓ | ✓ | ~ | · | ✓ | ✓ | ✓ |
+| `openbind0` | ✓ | ✓ | ~ | · | ✓ | ✓ | · |
+| `intellifold2` | ✓ | ✓ | ~ | · | ✓ | ✓ | ✓ |
 | `protenix2` | ✓ | ✓ | ~ | · | ✓ | ✓ | ✓ |
 | `protenix05` | ✓ | ✓ | ~ | · | ✓ | ✓ | · |
 | `protenix1` | ✓ | ✓ | ~ | · | ✓ | ✓ | · |
@@ -40,7 +40,7 @@ need the vendor's forward pass, so coverage tracks which natives are installed.
 | `protenix_tiny` | ✓ | ✓ | ~ | · | ✓ | ✓ | · |
 | `boltz2` | ✓ | ✓ | ✓ | · | ✓ | ✓ | ✓ |
 | `opendde` | ✓ | ✓ | ✓ | ✓ | · | ✓ | ✓ |
-| `rosettafold3` | ✓ | ✓ | ~ | · | · | ✓ | ✓ |
+| `rosettafold3` | ✓ | ✓ | ~ | · | ✓ | ✓ | ✓ |
 | `chai1` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `esmfold2` family | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a — protein only |
 | `af2_ptm` / `af2_multimer` | n/a | n/a | n/a | n/a | n/a | ✓ | n/a — protein only |
@@ -85,11 +85,11 @@ diffusion path alone -- `PER_BLOCK_PAIR_LAYER_NORM`,
 `KEY_MASKED_ATOM_ATTENTION`, `SWA_ROPE_ATOM_ATTENTION`, `REALIGN_SAMPLER`,
 `NORMED_ATOM_FEATURES`, `ATOM_ROPE`, `ATOM_ROPE_HALF_WINDOW`,
 `DIFFUSION_PROJECTED_RELPOS`, `PER_BLOCK_ATOM_PAIR_LAYER_NORM` -- and six feed
-the confidence head. For `openfold3`, `intellifold2` and `rosettafold3` none of
-those fifteen has an activation-level check. The protenix family now has the
-token transformer (L2, plan item 2a) and the whole confidence head (L4, 2b), so
-what is left uncovered there is the diffusion conditioning and the atom
-encoder/decoder.
+the confidence head. The six confidence tables are now covered for ten models
+(L4, plan items 2b/2c), and the token transformer for the same ten (L2, 2a).
+**What is left with no activation-level check anywhere is the diffusion
+CONDITIONING and the ATOM encoder/decoder** -- nine tables, four model families.
+That is now the whole of the named exposure, down from fifteen tables.
 
 **This is the real exposure, and openbind0 showed why it matters.** A membership
 decision that changes no weight is invisible to L0 by construction, and folding
@@ -256,6 +256,50 @@ plausible correlation.
 | `protenix_mini` | 1.000000 | 1.000000 | 1.000000 | 1.000000 |
 | `protenix_tiny` | 1.000000 | 1.000000 | 1.000000 | 1.000000 |
 
+**2c. L4 for the other four (same day).** openfold3, openbind0, intellifold2,
+rosettafold3 -- so L4 now covers ten models, everything except `opendde` (which
+has its own head, `opendde_confidence.py`) and the three already gated by
+injection.
+
+| model | `full_pae` | `full_pde` | `plddt` | `resolved` |
+|---|---|---|---|---|
+| `openfold3` | 1.000000 | 1.000000 | 1.000000 | 1.000000 |
+| `openbind0` | 1.000000 | 1.000000 | 1.000000 | 1.000000 |
+| `intellifold2` | 1.000000 | 1.000000 | 1.000000 | 1.000000 |
+| `rosettafold3` | 0.999999 | 0.999999 | 1.000000 | 1.000000 |
+
+Getting there cost two harness faults that each looked exactly like a port bug,
+and both are now asserted or documented in the harness:
+
+  * **intellifold2 read plddt corr 0.614.** Its converter writes trunk-region
+    weights as **bfloat16 on disk** deliberately
+    (`converters/intellifold2.py` `_record_dtype`, "mirrors AF3's param dtype
+    policy, which the published blob follows") while its `.pt` checkpoint is
+    fp32 -- so no config flag can lift our side to fp32. Rounding NATIVE the
+    same way (LayerNorms and the four logit heads excepted, which the blob keeps
+    fp32) gives 1.000000 on all four. `intellifold2` is the ONLY port that ships
+    bf16 weights; of3 and protenix blobs are all-fp32. Whether that costs if2
+    accuracy is untested and worth one experiment.
+  * **rosettafold3 read pae/pde 0.983.** The harness built our 447-wide
+    target_feat from native's 449 using OF3's alphabet, but rf3 transposes G/C
+    and DG/DC and its converter correctly uses its own
+    (`_AF3_TO_RF3_AATYPE`). Discriminator: zero every column a protein input
+    never populates and watch it vanish -- the disagreement lived exactly in the
+    classes the two alphabets order differently.
+
+**One real fidelity gain, in the graph.** rf3's confidence head applies a
+parameter-free LayerNorm over the WHOLE TENSOR, so the statistic depends on the
+FEATURE WIDTH -- and native's s_inputs is 449 wide where our target_feat is 447.
+Passing `width=449` to `masked_global_norm` (which now accounts for the two
+dropped, always-zero columns) halves the residual: pae `max|d|` 0.047 -> 0.022,
+corr 0.999998 -> 0.999999. `converters/opendde.py` flags the same 831-vs-833
+mismatch on `single_cond_initial_norm` as "minor; confirm via e2e"; this is that
+confirmation. rf3's 6MRR is unchanged (best 0.974 A).
+
+Also fixed: `_truncate` now applies to BOTH sides. With only ours truncated the
+1-block run read corr -0.19 and looked catastrophic -- the same mistake, and the
+same tell (it got WORSE with fewer blocks), as the L1 harness's `--blocks`.
+
 **THE BUG: protenix's PDE head symmetrises the PAIR, not the LOGITS.** Native
 computes `Linear(pde_ln(z + z^T))`; AlphaFold 3 computes
 `l = Linear(LN(z)); pde = l + l^T`. LayerNorm is not linear, so those are
@@ -289,10 +333,10 @@ throughout and `rms ours/native` stays 1.0000. These outputs are expectations
 over softmaxed bins, so a 1e-6 logit difference is worth milli-angstroms.
 
 **2. L3, and L2's other two thirds** — for `openfold3`, `intellifold2`,
-`protenix2` and `rosettafold3`. Their token transformers are now gated (2a) and
-protenix's confidence head is (2b); what remains is the diffusion CONDITIONING
-and the atom encoder/decoder, then the denoise step, plus L4 for the other
-three. These
+`protenix2` and `rosettafold3`. Token transformers are gated (2a) and so are the
+confidence heads (2b/2c); what remains is the diffusion CONDITIONING, the atom
+encoder/decoder, and then the denoise step. `opendde` is the one model with no
+L4 -- it has its own head. These
 need new oracles, and they are the four whose ports predate the injection-ladder
 method (dump native's own tensors, inject them, compare our module's output).
 The recipe to copy is `esmfold2`'s, which is the most completely gated model
