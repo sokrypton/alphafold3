@@ -32,11 +32,11 @@ need the vendor's forward pass, so coverage tracks which natives are installed.
 | `openbind0` | ✓ | · | · | · | · | ✓ | · |
 | `intellifold2` | ✓ | ✓ | · | · | · | ✓ | ✓ |
 | `protenix2` | ✓ | ✓ | · | · | · | ✓ | ✓ |
-| `protenix05` | ✓ | · | · | · | · | ✓ | · |
-| `protenix1` | ✓ | · | · | · | · | ✓ | · |
-| `protenix1_20250630` | ✓ | · | · | · | · | ✓ | · |
-| `protenix_mini` | ✓ | · | · | · | · | ✓ | · |
-| `protenix_tiny` | ✓ | · | · | · | · | ✓ | · |
+| `protenix05` | ✓ | ✓ | · | · | · | ✓ | · |
+| `protenix1` | ✓ | ✓ | · | · | · | ✓ | · |
+| `protenix1_20250630` | ✓ | ✓ | · | · | · | ✓ | · |
+| `protenix_mini` | ✓ | ✓ | · | · | · | ✓ | · |
+| `protenix_tiny` | ✓ | ✓ | · | · | · | ✓ | · |
 | `boltz2` | ✓ | ✓ | ✓ | · | ✓ | ✓ | ✓ |
 | `opendde` | ✓ | ✓ | ✓ | ✓ | · | ✓ | ✓ |
 | `rosettafold3` | ✓ | ✓ | · | · | · | ✓ | ✓ |
@@ -64,7 +64,26 @@ the same weights (`dev/oracles/af2_fold_check.py --compare`), agreeing to
 
 ## The plan, cheapest first
 
-**1. Six models at L1 for the cost of two harness edits.** Every `·` in the L1
+**1. DONE for protenix (2026-09-07): five models gained an L1 gate.** All six
+now read s 1.000000 / z 1.000000 against `~/protenix`. It cost more than the
+"two harness edits" predicted below, and for an instructive reason: the
+ColabDesign2 harness resolves models through THAT repo's vendored 8-model
+registry, so `MODEL=protenix1` died with `unknown weights 'protenix1'` -- 14 of
+the 22 models are unreachable from there. The gate had to move into the library,
+which is `dev/oracles/trunk_parity.py`. It is also stricter than what it
+replaces: it ASSERTS no missing native tensors, no unmapped params, and
+`bfloat16 == 'none'` after the spec configures, and it REFUSES to run without
+`JAX_DEFAULT_MATMUL_PRECISION=highest` rather than quietly reporting a
+tf32-degraded number. Native dims come from the checkpoint, because the family
+shares one implementation but not its widths (protenix2 c_z 256, the rest 128;
+8, 16 and 48 blocks), and hardcoding protenix2's shape is what left five with no
+gate.
+
+`max|d|` grows with DEPTH, not with fidelity -- 0.0087 at 8 blocks, 0.068 at 16,
+0.88 at 48, all at corr 1.000000 -- so read it against models of the same depth
+or not at all.
+
+**1b. Six models at L1 for the cost of two harness edits (original estimate).** Every `·` in the L1
 column shares a native with a model already gated: the five other protenix
 variants use `~/protenix`, and `openbind0` uses `~/openfold-3`. Both harnesses
 currently hardcode the checkpoint as a module constant
