@@ -415,6 +415,15 @@ class ConfidenceHead(hk.Module):
             pair_act + jnp.swapaxes(pair_act, -2, -3),   # boltz symmetrizes FIRST
             asym_id, self.config.num_bins,
             'left_half_distance_logits', 'inter_half_distance_logits')
+      elif self.global_config.model in model_config.PRE_SYMMETRISED_PDE:
+        # protenix normalises the SYMMETRISED pair, so the symmetrisation is
+        # inside the LayerNorm rather than outside the projection.
+        distance_logits = hm.Linear(
+            self.config.num_bins,
+            initializer=self.global_config.final_init,
+            name='left_half_distance_logits',
+        )(self._head_norm('logits_ln',
+                          pair_act + jnp.swapaxes(pair_act, -2, -3)))
       else:
         left_distance_logits = hm.Linear(
             self.config.num_bins,

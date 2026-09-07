@@ -413,6 +413,28 @@ DISTOGRAM_BIAS = (('opendde', 'rosettafold3', 'boltz2') + ESMFOLD2_FAMILY
                   + PROTENIX_FAMILY)
 
 
+# Models whose PDE head symmetrises the PAIR ACTIVATION before its LayerNorm,
+# rather than symmetrising the LOGITS as AlphaFold 3 does.
+#
+# AF3: `l = Linear(LN(z)); pde = l + l^T`.
+# protenix: `pde = Linear(pde_ln(z + z^T))` (confidence.py
+# `memory_efficient_forward`). LayerNorm is not linear, so these are different
+# functions of z -- unlike the distogram case above this CANNOT be absorbed into
+# the weight, which is why it is a forward branch and not a converter transform.
+#
+# Every other vendor here really does symmetrise the logits, and reading the
+# checkpoint cannot tell you which: openfold3 `prediction_heads.py`
+# `logits = logits + logits.transpose(-2, -3)`, intellifold2 `pDEHead._forward`
+# the same, rosettafold3 the same in its af3-style branch (its OTHER branch
+# symmetrises first, but the released config takes the af3 one). boltz2 also
+# symmetrises first and is handled by its own split-heads branch.
+#
+# Found by dev/oracles/confidence_parity.py: pde read corr 0.87 while pae/plddt/
+# resolved were at parity, on protenix2. No fold caught it -- a symmetric,
+# plausibly-scaled error metric stays symmetric and plausible.
+PRE_SYMMETRISED_PDE = PROTENIX_FAMILY
+
+
 class GlobalConfig(base_config.BaseConfig):
   """Global configuration for the AlphaFold3 model."""
 

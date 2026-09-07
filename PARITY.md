@@ -32,12 +32,12 @@ need the vendor's forward pass, so coverage tracks which natives are installed.
 | `openfold3` | ✓ | ✓ | ~ | · | · | ✓ | ✓ |
 | `openbind0` | ✓ | ✓ | ~ | · | · | ✓ | · |
 | `intellifold2` | ✓ | ✓ | ~ | · | · | ✓ | ✓ |
-| `protenix2` | ✓ | ✓ | ~ | · | · | ✓ | ✓ |
-| `protenix05` | ✓ | ✓ | ~ | · | · | ✓ | · |
-| `protenix1` | ✓ | ✓ | ~ | · | · | ✓ | · |
-| `protenix1_20250630` | ✓ | ✓ | ~ | · | · | ✓ | · |
-| `protenix_mini` | ✓ | ✓ | ~ | · | · | ✓ | · |
-| `protenix_tiny` | ✓ | ✓ | ~ | · | · | ✓ | · |
+| `protenix2` | ✓ | ✓ | ~ | · | ✓ | ✓ | ✓ |
+| `protenix05` | ✓ | ✓ | ~ | · | ✓ | ✓ | · |
+| `protenix1` | ✓ | ✓ | ~ | · | ✓ | ✓ | · |
+| `protenix1_20250630` | ✓ | ✓ | ~ | · | ✓ | ✓ | · |
+| `protenix_mini` | ✓ | ✓ | ~ | · | ✓ | ✓ | · |
+| `protenix_tiny` | ✓ | ✓ | ~ | · | ✓ | ✓ | · |
 | `boltz2` | ✓ | ✓ | ✓ | · | ✓ | ✓ | ✓ |
 | `opendde` | ✓ | ✓ | ✓ | ✓ | · | ✓ | ✓ |
 | `rosettafold3` | ✓ | ✓ | ~ | · | · | ✓ | ✓ |
@@ -85,8 +85,11 @@ diffusion path alone -- `PER_BLOCK_PAIR_LAYER_NORM`,
 `KEY_MASKED_ATOM_ATTENTION`, `SWA_ROPE_ATOM_ATTENTION`, `REALIGN_SAMPLER`,
 `NORMED_ATOM_FEATURES`, `ATOM_ROPE`, `ATOM_ROPE_HALF_WINDOW`,
 `DIFFUSION_PROJECTED_RELPOS`, `PER_BLOCK_ATOM_PAIR_LAYER_NORM` -- and six feed
-the confidence head. For `openfold3`, `intellifold2`, `protenix2` and
-`rosettafold3` none of those fifteen has an activation-level check.
+the confidence head. For `openfold3`, `intellifold2` and `rosettafold3` none of
+those fifteen has an activation-level check. The protenix family now has the
+token transformer (L2, plan item 2a) and the whole confidence head (L4, 2b), so
+what is left uncovered there is the diffusion conditioning and the atom
+encoder/decoder.
 
 **This is the real exposure, and openbind0 showed why it matters.** A membership
 decision that changes no weight is invisible to L0 by construction, and folding
@@ -231,10 +234,65 @@ This is one of the nine diffusion-path convention tables, across every model
 family that had no L2 at all. It does NOT close L2 for these models: the
 conditioning projections and the atom encoder/decoder are untouched by it.
 
-**2. L3–L4, and L2's other two thirds, for the four trunk-only models** —
-`openfold3`, `intellifold2`, `protenix2`, `rosettafold3`. Their token
-transformers are now gated (2a); what remains is the diffusion CONDITIONING and
-the atom encoder/decoder, then the denoise step and the confidence head. These
+**2b. L4 GATED for all six protenix models (2026-09-07), and it found a
+bug.** `dev/oracles/confidence_parity.py`. protenix's `ConfidenceHead` is
+standalone-constructible like its other modules, so the L1/L2 recipe carries
+over -- with one difference that will apply to every L4: the head consumes an
+ATOM LAYOUT, so it cannot run on purely synthetic input. The trunk activations
+stay synthetic and seeded; the layout comes from a real featurised 6MRR batch,
+and native's flat-atom indices are DERIVED from that batch
+(`atom_to_token_idx` = repeated token index, `atom_to_tokatom_idx` = tiled slot
+index, `distogram_rep_atom_mask` = the slots our pseudo-beta gather picks). The
+harness asserts the two sides' rep-atom coordinates are bit-identical before it
+compares anything; without that check a geometry mismatch would read as a
+plausible correlation.
+
+| model | `full_pae` | `full_pde` | `plddt` | `resolved` |
+|---|---|---|---|---|
+| `protenix2` | 0.999985 | 0.999989 | 1.000000 | 0.999999 |
+| `protenix1` | 0.999999 | 1.000000 | 1.000000 | 1.000000 |
+| `protenix1_20250630` | 0.999998 | 0.999996 | 0.999999 | 0.999998 |
+| `protenix05` | 0.999999 | 1.000000 | 1.000000 | 1.000000 |
+| `protenix_mini` | 1.000000 | 1.000000 | 1.000000 | 1.000000 |
+| `protenix_tiny` | 1.000000 | 1.000000 | 1.000000 | 1.000000 |
+
+**THE BUG: protenix's PDE head symmetrises the PAIR, not the LOGITS.** Native
+computes `Linear(pde_ln(z + z^T))`; AlphaFold 3 computes
+`l = Linear(LN(z)); pde = l + l^T`. LayerNorm is not linear, so those are
+different functions of z, and unlike the distogram-bias case it cannot be folded
+into the weight -- it needs a forward branch
+(`model_config.PRE_SYMMETRISED_PDE`). `full_pde` went **0.869929 -> 0.999989**
+on protenix2; six models fixed, no weights changed, no reconversion. Every other
+vendor really does symmetrise the logits (of3 `prediction_heads.py`, if2
+`pDEHead._forward`, rf3's af3-style branch -- which its released config does
+select, `use_af3_style_binning_and_final_layer_norms: True`); boltz2 and opendde
+symmetrise first and already had their own branches.
+
+**Why no fold caught it**: pde is reported, never fed back into the structure, so
+L5 is blind to it by construction -- and a symmetric, plausibly-scaled error
+metric stays symmetric and plausible. Same shape of argument as openbind0's
+transposed bias, and the second time in one session that a level below L5 found
+something no fold could.
+
+**What the numbers do NOT gate**: the harness applies OUR bin centers to both
+sides, so a bin-convention error cancels. Those were checked by reading both
+definitions: protenix pae/pde are 64 bins over [0, 32], centers
+`linspace(0, 32-w, 64) + w/2` = 0.25 ... 31.75, which is exactly what our
+`max_error_bin = 31.0` plus the catch-all bin produces; plddt is 50 bins over
+[0, 1] on both sides. Re-check this per vendor -- confidence bugs here have been
+bin and layout bugs, not weight bugs.
+
+**Depth, not fidelity, drives `max|d|` here too.** Truncating the confidence
+pairformer to one block (`BLOCKS=1`) reads corr 1.000000 with p99.9 |d| of
+2e-03 A; at two blocks 1.3e-01; at the full four 3.4e-01. corr stays >= 0.99998
+throughout and `rms ours/native` stays 1.0000. These outputs are expectations
+over softmaxed bins, so a 1e-6 logit difference is worth milli-angstroms.
+
+**2. L3, and L2's other two thirds** — for `openfold3`, `intellifold2`,
+`protenix2` and `rosettafold3`. Their token transformers are now gated (2a) and
+protenix's confidence head is (2b); what remains is the diffusion CONDITIONING
+and the atom encoder/decoder, then the denoise step, plus L4 for the other
+three. These
 need new oracles, and they are the four whose ports predate the injection-ladder
 method (dump native's own tensors, inject them, compare our module's output).
 The recipe to copy is `esmfold2`'s, which is the most completely gated model
