@@ -32,7 +32,7 @@ class AF2ModelRunner:
 
   def __init__(self, spec, device, model_dir, *, num_recycles=3,
                use_bfloat16=True, num_msa=512, num_extra_msa=1024,
-               model_names=None):
+               model_names=None, use_cluster_profile=True):
     self._spec = spec
     self._device = device
     self._model_dir = str(model_dir)
@@ -41,6 +41,7 @@ class AF2ModelRunner:
     self._num_msa = num_msa
     self._num_extra_msa = num_extra_msa
     self._model_names = model_names
+    self._use_cluster_profile = use_cluster_profile
 
   @property
   def model_dir(self):
@@ -62,10 +63,7 @@ class AF2ModelRunner:
         use_bfloat16=self._use_bfloat16,
         num_msa=self._num_msa,
         num_extra_msa=self._num_extra_msa,
-        # A real alignment wants AF2's own cluster profile; with a single
-        # sequence nearest_neighbor_clusters has nothing to cluster and the
-        # designed profile is used instead.
-        use_cluster_profile=True,
+        use_cluster_profile=self._use_cluster_profile,
     )
 
   @functools.cached_property
@@ -77,6 +75,65 @@ class AF2ModelRunner:
     """
     return self._runner.model_params
 
+  def forward(self, batch, *, soft_seq=None, design_mask=None, key=None,
+              opt=None, model_params=None):
+    """batch (+ an optional soft sequence) -> AF2 outputs. DIFFERENTIABLE.
+
+    `soft_seq` is a distribution over the 20 standard amino acids, shaped
+    (num_tokens, 20) or (num_seq, num_tokens, 20) -- the same thing
+    `alphafold3.model.Model.__call__` takes, so ONE design loop drives either
+    engine. `design_mask` selects which tokens it replaces; the rest keep the
+    batch's own aatype, which is what a binder target or a scaffolded motif
+    needs.
+
+    The relaxation stays with the CALLER, deliberately. AF2's own `soft_seq`
+    turns parameters into a distribution with its own alpha/temp/soft/hard
+    schedule, and AF3 has no equivalent -- so driving both engines through AF2's
+    schedule would mean two different meanings for one design loop. At
+    `soft=0, hard=0` that transform is `pseudo = input`, an exact identity, so
+    handing it a distribution passes it through untouched. That identity is what
+    makes one convention possible; it is not an approximation.
+
+    With `soft_seq=None` this is plain prediction: the batch's own sequence as a
+    one-hot. `run_inference` is exactly that call, so prediction and design are
+    not two code paths here either.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    inputs, seq = af2_features.from_af3_batch(batch, use_msa=True)
+    num_seq = self._runner.num_seq
+    aatype = jnp.asarray(
+        [af2_features.rc.restype_order.get(a, af2_features.rc.restype_num)
+         for a in seq])
+    # Clipped to the 20 standard types: an X would one-hot to index 20, which is
+    # outside the alphabet AF2's sequence parameters span.
+    wt = jax.nn.one_hot(jnp.clip(aatype, 0, 19), 20)
+
+    if soft_seq is None:
+      blended = wt
+    else:
+      soft_seq = jnp.asarray(soft_seq)
+      if soft_seq.ndim == 3:
+        soft_seq = soft_seq[0]
+      if design_mask is None:
+        blended = soft_seq
+      else:
+        blended = jnp.where(jnp.asarray(design_mask)[:, None], soft_seq, wt)
+    params = {'seq': jnp.broadcast_to(blended, (num_seq,) + blended.shape)}
+
+    # soft/hard 0 so AF2's transform is the identity described above; alpha and
+    # temp are then irrelevant but pinned so a caller's opt cannot reintroduce a
+    # schedule by accident.
+    full_opt = {'alpha': 1.0, 'temp': 1.0, 'soft': 0.0, 'hard': 0.0,
+                'weights': {}}
+    if opt:
+      full_opt.update(opt)
+    if key is None:
+      key = jax.random.PRNGKey(0)
+    return self._runner.apply(
+        params, {**inputs, 'opt': full_opt}, key, model_params=model_params)
+
   def run_inference(self, featurised_example, rng_key):
     """One forward pass, from the SAME featurised batch an AF3 model gets."""
     import jax
@@ -84,9 +141,7 @@ class AF2ModelRunner:
     from alphafold3.model import feat_batch
 
     batch = feat_batch.Batch.from_data_dict(featurised_example)
-    inputs, seq = af2_features.from_af3_batch(
-        batch, use_msa=True)
-    outputs = self._runner.predict(inputs, seq, key=rng_key)
+    outputs = self.forward(batch, key=rng_key)
     result = jax.tree.map(np.asarray, dict(outputs))
     result['__identifier__'] = self.model_name.encode()
     # The batch travels with the result: extract_inference_results is handed the
