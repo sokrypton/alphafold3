@@ -985,11 +985,26 @@ does NOT cover. `dev/oracles/msa_parity.py` starts on the rest:
 
 | model | msa -> pair | rms ours/native |
 |---|---|---|
-| `rosettafold3` | **0.999971** | 0.9976 |
+| `openfold3` | **1.000000** | 1.0000 |
+| `openbind0` | **1.000000** | 1.0000 |
+| `intellifold2` | **1.000000** | 0.9999 |
+| `rosettafold3` | 0.999971 | 0.9976 |
+
+With `prot_parity.py`'s protenix2 and protenix1 that is **6 of the 10** models
+carrying an MSA stack, and every model this fork centres on.
 
 It compares the PAIR output, which is the half that survives into the trunk;
 comparing only the msa rows would miss a wrong outer-product normalisation
 entirely.
+
+**if2's LAST MSA block has no msa update, and the checkpoint says so.** Block 3
+carries no `msa_pair_weighted_averaging` at all -- 12 tensors that simply do not
+exist, because its msa output is never read. That is what if2's
+`skip_unused_modules` flag is for, and `v2_inference_config` sets it True;
+constructing the stack without it asks for those tensors and reports 12
+missing. The same idea as protenix's last-block omission that
+`NO_MSA_ROW_UPDATE` was written for, arrived at independently by a different
+vendor.
 
 **Two rf3 facts this pinned down.** Its MSA keys carry NO block index: the
 forward loops `n_block` times over ONE set of submodules, so the checkpoint
@@ -1047,7 +1062,7 @@ Enumerated against the graph's own module list rather than from memory:
 | module | models carrying it | gated on | note |
 |---|---|---|---|
 | ~~template embedder~~ | 9 | **8** | gated 2026-09-08, found TWO bugs; every model but chai1 |
-| **MSA module** | 10 | **3** | `protenix2`/`protenix1` via `prot_parity.py`, `rosettafold3` via `msa_parity.py` |
+| **MSA module** | 10 | **6** | `protenix2`/`protenix1` (`prot_parity.py`) + rf3, both of3, if2 (`msa_parity.py`). LEFT: boltz2 (needs boltz's own feature layout), opendde, chai1 (TorchScript), esmfold2 |
 | ~~distogram head~~ | all | **8** | CLOSED 2026-09-08, `dgram_parity.py`; chai1 is n/a (no native head) |
 | ~~input embedder~~ | all | **2** | CLOSED 2026-09-08, `real_trunk_parity.py` |
 | ~~recycling loop~~ | all | **2** | same gate — it compares the trunk AFTER all recycles |

@@ -191,7 +191,7 @@ levels were organised around the diffusion path:
 | module | models carrying it | gated on |
 |---|---|---|
 | **template embedder** | 9 | **8** — gated 2026-09-08, found two bugs |
-| **MSA module** | 10 | **3** (protenix2, protenix1, rosettafold3) |
+| **MSA module** | 10 | **6** — every model this fork centres on |
 | ~~distogram head~~ | all | **8** — closed 2026-09-08 |
 | ~~input embedder~~ | all | **2** — closed 2026-09-08 |
 | ~~recycling loop~~ | all | **2** — same gate |
