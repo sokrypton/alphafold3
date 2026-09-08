@@ -189,7 +189,7 @@ levels were organised around the diffusion path:
 
 | module | models carrying it | gated on |
 |---|---|---|
-| **template embedder** | 9 | **7** — gated 2026-09-08, found two bugs |
+| **template embedder** | 9 | **8** — gated 2026-09-08, found two bugs |
 | **MSA module** | 10 | **2** (protenix2, protenix1) |
 | ~~distogram head~~ | all | **8** — closed 2026-09-08 |
 | ~~input embedder~~ | all | **2** — closed 2026-09-08 |

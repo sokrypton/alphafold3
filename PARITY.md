@@ -965,7 +965,7 @@ Enumerated against the graph's own module list rather than from memory:
 
 | module | models carrying it | gated on | note |
 |---|---|---|---|
-| ~~template embedder~~ | 9 | **7** | gated 2026-09-08, found TWO bugs; protenix2/1, rf3, boltz2, both of3, if2 |
+| ~~template embedder~~ | 9 | **8** | gated 2026-09-08, found TWO bugs; every model but chai1 |
 | **MSA module** | **10** | **2** | only `protenix2` and `protenix1`, via `prot_parity.py` (L1b) |
 | ~~distogram head~~ | all | **8** | CLOSED 2026-09-08, `dgram_parity.py`; chai1 is n/a (no native head) |
 | ~~input embedder~~ | all | **2** | CLOSED 2026-09-08, `real_trunk_parity.py` |
@@ -1071,6 +1071,17 @@ pair reads 0.998994 for the same reason). Its template stack is the widened
 "full_fat" tree -- c_t 256, 8 heads, c_hidden 32/256, NOT AF3's 64/16/4 -- so
 every width is read off the checkpoint; hardcoding AF3's numbers fails in
 load_state_dict with eight size mismatches rather than comparing quietly.
+
+**opendde: gated at 1.000000, and its converter was the one that had this
+right.** opendde is protenix-lineage, so its template embedder takes ONE fused
+108-d `linear_no_bias_a` while our side runs AF3's per-feature
+TemplateEmbedding -- meaning `converters/opendde.py` SPLITS that fused weight
+into AF3's nine slots. That split encodes exactly the convention the protenix
+fix established today: cols 40:72 are the **j**-varying restype block (AF3 slot
+2), 72:104 the i-varying (slot 3). So the opendde converter and
+`Protenix2TemplateEmbedding` disagreed about the same vendor's layout, and the
+converter was correct. Reading one against the other would have found this
+without a gate; nobody did.
 
 Two harness notes from the of3 pair. of3's config subtree is
 `architecture/template`, not `template_embedder` -- that is the CHECKPOINT
@@ -1181,7 +1192,7 @@ it covers, because the file itself is the only other record:
 | `dev/oracles/diffusion_parity.py`, `l2_all.sh` | L2 | token diffusion transformer — 10 models |
 | `dev/oracles/boltz2_denoise_parity.py` | L3 | boltz2's denoise step by INJECTION from a captured boltz run |
 | `dev/oracles/denoise_parity.py` | L3 | one denoise step, whole diffusion module — protenix2/1, both of3, intellifold2, rosettafold3 |
-| `dev/oracles/template_parity.py` | L1 | template embedder vs the vendor's own module — protenix2/1, rf3, boltz2, both of3, intellifold2; found 2 bugs |
+| `dev/oracles/template_parity.py` | L1 | template embedder vs the vendor's own module — 8 models (all but chai1); found 2 bugs |
 | `dev/oracles/real_trunk_parity.py` + `native_trunk_dump.sh` | L1 real-input | input embedder, trunk output and recycling, against native's own featurised run — protenix2/1 |
 | `dev/oracles/dgram_parity.py` | L4 | distogram head — protenix2/1, both of3, intellifold2, rosettafold3, boltz2, opendde |
 | `dev/oracles/confidence_parity.py`, `l4_all.sh` | L4 | confidence head — every port |
