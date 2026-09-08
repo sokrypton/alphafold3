@@ -276,10 +276,30 @@ def _attach_esm(batch, esm):
   out = np.zeros(is_protein.shape + (np.asarray(esm).shape[-1],), np.float32)
   idxs = np.flatnonzero(is_protein)
   rows = np.asarray(esm, np.float32)
-  if len(idxs) != len(rows):
+  # ONE ROW PER RESIDUE, NOT PER TOKEN -- the same fix `_attach_lm_pair` needed,
+  # and found the same way. A language model reads a SEQUENCE, so its rows are
+  # residues; AF3 ATOMISES a modified residue into one token per atom, all of
+  # them protein. Keying on the protein-token count raised `esm has 76 rows but
+  # the batch has 85 protein tokens` on phospho-ubiquitin, so chai-1 could not
+  # be given its ESM2 embeddings on ANY PTM input -- and chai without them folds
+  # a different model (5.70 A where it reaches 0.642).
+  #
+  # Map each protein token to the row of ITS RESIDUE, which is AF3's own
+  # parent-residue convention for an atomised residue's restype. With nothing
+  # atomised every residue is one token and this is exactly the identity it
+  # replaces.
+  asym = np.asarray(batch['asym_id']).reshape(-1)[idxs]
+  resi = np.asarray(batch['residue_index']).reshape(-1)[idxs]
+  rank, order = {}, []
+  for key in zip(asym.tolist(), resi.tolist()):
+    order.append(rank.setdefault(key, len(rank)))
+  if len(rows) == len(idxs):
+    out[idxs] = rows
+  elif len(rows) == len(rank):
+    out[idxs] = rows[np.asarray(order, np.int64)]
+  else:
     raise ValueError(f'esm has {len(rows)} rows but the batch has {len(idxs)} '
-                     'protein tokens')
-  out[idxs] = rows
+                     f'protein tokens spanning {len(rank)} residues')
   batch['esm_embeddings'] = out
   return batch
 
