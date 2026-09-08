@@ -937,9 +937,9 @@ Enumerated against the graph's own module list rather than from memory:
 | **template embedder** | **9** | **0** | `TemplateEmbedding`, `SingleTemplateEmbedding`, `Boltz2TemplateEmbedding` — no oracle imports any of them |
 | **MSA module** | **10** | **2** | only `protenix2` and `protenix1`, via `prot_parity.py` (L1b) |
 | ~~distogram head~~ | all | **6** | CLOSED 2026-09-08, `dgram_parity.py` — see below |
-| **input embedder** | all | **0 standing** | `create_target_feat_embedding` is built in 5 oracles and compared in none |
+| ~~input embedder~~ | all | **2** | CLOSED 2026-09-08, `real_trunk_parity.py` |
+| ~~recycling loop~~ | all | **2** | same gate — it compares the trunk AFTER all recycles |
 | atom decoder | all | 0 direct | covered in composition by the three exact L3 steps |
-| recycling loop | all | 0 | L1-L4 all measure a SINGLE pass |
 
 **The template gap is the biggest one.** Nine models carry a template stack and
 templates demonstrably work end to end (boltz2 folds 5CAJ to 0.72 A with one,
@@ -975,15 +975,39 @@ weight, off by a factor of two on the BIAS -- which is why
 claim instead of trusting the comment beside it. Both sides come out exactly
 symmetric on every model.
 
-**The input embedder has one measurement, and it is not a gate.** Chasing the
-protenix2 5K9P question produced a real-input comparison of `s_inputs`:
-0.99999658 for protenix2. That is a single scratchpad run on one model, not a
-harness, and it should become one -- along with the real-input TRUNK comparison
-from the same session (which is where the 6MRR pair-0.960 control came from).
+**The input embedder and the recycling loop are CLOSED (2026-09-08)**, by
+promoting the ad-hoc comparison that came out of the 5K9P investigation into
+`dev/oracles/real_trunk_parity.py` + `native_trunk_dump.sh`. It compares against
+native's own tensors from a real inference job -- so native's FEATURISER too --
+and therefore covers three things nothing else did: the input embedder, the
+trunk's real output, and recycling (every other gate measures a single pass).
 
-Left: the input embedder is cheap in the same way (a projection off tensors the
-harnesses already build). The template embedder is a real adapter per vendor,
-in the shape of `denoise_parity.py`.
+| tensor | 5K9P plain | 6MRR (the control) |
+|---|---|---|
+| `s_inputs` | **0.99999663** | **0.99999699** |
+| `s_trunk` (single) | 0.99823 (rms 0.896) | 0.99915 (rms 1.014) |
+| `z_trunk` (pair) | 0.867 | 0.960 |
+
+**The control column is the point, and it is now part of the harness.** A trunk
+correlation well below 1.0 is NORMAL here: 48 blocks x 10 recycles amplify float
+differences, and 6MRR -- where our fold matches native at 0.70 A -- still reads
+0.960 on the pair. Reading 0.867 as a defect without that control cost most of a
+session, so the oracle's docstring says to run a well-folded target beside every
+suspect one.
+
+Two native-side traps are baked into the dump script, because each silently
+produces a meaningless number:
+  * `Protenix.sample_diffusion` must be patched on the CLASS. The module-level
+    `generator.sample_diffusion` is imported by value into protenix.py, so
+    patching that one lets the job run to completion with no dump at all.
+  * The RAW pair must come from `DiffusionConditioning.prepare_cache`. protenix
+    precomputes a CONDITIONED pair and passes `z_trunk=None`, so the tensor
+    reaching the sampler as `pair_z` is not the trunk pair -- comparing ours
+    against it reads **corr 0.011**, which looks like catastrophe and means
+    nothing.
+
+Left: **the template embedder** (9 models, 0 gated) and the atom decoder. The
+template one is a real adapter per vendor, in the shape of `denoise_parity.py`.
 
 ## The gates, and where they live
 
@@ -999,6 +1023,7 @@ it covers, because the file itself is the only other record:
 | `dev/oracles/atom_parity.py` | L2 | atom cross-attention encoder, real batch, windowed — protenix2/1, both of3, intellifold2, rosettafold3 |
 | `dev/oracles/diffusion_parity.py`, `l2_all.sh` | L2 | token diffusion transformer — 10 models |
 | `dev/oracles/denoise_parity.py` | L3 | one denoise step, whole diffusion module — protenix2/1, both of3, intellifold2, rosettafold3 |
+| `dev/oracles/real_trunk_parity.py` + `native_trunk_dump.sh` | L1 real-input | input embedder, trunk output and recycling, against native's own featurised run — protenix2/1 |
 | `dev/oracles/dgram_parity.py` | L4 | distogram head — protenix2/1, both of3, intellifold2, rosettafold3 |
 | `dev/oracles/confidence_parity.py`, `l4_all.sh` | L4 | confidence head — every port |
 | `dev/oracles/fold_check.py` | L5 | one model, one target, CA-RMSD (`MODEL_DIR=` to compare blobs) |

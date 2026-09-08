@@ -194,7 +194,8 @@ levels were organised around the diffusion path:
 | **template embedder** | 9 | **0** |
 | **MSA module** | 10 | **2** (protenix2, protenix1) |
 | ~~distogram head~~ | all | **6** — closed 2026-09-08 |
-| **input embedder** | all | **0 standing** (one ad-hoc measurement) |
+| ~~input embedder~~ | all | **2** — closed 2026-09-08 |
+| ~~recycling loop~~ | all | **2** — same gate |
 
 Templates demonstrably work end to end — `boltz2` folds 5CAJ to 0.72 Å with one,
 `rosettafold3` to 1.56 Å — but that is evidence from folds, not from a
