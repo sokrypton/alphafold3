@@ -709,6 +709,35 @@ def main(argv=None):
   keep = os.environ.get('FEAT')
   if keep:
     fb, feats = zero_other_features(fb, feats, keep)
+
+  if os.environ.get('SAME_ATOM_SET') and args.model.startswith('esmfold2'):
+    # COMPARE ON THE SAME ATOM SET. Our featuriser emits 574 atoms for 6MRR and
+    # ESMFold2's 573: ours carries the terminal OXT, absent from its
+    # PROTEIN_HEAVY_ATOMS table. The encoder pools atoms to tokens with
+    # scatter_mean, so that one atom changes its token's output outright -- it is
+    # the single largest term in this gate (token 67 max|d| 2.19 against a
+    # median of 0.244). Masking it says how much of the residual is the port and
+    # how much is the input.
+    import dataclasses
+
+    import jax.numpy as jnp
+
+    import esmfold2_dumps
+    _nat = esmfold2_dumps.native(args.model)
+    _f = {k[5:]: v[0] for k, v in _nat.items() if k.startswith('feat.')}
+    _, _our = esmfold2_dumps.atom_map(fb, _f)
+    _m = np.zeros(np.asarray(feats['mask']).shape, bool).reshape(-1)
+    _m[_our] = True
+    _m = _m.reshape(np.asarray(feats['mask']).shape)
+    _dropped = int(np.asarray(feats['mask']).sum() - _m.sum())
+    feats = dict(feats); feats['mask'] = _m
+    rs = dataclasses.replace(fb.ref_structure, mask=jnp.asarray(_m, jnp.float32))
+    psi = dataclasses.replace(fb.predicted_structure_info,
+                              atom_mask=jnp.asarray(_m, jnp.float32))
+    fb = dataclasses.replace(fb, ref_structure=rs, predicted_structure_info=psi)
+    act_dense = act_dense * _m[..., None]
+    pos_noisy = act_dense[_m]
+    print('  SAME_ATOM_SET: dropped %d atom(s) ours-only' % _dropped)
   a_ref, q_ref, c_ref, p_ref, pad_mask = NATIVES[args.model](
       args.model, fb, feats, pos_noisy, s, z, n_tok)
   a_got, skip, c_got, p_got = ours(args.model, cfg, model_dir, fb, act_dense,

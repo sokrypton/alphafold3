@@ -1187,11 +1187,27 @@ It is also why the denoise gate's error is worst in the last 64 atoms (1.78
 against 1.08 in the middle): with a +/-64 rank window, our extra atom is a KEY
 for exactly that many.
 
-What remains after it is a broad ~5% (median 0.244 on rms 4.52) that appears
-**within a single atom block** and does not accumulate in the encoder --
+`SAME_ATOM_SET=1` masks that atom so both sides see the same 573, and it
+splits the residual cleanly:
+
+| esmfold2 atom encoder | max\|d\| | max\|d\|/rms | worst token |
+|---|---|---|---|
+| as featurised (574 vs 573 atoms) | 2.189 | 0.484 | **67**, the last |
+| same atom set | **0.643** | **0.142** | 39 |
+
+So the terminal OXT is the single largest term, and it is an INPUT difference.
+What remains is a broad ~5% -- median 0.234 per token on rms 4.52 -- which
+appears **within a single atom block** and does not accumulate in the encoder:
 truncating both sides gives max\|d\| 2.72 / 2.22 / 2.19 at 1 / 2 / 3 blocks.
-Still open, and the next step is a single-block A/B on the reference's own
-tapped `enc_queries_in`.
+Still open.
+
+**A single-block A/B is the obvious next step and my first attempt at one was a
+broken harness** -- assembling CrossAttTransformer's ten arguments by hand
+(the reference's `enc_queries_in` and `c0` mapped into our windowed layout, its
+own rope tables, our masks and gathers) read corr 0.107 with every parameter
+loaded and none at init. That is a fifth harness fault, not a finding, and it is
+recorded here so the next attempt starts from `atom_parity.py`'s working
+assembly rather than a fresh one.
 
 ### Everything the residual is NOT
 
