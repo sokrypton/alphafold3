@@ -393,8 +393,8 @@ over softmaxed bins, so a 1e-6 logit difference is worth milli-angstroms.
 confidence heads (2b/2c); what remains is the diffusion CONDITIONING, the atom
 encoder/decoder, and then the denoise step. DONE since: the atom encoder for
 both of3 releases, `protenix2` and now `intellifold2`; L3 for all six protenix
-releases. LEFT: L3 for of3/if2/rf3, the atom encoder for rf3, and the atom
-DECODER, which no gate reaches directly -- L3 covers it only in composition. `opendde` is the one model with no
+releases; the atom encoder for `rosettafold3`. LEFT: L3 for of3/if2/rf3, and the
+atom DECODER, which no gate reaches directly -- L3 covers it only in composition. `opendde` is the one model with no
 L4 -- it has its own head. These
 need new oracles, and they are the four whose ports predate the injection-ladder
 method (dump native's own tensors, inject them, compare our module's output).
@@ -718,6 +718,38 @@ local attention has different neighbourhoods. `v2_inference_config.py` sets
 embedder, so PACKED is what this checkpoint runs, and the harness defaults to it
 (`IF2_DENSE=1` selects the other, which is how the two were told apart).
 
+### rosettafold3's atom encoder, and a term the HARNESS was missing (2026-09-08)
+
+| tensor | corr | max\|d\|/rms |
+|---|---|---|
+| `c_atom_cond` | 0.999998 | 5.1e-02 |
+| `q_atom` | 0.999582 | 8.4e-01 |
+| `a_token` | 0.999870 | 5.7e-01 |
+
+Looser than the others, and expected to be: rf3's atom attention sets
+`force_bfloat16 = True` on its own path, so the native side is computing in
+bf16 where ours is fp32.
+
+The route there is worth recording because it inverts the usual fault. Built
+from rf3's own yaml the module came up 11 tensors short --
+`process_atom_level_embedding.*`, the conformer embedding the yaml does not
+switch on but THESE weights carry (the same yaml says 389 fused atom features
+where the checkpoint has 393, so the config in the repo is older than the
+release). Omitting it is not neutral: the MLP has biases and a LayerNorm tail,
+so on the all-zero conformer input it still emits a fixed nonzero vector, and
+`converters/rosettafold3.py::_conformer_embedding_bias` already folds exactly
+that constant into our embeddings. So the first run showed `c_atom_cond` 0.939
+with OUR magnitude 2.44x native's -- **the harness missing a term the port has**,
+where every earlier case of this shape was the reverse. Constructing the module
+with `use_atom_level_embedding=True` and feeding zeros took it to 0.999998.
+
+Two rf3 shape conventions cost a run each and are worth stating: the noisy
+coordinates carry rf3's leading diffusion-batch dim and the trunk tensors do
+NOT, because `atom_attention` normalises `A_I` but unsqueezes the pair tensor
+unconditionally (`Z_II[None]`); and `use_chiral_features` is on in rf3's config
+with `process_ch` in the checkpoint, which is the one rf3 term the port does not
+implement, so this gate drops it (`RF3_CHIRAL=1` to size it later).
+
 The diagnostic that made this legible was `c_atom_cond` = 1.000000 under BOTH
 layouts once the comparison selected native's real slots: the per-atom
 embedding, which has no attention in it, cannot see the window layout, so an
@@ -778,7 +810,7 @@ it covers, because the file itself is the only other record:
 | `dev/oracles/trunk_parity.py` | L1 | pairformer stack vs the vendor's module — 7 models |
 | `dev/oracles/prot_parity.py` | L1b | protenix mini/tiny/05 trunk AND MSA module |
 | `dev/oracles/conditioning_parity.py` | L2 | diffusion pair + single conditioning — 6 protenix, rf3 |
-| `dev/oracles/atom_parity.py` | L2 | atom cross-attention encoder, real batch, windowed — 6 protenix, both of3, intellifold2 |
+| `dev/oracles/atom_parity.py` | L2 | atom cross-attention encoder, real batch, windowed — 6 protenix, both of3, intellifold2, rosettafold3 |
 | `dev/oracles/diffusion_parity.py`, `l2_all.sh` | L2 | token diffusion transformer — 10 models |
 | `dev/oracles/confidence_parity.py`, `l4_all.sh` | L4 | confidence head — every port |
 | `dev/oracles/fold_check.py` | L5 | one model, one target, CA-RMSD (`MODEL_DIR=` to compare blobs) |
