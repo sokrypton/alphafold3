@@ -455,9 +455,11 @@ class Evoformer(hk.Module):
     #     if "template_aatype" not in input_feature_dict or self.n_blocks < 1:
     #         # Compatible with the Protenix 0.5.0 model series
     #         return 0
-    # so for that lineage (protenix05, mini, tiny) native contributes EXACTLY zero
-    # even when templates are supplied -- the fused-embedder tensors those
-    # checkpoints still carry are vestigial. Running the embedder anyway would add
+    # so for that lineage native contributes EXACTLY zero even when templates are
+    # supplied -- the fused-embedder tensors those checkpoints still carry are
+    # vestigial. (The protenix models that hit this path were removed on
+    # 2026-09-08; the branch is keyed on the block count, so it still guards any
+    # zero-block template stack.) Running the embedder anyway would add
     # a term native never computes: with no templates present a_tij is 0, but
     # u_proj(relu(v_norm(z_proj(z_norm(z))))) is NOT, so the divergence is real and
     # is not masked away by an empty template batch.

@@ -395,18 +395,20 @@ def map_protenix2_to_af3(sd, **overrides):
   map_confidence_head(sd, params, n_layers=d['n_confidence'], pair_H=d['pair_H'])
   map_distogram_head(sd, params)
   if d['n_template']:
-    # The v0.5.0 lineage (protenix05, mini, tiny) DOES still carry the seven fused
-    # template-embedder tensors, but native never reads them: its
-    # TemplateEmbedder.forward returns 0 outright when n_blocks < 1 ("Compatible
-    # with the Protenix 0.5.0 model series"). They are vestigial, so converting
-    # them would hand the graph weights for a path native does not run. The graph
-    # skips the whole template embedding for these models instead; see
-    # evoformer._embed_template_pair.
+    # Guarded on the CHECKPOINT's own block count, not on the model name, which
+    # is what makes this survive the model list changing. Protenix's v0.5.0
+    # lineage still CARRIES the seven fused template-embedder tensors while
+    # native never reads them -- TemplateEmbedder.forward returns 0 outright when
+    # n_blocks < 1 ("Compatible with the Protenix 0.5.0 model series") -- so
+    # converting them would hand the graph weights for a path native does not
+    # run. No protenix model in this fork is templateless any more (the four
+    # that were went on 2026-09-08), but the guard is the vendor's rule, not
+    # those models'; see evoformer._embed_template_pair.
     map_template_embedder(sd, params, n_blocks=d['n_template'],
                           templ_H=d['templ_H'])
   map_evoformer_conditioning(sd, params, n_atom=d['n_input_atom_enc'])
   # super_block_size is 4 in the graph, so the token transformer nests as
-  # (num_blocks // 4, 4); 24 -> 6 supers for protenix2, 8 -> 2 for mini/tiny.
+  # (num_blocks // 4, 4); 24 -> 6 supers for protenix2 and protenix1.
   map_diffusion(sd, params, n_token=d['n_diff_token'],
                 n_super=max(1, d['n_diff_token'] // 4),
                 n_atom=d['n_diff_atom_enc'])
@@ -457,34 +459,9 @@ def _af3_config():
   return model.Model.Config()
 
 
-def convert_protenix05_weights(checkpoint, output_dir):
-  """Convert Protenix's `protenix_base_default_v0.5.0` checkpoint (templateless)."""
-  return _convert_protenix(checkpoint, output_dir, 'protenix05')
-
-
 def convert_protenix1_weights(checkpoint, output_dir):
   """Convert Protenix's `protenix_base_default_v1.0.0` checkpoint (368 M)."""
   return _convert_protenix(checkpoint, output_dir, 'protenix1')
-
-
-def convert_protenix1_20250630_weights(checkpoint, output_dir):
-  """Convert Protenix's `protenix_base_20250630_v1.0.0` checkpoint.
-
-  Architecturally identical to protenix1 -- derive_dims reports the same 14
-  numbers for both -- so this exists only to pin the name, and hence the blob
-  filename, of a distinct set of weights.
-  """
-  return _convert_protenix(checkpoint, output_dir, 'protenix1_20250630')
-
-
-def convert_protenix_mini_weights(checkpoint, output_dir):
-  """Convert Protenix's `protenix_mini_default_v0.5.0` checkpoint."""
-  return _convert_protenix(checkpoint, output_dir, 'protenix_mini')
-
-
-def convert_protenix_tiny_weights(checkpoint, output_dir):
-  """Convert Protenix's `protenix_tiny_default_v0.5.0` checkpoint."""
-  return _convert_protenix(checkpoint, output_dir, 'protenix_tiny')
 
 
 def convert_protenix2_weights(checkpoint, output_dir):

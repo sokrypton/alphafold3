@@ -59,18 +59,20 @@ how faithfully it was ported; for that see [Parity status](#parity-status).
 
 ### Protenix family
 
-Nine published model types that differ only in counts and widths, so
-`derive_dims` + `PROTENIX_FAMILY` make each one close to a one-liner. `mini` and
-`tiny` are genuinely small — 16 and 8 pairformer blocks against 48.
+Protenix publishes nine model types that differ only in counts and widths, so
+`derive_dims` + `PROTENIX_FAMILY` make each one close to a one-liner. This fork
+carried six of them and now runs **two**: `protenix2`, the flagship and the most
+completely gated model here, and `protenix1`. `protenix05`,
+`protenix1_20250630`, `protenix_mini` and `protenix_tiny` were removed on
+2026-09-08 — they differed from these only by training run or by size, and
+keeping them spread parity work across variants without adding coverage. The
+machinery that made them one-liners is untouched, so re-adding one is still a
+`sources.py` entry, a converter alias and a `MODELS` line.
 
 | `--model` | model | weights | 6MRR Å |
 |---|---|---|---|
 | `protenix2` | [Protenix-v2](https://github.com/bytedance/Protenix) (ByteDance) | Apache 2.0 | 0.702 |
 | `protenix1` | Protenix-v1 | Apache 2.0 | 1.694 |
-| `protenix1_20250630` | Protenix-v1, 2025-06-30 training run of the same graph | Apache 2.0 | 1.695 |
-| `protenix05` | Protenix v0.5.0 — templateless | Apache 2.0 | 1.380 |
-| `protenix_mini` | Protenix mini — 16 blocks | Apache 2.0 | 1.541 |
-| `protenix_tiny` | Protenix tiny — 8 blocks | Apache 2.0 | 1.484 |
 
 ### Other AF3-architecture models
 
@@ -148,10 +150,6 @@ vendor's own torch module, run on the same inputs
 | `alphafold3` | n/a | n/a | this IS the reference implementation — nothing to compare against |
 | `openbind0` | 1.000000 | 1.000000 | v0.5.0 weights vs `~/openfold-3`; found and fixed a transposed column pair bias — see below |
 | `protenix1` | 1.000000 | 1.000000 | 48 blocks, c_z 128 |
-| `protenix1_20250630` | 1.000000 | 1.000000 | same graph as protenix1, later training run |
-| `protenix05` | 1.000000 | 1.000000 | exact at ONE block (max\|d\| 0.0021); its larger full-depth max\|d\| is accumulation |
-| `protenix_mini` | 1.000000 | 1.000000 | 16 blocks |
-| `protenix_tiny` | 1.000000 | 1.000000 | 8 blocks |
 | `af2_*` | n/a | n/a | DeepMind's own AF2 network, run unmodified — see below |
 
 **Two harness confounds dominated these numbers and cost six false leads on
@@ -200,7 +198,7 @@ vendor's own standalone module on synthetic conditioning.
 | `opendde` | atom encoder a_token 0.999955; per-step denoiser at parity across every sigma from 4608 down to 1 | pae/plddt/resolved **1.000000**, pde 0.999999 — its own structural-token head |
 | `openfold3` | token transformer (24 blk) **1.000000**, max|d|/rms 4.0e-03; conditioning + atom path not measured | pae/pde/plddt/resolved **1.000000** — and the same for `openbind0` |
 | `intellifold2` | token transformer (24 blk) **1.000000**, max|d|/rms 1.2e-04; conditioning + atom path not measured | pae/pde/plddt/resolved **1.000000**, once native is rounded to bf16 — which is how this blob stores its trunk weights |
-| `protenix2` | token transformer (24 blk) **1.000000**, max|d|/rms 7.4e-05 — and the same for all six protenix variants; conditioning pair/single **1.000000**; atom path not measured | pae/pde/plddt/resolved **≥ 0.999985** across all six — and the gate found protenix's PDE head symmetrises the pair, not the logits (pde 0.870 → 0.999989) |
+| `protenix2` | token transformer (24 blk) **1.000000**, max|d|/rms 7.4e-05 — and the same for `protenix1`; conditioning pair/single **1.000000**; atom encoder **1.000000**, denoise step (L3) exact at 0.0000 Å/atom | pae/pde/plddt/resolved **≥ 0.999985** on both — and the gate found protenix's PDE head symmetrises the pair, not the logits (pde 0.870 → 0.999989) |
 | `rosettafold3` | token transformer (24 blk) **1.000000**, max|d|/rms 2.7e-05; conditioning pair/single gated; atom path not measured | pae/pde **0.999999**, plddt/resolved **1.000000** |
 | `alphafold3` | n/a — the reference implementation | n/a |
 | `af2_*` | n/a — DeepMind's own network, run unmodified | n/a |
@@ -239,7 +237,7 @@ different repository entirely. What ships here is the model code, the
 
 | harness | where | what it gates |
 |---|---|---|
-| `dev/bench/sweep22.sh` | here, gitignored | the 22-model 6MRR regression sweep |
+| `dev/bench/sweep22.sh` | here, gitignored | the 6MRR regression sweep (22 models when last run; 18 now) |
 | `dev/oracles/fold_check.py` | here, gitignored | one model, one target, CA-RMSD |
 | `dev/oracles/grad_check.py` | here, gitignored | sequence-differentiability, either engine |
 | `dev/oracles/trunk_parity.py` | here, gitignored | L1: pairformer stack vs the vendor's own module (7 models) |
@@ -305,10 +303,7 @@ correction:
 | `openbind0` | 1.496 | 0.499 | — |
 | `intellifold2` | 1.472 | 0.316 | 0.436 |
 | `protenix2` | 1.754 | 2.090 | 1.253 |
-| `protenix05` | 1.409 | 0.307 | 0.426 |
 | `protenix1` | 1.737 | 1.867 | 0.918 |
-| `protenix_mini` | 2.129 | 0.339 | 0.439 |
-| `protenix_tiny` | 1.774 | 0.387 | 0.871 |
 | `boltz2` | 1.196 | 0.276 | 0.457 |
 | `opendde` | 1.327 | 0.298 | 0.876 |
 | `rosettafold3` | 1.047 | 0.322 | 0.450 |

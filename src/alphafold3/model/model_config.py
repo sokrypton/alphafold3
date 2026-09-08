@@ -39,19 +39,6 @@ MODELS = (
     # Protenix's v1 release (368 M). Stock AlphaFold 3 everywhere except one
     # width -- see PROTENIX1_SETTINGS.
     'protenix1',
-    # A later training run of the SAME graph as protenix1 -- derive_dims reports
-    # byte-identical dimensions -- so it is a weights-only variant.
-    'protenix1_20250630',
-    # Protenix v0.5.0 base: the same graph as v1 but TEMPLATELESS (the checkpoint
-    # carries zero template_embedder blocks), which is what made it the variant an
-    # earlier port reached for when the template widths were still unsolved.
-    'protenix05',
-    # Protenix ships nine model types that differ only in counts and widths.
-    # protenix2 is its flagship; these two are the small ones, and they are
-    # genuinely small -- 16 and 8 pairformer blocks against 48, an 8-block
-    # diffusion transformer against 24, and 5 sampling steps against 200.
-    'protenix_mini',
-    'protenix_tiny',
     'intellifold2',
     'opendde',
     'boltz2',
@@ -201,13 +188,19 @@ MSA_AFTER_RECYCLE = ESMFOLD2_EXPERIMENTAL
 
 # The Protenix family. Its model types differ from one another ONLY in counts
 # and widths (converters/protenix2.derive_dims reads both off the checkpoint), so
-# every FORWARD branch that protenix2 takes, mini and tiny take too. Keeping the
+# every FORWARD branch that protenix2 takes, the others take too. Keeping the
 # membership in one place is what stops the next variant from being added to four
-# lists and missed in a fifth -- which happened three times while mini was being
-# ported, each time surfacing only as a shape error or an uncovered-parameter
-# count, never as anything that named the cause.
-PROTENIX_FAMILY = ('protenix05', 'protenix1', 'protenix1_20250630',
-                   'protenix2', 'protenix_mini', 'protenix_tiny')
+# lists and missed in a fifth -- which happened three times while the small
+# variants were being ported, each time surfacing only as a shape error or an
+# uncovered-parameter count, never as anything that named the cause.
+#
+# Deliberately TWO members. This fork carried six protenix model types
+# (protenix05, protenix1_20250630, protenix_mini, protenix_tiny alongside these);
+# they were removed on 2026-09-08 to stop spreading parity work across variants
+# that differ only in training run or size. Everything below is still written as
+# a FAMILY rather than a pair, because that is what made adding a variant a
+# one-liner, and re-adding one should stay that way.
+PROTENIX_FAMILY = ('protenix1', 'protenix2')
 
 
 # Models whose forward graph follows OpenFold3's conventions rather than stock
@@ -348,13 +341,20 @@ ATOM_ROPE = {m: dict(n_spatial=2, n_uid=10,
 # msa_module block is OuterProductMean + a pair stack, and there is no MSA row
 # attention and no MSA transition anywhere in the checkpoint.
 #
-# Protenix's mini and tiny distillations drop the whole `msa_stack` submodule
-# that protenix2 carries (`msa_pair_weighted_averaging` + `transition_m`).
-# Building it anyway is not free: `_msa_update` creates 12 parameters per block
-# that no checkpoint can fill, so the conversion reports them missing and the
-# graph REFUSES TO APPLY -- which is how protenix_tiny came to ship a blob that
-# could not be loaded against a batch carrying templates.
-NO_MSA_ROW_UPDATE = ('protenix_mini', 'protenix_tiny')
+# EMPTY, and kept rather than deleted. Its only members were protenix_mini and
+# protenix_tiny, removed on 2026-09-08: those distillations drop the whole
+# `msa_stack` submodule that protenix2 carries
+# (`msa_pair_weighted_averaging` + `transition_m`). Building it anyway is not
+# free -- `_msa_update` creates 12 parameters per block that no checkpoint can
+# fill, so the conversion reports them missing and the graph REFUSES TO APPLY,
+# which is how protenix_tiny came to ship a blob that could not be loaded
+# against a batch carrying templates.
+#
+# The forward branch at modules.py stays too. An empty membership costs nothing
+# at runtime (`in ()` is always False) and the pair -- convention plus the
+# reason -- is what a future distilled checkpoint needs; deleting it would make
+# that a rediscovery.
+NO_MSA_ROW_UPDATE = ()
 
 
 # Models whose diffusion conditioning concatenates a PROJECTED relative-position
@@ -362,7 +362,8 @@ NO_MSA_ROW_UPDATE = ('protenix_mini', 'protenix_tiny')
 # Widths: AF3 folds [z_trunk(c_z), rel_features(139)] -> c_z, these fold
 # [z_trunk(c_z), relpe(c_z)] -> 2*c_z, so getting the membership wrong is a shape
 # error at load (267 vs 256) rather than a silent one -- which is why this list
-# was the third and last of the protenix_mini omissions to surface.
+# was the third and last of the protenix_mini omissions to surface (mini itself
+# is gone, the lesson is not).
 DIFFUSION_PROJECTED_RELPOS = (('boltz2', 'rosettafold3') + ESMFOLD2_FAMILY
                               + PROTENIX_FAMILY)
 
@@ -384,8 +385,8 @@ TRANSPOSED_COLUMN_PAIR_BIAS = ('openfold3', 'openbind0', 'opendde', 'boltz2') + 
 # The cost of getting it wrong is not a crash: the block parameters land under
 # `__layer_stack_no_per_layer` while the graph reads
 # `__layer_stack_with_per_layer`, so the conversion "succeeds" and every atom
-# block is left at its init value. The shape manifest is what catches it, which
-# is how protenix_mini was caught (104 uncovered parameters).
+# block is left at its init value. Conversion coverage is what catches it, which
+# is how the since-removed protenix_mini was caught (104 uncovered parameters).
 PER_BLOCK_ATOM_PAIR_LAYER_NORM = ('opendde', 'rosettafold3') + PROTENIX_FAMILY
 
 

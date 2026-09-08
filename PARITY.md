@@ -22,6 +22,28 @@ Read `README.md` for the numbers. This file is the plan.
 L0 and L5–L6 need no vendor code, which is why they cover every model. L1–L4
 need the vendor's forward pass, so coverage tracks which natives are installed.
 
+## Four protenix models were removed (2026-09-08)
+
+`protenix05`, `protenix1_20250630`, `protenix_mini` and `protenix_tiny` are gone;
+`protenix2` and `protenix1` remain. They were removed because they differed from
+the two survivors only by training run or by size, so debugging them spread
+parity effort across variants without adding architectural coverage --
+`protenix2` is the most completely gated model in this document, and it is the
+one with an open question worth the attention (the modified-residue divergence
+below).
+
+**The measurements below were not rewritten.** Sections dated before this say
+things like "all six protenix models" and quote numbers for the removed
+variants; those runs happened and the findings they produced -- the PDE
+symmetrisation, the 833-vs-831 LayerNorm, the atom-block-count derivation --
+are why the surviving models are gated as tightly as they are. Only the coverage
+tables and the current-state claims were edited. Nothing about the removal
+invalidates a number recorded here.
+
+Re-adding a variant is still close to a one-liner: a `converters/sources.py`
+entry, a converter alias, a `MODELS` line and (if its widths differ) a widener.
+`PROTENIX_FAMILY` and every list keyed off it were left written as a family.
+
 ## Current coverage
 
 `✓` gated, `~` partially gated (see the footnote), `·` not measured,
@@ -34,11 +56,7 @@ need the vendor's forward pass, so coverage tracks which natives are installed.
 | `openbind0` | ✓ | ✓ | ~ | ✓ | ✓ | ✓ | · |
 | `intellifold2` | ✓ | ✓ | ~ | ✓ | ✓ | ✓ | ✓ |
 | `protenix2` | ✓ | ✓ | ~ | ✓ | ✓ | ✓ | ✓ |
-| `protenix05` | ✓ | ✓ | ~ | ~ | ✓ | ✓ | · |
 | `protenix1` | ✓ | ✓ | ~ | ~ | ✓ | ✓ | · |
-| `protenix1_20250630` | ✓ | ✓ | ~ | ~ | ✓ | ✓ | · |
-| `protenix_mini` | ✓ | ✓ | ~ | ~ | ✓ | ✓ | · |
-| `protenix_tiny` | ✓ | ✓ | ~ | ~ | ✓ | ✓ | · |
 | `boltz2` | ✓ | ✓ | ✓ | · | ✓ | ✓ | ✓ |
 | `opendde` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `rosettafold3` | ✓ | ✓ | ~ | ✓ | ✓ | ✓ | ✓ |
@@ -109,7 +127,7 @@ looked.
 
 | vendor code | present | checkpoints present |
 |---|---|---|
-| `~/protenix` | yes | **all six**: `protenix-v2`, `protenix_base_default_v0.5.0`, `protenix_base_default_v1.0.0`, `protenix_base_20250630_v1.0.0`, `protenix_mini_default_v0.5.0`, `protenix_tiny_default_v0.5.0` |
+| `~/protenix` | yes | `protenix-v2`, `protenix_base_default_v1.0.0` (the four other protenix model types were removed on 2026-09-08; their checkpoints are still on disk and in `sources.py` history) |
 | `~/openfold-3` | yes | **both**: `of3-p2-155k.pt` (openfold3), `of3-ob-174k.pt` (openbind0) |
 | `~/OpenDDE` | yes | `opendde_weights/opendde.pt` |
 | `~/BoltzDesign1/boltz2` | yes | `boltz2_weights/boltz2_conf.ckpt` |
@@ -130,7 +148,7 @@ now read s 1.000000 / z 1.000000 against `~/protenix`. It cost more than the
 "two harness edits" predicted below, and for an instructive reason: the
 ColabDesign2 harness resolves models through THAT repo's vendored 8-model
 registry, so `MODEL=protenix1` died with `unknown weights 'protenix1'` -- 14 of
-the 22 models are unreachable from there. The gate had to move into the library,
+the models are unreachable from there. The gate had to move into the library,
 which is `dev/oracles/trunk_parity.py`. It is also stricter than what it
 replaces: it ASSERTS no missing native tensors, no unmapped params, and
 `bfloat16 == 'none'` after the spec configures, and it REFUSES to run without
@@ -205,10 +223,6 @@ the stack depth, not fidelity.
 |---|---|---|---|---|---|---|
 | `protenix2` | `~/protenix` | 24 | 256 | 32.7 | 0.00242 | 7.4e-05 |
 | `protenix1` | " | 24 | 128 | 45.8 | 0.00342 | 7.5e-05 |
-| `protenix1_20250630` | " | 24 | 128 | 54.2 | 0.00472 | 8.7e-05 |
-| `protenix05` | " | 24 | 128 | 24.0 | 0.00025 | 1.0e-05 |
-| `protenix_mini` | " | 8 | 128 | 88.4 | 0.00410 | 4.6e-05 |
-| `protenix_tiny` | " | 8 | 128 | 103.5 | 0.00371 | 3.6e-05 |
 | `openfold3` | `~/openfold-3` | 24 | 128 | 1020.9 | 4.03400 | 4.0e-03 |
 | `openbind0` | " | 24 | 128 | 1073.9 | 1.75635 | 1.6e-03 |
 | `intellifold2` | `~/IntelliFold` | 24 | 512 | 60.7 | 0.00702 | 1.2e-04 |
@@ -295,10 +309,6 @@ plausible correlation.
 |---|---|---|---|---|
 | `protenix2` | 0.999985 | 0.999989 | 1.000000 | 0.999999 |
 | `protenix1` | 0.999999 | 1.000000 | 1.000000 | 1.000000 |
-| `protenix1_20250630` | 0.999998 | 0.999996 | 0.999999 | 0.999998 |
-| `protenix05` | 0.999999 | 1.000000 | 1.000000 | 1.000000 |
-| `protenix_mini` | 1.000000 | 1.000000 | 1.000000 | 1.000000 |
-| `protenix_tiny` | 1.000000 | 1.000000 | 1.000000 | 1.000000 |
 
 **2c. L4 for the other five (same day).** openfold3, openbind0, intellifold2,
 rosettafold3, opendde -- so with the six protenix models and the three gated by
@@ -430,14 +440,11 @@ correct-but-misplaced chain fails.
 | `boltz2` | 1.196 | **0.276** | 0.457 |
 | `opendde` | 1.327 | 0.298 | 0.876 |
 | `openfold3` | 1.334 | 0.494 | — |
-| `protenix05` | 1.409 | 0.307 | **0.426** |
 | `alphafold3` | 1.412 | 0.564 | — |
 | `intellifold2` | 1.472 | 0.316 | 0.436 |
 | `openbind0` | 1.496 | 0.499 | — |
 | `protenix1` | 1.737 | 1.867 | 0.918 |
 | `protenix2` | 1.754 | 2.090 | 1.253 |
-| `protenix_tiny` | 1.774 | 0.387 | 0.871 |
-| `protenix_mini` | 2.129 | 0.339 | 0.439 |
 
 Twelve models, where seven had a modality number before and five had only a
 6MRR fold. The three em-dashes ran before the ligand-pairing fix below.
@@ -631,9 +638,6 @@ so L0 had never run on them. With the family added to `_LOADERS`/`_MAPPERS`:
 |---|---|---|---|
 | `protenix2` | 4174 | 2 | `confidence_head.lower/upper_bins` — distance-bin EDGES, which our graph computes from config |
 | `protenix1` | 4174 | 2 | the same two |
-| `protenix05` | 4092 | 7 | the bins + **5 template-embedder tensors** |
-| `protenix_mini` | 1612 | 9 | the bins + template embedder + `layernorm_v.bias` |
-| `protenix_tiny` | 1157 | 10 | the above + **`input_embedder.linear_esm`** (449, 2560) |
 | `rosettafold3` | 4075 | 33 | every `attention_pair_bias.ln_0.bias` |
 
 Three findings, in descending order of consequence:
@@ -834,8 +838,6 @@ releases), `denoise_parity.py` covers all six:
 | model | native tensors | unmapped | corr | per-atom mean | per-atom max |
 |---|---|---|---|---|---|
 | `protenix2` | — | 0 | 1.000000 | **0.0000 A** | 0.0000 |
-| `protenix_mini` | 290 | 0 | 0.999428 | 0.207 A | 7.18 |
-| `protenix_tiny` | 290 | 0 | 0.999371 | 0.227 A | 4.11 |
 
 Both small releases land in the same partial band as the other `c_z` 128
 checkpoints, and NOT at protenix2's exact match -- consistent with the open
@@ -852,9 +854,6 @@ an MSA stack agree with native:
 
 | model | pairformer blocks | MSA blocks | single | pair | msa -> pair |
 |---|---|---|---|---|---|
-| `protenix05` | 48 | 4 | 1.00000000 (4.3e-07) | 1.00000000 (9.3e-05) | 1.00000000 (2.6e-05) |
-| `protenix_mini` | 16 | 1 | 1.00000000 (5.0e-06) | 1.00000000 (1.8e-05) | 1.00000000 (6.2e-07) |
-| `protenix_tiny` | 8 | 1 | 1.00000000 (7.7e-06) | 1.00000000 (1.5e-05) | 1.00000000 (8.0e-07) |
 
 (corr, with max relative error in brackets.) It needed the same
 dims-from-constants fix as everything else here: `PairformerStack` builds
