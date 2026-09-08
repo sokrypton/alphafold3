@@ -1140,12 +1140,12 @@ number is not a measurement.**
 `bash dev/oracles/run_all_parity.sh` over all 18 models and the L0-L4 gates,
 after everything below landed:
 
-    OK    86        SKIP  132        WARN  0        FAIL  0
+    OK    87        SKIP  132        WARN  0        FAIL  0        (219 cells)
 
-**Zero WARN and zero FAIL is the claim worth checking, not the 86.** Every
+**Zero WARN and zero FAIL is the claim worth checking, not the 87.** Every
 non-OK cell is a SKIP -- a gate with no adapter for that model, which the gate
 itself says. The interesting number is how many cells are EMPTY, and the answer
-is that 132 of 218 have no oracle: chai1 has no callable native module for most
+is that 132 of 219 have no oracle: chai1 has no callable native module for most
 of them, `alphafold3` is the reference implementation, and the eight esmfold2
 releases have no vendor to compare against for the diffusion path. The driver's
 `summary.tsv` is the honest version of the coverage tables in this file, and
