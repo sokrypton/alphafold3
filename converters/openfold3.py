@@ -887,6 +887,33 @@ def map_openfold3_to_af3(
     return params
 
 
+# OF3 checkpoints ship the diffusion module TWICE. 740 tensors appear under
+# `diffusion_module.` and again, byte-identical, under
+# `sample_diffusion.diffusion_module.` -- verified key by key and value by value
+# on of3-ob-174k (740 prefixed keys, 740 twins, np.array_equal on every one).
+# This converter reads the un-prefixed copy, and every `dm = 'diffusion_module'`
+# lookup here depends on that: `map_diffusion_head`'s own guard is
+# `_has(sd, f'{dm}.diffusion_conditioning.layer_norm_z.weight')`, so pointing it
+# at the prefixed names would silently return early and map NO diffusion head at
+# all.
+#
+# `dev/audit_coverage.py` flagged 32 of the twins as unaccounted -- not 740,
+# because it falls back to matching VALUES and 708 of them match a converted
+# leaf of the same size. The 32 that do not are the pair-logits projections,
+# which are transposed and regrouped by super-block into one bigger array, and
+# `linear_ref_element`, whose 119th column is dropped with the element-index
+# shift. Declaring the prefix dead is what tells the audit these are duplicates
+# rather than misses; without it the L0 gate reports a WARN forever and a real
+# omission would hide behind it.
+DEAD_TENSORS = (
+    (r'^sample_diffusion\.',
+     'byte-identical duplicate of the un-prefixed diffusion_module.* tensor '
+     'this converter reads; OF3 checkpoints carry both copies'),
+    (r'^version_tensor$',
+     'the checkpoint format version, not a weight'),
+)
+
+
 # ─── Checkpoint I/O ───────────────────────────────────────────────────────────
 
 def load_of3_checkpoint(ckpt_path: Path | str, use_ema: bool = True) -> dict:

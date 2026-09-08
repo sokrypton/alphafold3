@@ -574,6 +574,17 @@ def map_template_features(fe, params, n_dgram=39):
   }
   for k, v in out.items():
     params[f'{single}/{k}'] = {'weights': v}
+  # The fused projection's BIAS. AF3's nine per-feature Linears are bias-free and
+  # summed, so there is no slot for it; the graph adds it once under
+  # model_config.FUSED_TEMPLATE_FEATURE_BIAS. Dropping it was a real omission --
+  # it lands on the 64-d activation entering the template pairformer, where the
+  # per-position LayerNorms make a constant vector matter, and it went unnoticed
+  # because chai1 had no L0 gate until its multi-component checkpoint could be
+  # audited.
+  # A bare hk.get_parameter inside SingleTemplateEmbedding, so the SCOPE is the
+  # module and the leaf is the name -- not a scope of its own.
+  params.setdefault(single, {})['template_feature_bias'] = C._arr(
+      fe['input_projs.TEMPLATES.0.bias'])
   return params
 
 
@@ -1162,6 +1173,12 @@ def map_input_embedder(sds, params):
   }
   params['diffuser/chai1_single_proj_in_trunk'] = {
       'weights': C.t(np.asarray(te['token_single_proj_in_trunk.weight']))}
+  # The DIFFUSION module's s_inputs is a second, separately trained projection
+  # of the same 768-d concatenation -- see
+  # model_config.SEPARATE_STRUCTURE_TARGET_FEAT. Mapping only the trunk one fed
+  # the diffusion conditioning the wrong vector.
+  params['diffuser/chai1_single_proj_in_structure'] = {
+      'weights': C.t(np.asarray(te['token_single_proj_in_structure.weight']))}
 
   # AF3 re-projects target_feat into the trunk's single track; chai's s_init IS
   # that track, so the projection is the identity.
@@ -1241,6 +1258,28 @@ def map_chai1_to_af3(sds):
   if 'distogram_head' in sds:
     map_distogram_head(sds['distogram_head'], params)
   return params
+
+
+# What chai ships and this converter deliberately does not map. Each was checked
+# against the shipped TorchScript graphs, not assumed: `dev/audit_coverage.py
+# chai1` reported five unaccounted tensors the first time it could run on a
+# multi-component checkpoint, and the check that separated them was whether the
+# graph's `forward_*` methods reference the tensor at all.
+#
+#   * `token_single_proj_in_structure` DID appear in every forward_*, and was a
+#     real omission -- now mapped, see SEPARATE_STRUCTURE_TARGET_FEAT.
+#   * `input_projs.TEMPLATES.0.bias` was likewise real -- now mapped, see
+#     FUSED_TEMPLATE_FEATURE_BIAS.
+#   * the three below are genuinely unused on our path.
+DEAD_TENSORS = (
+    (r'^confidence_head\.atom_distance_v_bins$',
+     'PAE/PDE bin edges (a buffer, not a weight); our confidence head derives '
+     'the same edges from the configured bin count'),
+    (r'\.Token(DistanceRestraint|PairPocketRestraint)\.radii$',
+     'the distance buckets for chai\'s pairwise RESTRAINT features. We always '
+     'feed the "-1" no-restraint sentinel (map_pair_init writes its mask '
+     'column into the constant vector), so no distance is ever bucketed'),
+)
 
 
 def convert_chai1_weights(model_dir, out_dir=None):

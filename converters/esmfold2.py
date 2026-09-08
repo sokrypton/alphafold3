@@ -501,7 +501,21 @@ DEAD_TENSORS = (
     (r'token_transformer\.attn_blocks\.\d+\.pair_norm\.bias',
      'a per-head constant on every logit; cancels in the softmax over j '
      '(float64 max|d| 5.6e-16)'),
+    # `s_inputs_to_single` is DEAD in the released checkpoint -- see
+    # CONFIDENCE_DEAD_PARAMS above, where the same fact is what stops the
+    # confidence head from consuming it. The reference-tree mapper still carries
+    # it (as `unused_s_inputs_to_single`) so the oracle can prove it is unread;
+    # the GRAPH mapper, which is what ships, correctly leaves it out.
+    (r'^confidence_head\.s_inputs_to_single\.weight$',
+     'dead in the released checkpoint (CONFIDENCE_DEAD_PARAMS): the confidence '
+     'head never reads s_inputs, so the graph blob omits it'),
 )
+
+# The conversion writes TWO artifacts and the audit has to see both: the blob
+# from map_esmfold2_to_af3_graph, and `<model>.lm.npz` from language_model_shim
+# (the ESM-C pair shim runs as its own graph). Without this the shim's 10
+# `language_model.base_z_*` tensors read as unaccounted for.
+AUDIT_EXTRA = ('language_model_shim',)
 
 
 def confidence_head(sd, dims, prefix='confidence_head'):

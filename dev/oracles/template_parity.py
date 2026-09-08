@@ -615,8 +615,14 @@ def main(argv=None):
 
   if os.environ.get('JAX_DEFAULT_MATMUL_PRECISION') != 'highest':
     raise SystemExit('set JAX_DEFAULT_MATMUL_PRECISION=highest')
-  if args.model not in NATIVES:
-    raise SystemExit('no native adapter for %r' % args.model)
+  # OURS_ONLY=1 runs our side alone, with no native comparison. It exists for
+  # chai1, the one model whose template embedder cannot be invoked from the
+  # shipped artifacts, and it is only useful with ZERO=<scope>/<leaf> -- an
+  # output with nothing to compare against is not a gate.
+  if args.model not in NATIVES and not os.environ.get('OURS_ONLY'):
+    raise SystemExit('no native adapter for %r (OURS_ONLY=1 with '
+                     'ZERO=<scope>/<leaf> sizes one parameter instead)'
+                     % args.model)
 
   import fold_check
   from alphafold3.model import feat_batch
@@ -670,6 +676,9 @@ def main(argv=None):
   hsu = c_z > 128
   if os.environ.get('TMPL_HSU') is not None:
     hsu = bool(int(os.environ['TMPL_HSU']))
+  if args.model not in NATIVES:
+    ours(args.model, cfg, model_dir, one, z, pair_mask, multichain)
+    return 0
   ref = NATIVES[args.model](args.model, feats, z, pair_mask, hsu)
   got = ours(args.model, cfg, model_dir, one, z, pair_mask, multichain)
   print('  shapes: ours %s native %s' % (got.shape, ref.shape))
@@ -697,7 +706,13 @@ def ours(model, cfg, model_dir, templates, z, pair_mask, multichain):
            'openfold3': template_modules.TemplateEmbedding,
            'openbind0': template_modules.TemplateEmbedding,
            'intellifold2': template_modules.TemplateEmbedding,
-           'opendde': template_modules.TemplateEmbedding}.get(
+           'opendde': template_modules.TemplateEmbedding,
+           # chai1's blob uses AF3's own scope names
+           # (template_embedding/single_template_embedding + output_linear), so
+           # it is AF3's TemplateEmbedding, not protenix's fused one. There is no
+           # NATIVE side for chai1 (TorchScript, no callable submodule forward),
+           # but `ours` alone is still useful -- see BIAS_EFFECT below.
+           'chai1': template_modules.TemplateEmbedding}.get(
                model, template_modules.Protenix2TemplateEmbedding)
     return cls(cfg.evoformer.template, cfg.global_config)(
             query_embedding=jnp.asarray(z), templates=templates,
@@ -725,7 +740,31 @@ def ours(model, cfg, model_dir, templates, z, pair_mask, multichain):
   print('  ours: %d scopes, %d unmapped %s'
         % (len(init), len(unmapped), unmapped[:3]))
   assert not unmapped, 'our template embedder is partly at init'
-  return np.asarray(f.apply(params, jax.random.PRNGKey(0)))
+  out = np.asarray(f.apply(params, jax.random.PRNGKey(0)))
+
+  # ZERO=<scope>/<leaf> reruns with one parameter zeroed and reports what it was
+  # worth. This is how a dropped weight gets SIZED when no native module can be
+  # called: a fold cannot do it (chai1's 5K9P templated mean moved 1.779 vs
+  # 1.811 with the bias on/off, and its no-template 6MRR moved 0.017 in the same
+  # comparison -- i.e. both inside the process-to-process band), but the module
+  # output is deterministic and the difference is exactly the term's worth.
+  zero = os.environ.get('ZERO')
+  if zero:
+    sc, leaf = zero.rsplit('/', 1)
+    if sc not in params or leaf not in params[sc]:
+      raise SystemExit('no such parameter %r (have e.g. %s)'
+                       % (zero, sorted(params.get(sc, {}))[:4]))
+    keep = params[sc][leaf]
+    params[sc][leaf] = np.zeros_like(keep)
+    alt = np.asarray(f.apply(params, jax.random.PRNGKey(0)))
+    d = np.abs(out - alt)
+    print('  ZERO %s: |param| max %.4f -> output max|d| %.5f  '
+          'rms(out) %.4f  relative %.4f  corr %.6f'
+          % (zero, np.abs(keep).max(), d.max(),
+             float(np.sqrt((out ** 2).mean())),
+             d.max() / max(float(np.sqrt((out ** 2).mean())), 1e-9),
+             float(np.corrcoef(out.ravel(), alt.ravel())[0, 1])))
+  return out
 
 
 if __name__ == '__main__':

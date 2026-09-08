@@ -437,6 +437,44 @@ TRANSPOSED_COLUMN_PAIR_BIAS = ('openfold3', 'openbind0', 'opendde', 'boltz2') + 
 # gets whichever behaviour its parent happened to have.
 TEMPLATE_STACK_OUTER_RESIDUAL = ('boltz2',)
 
+# Models whose template FEATURE projection is one fused Linear WITH A BIAS.
+#
+# AF3 embeds template features as nine separate bias-free Linears whose outputs
+# are summed. chai instead runs one `input_projs.TEMPLATES.0`, a Linear(76 -> 64,
+# bias=True) over the fused feature stream, so `converters/chai1.py` splits its
+# WEIGHT across AF3's slots -- and the bias had nowhere to go and was dropped.
+#
+# It does not cancel. The 64-d activation goes straight into the template
+# pairformer, whose LayerNorms normalise per position across channels: a constant
+# vector added at every (i, j) changes each position's mean and variance and so
+# its normalised direction. That is unlike the pair-bias LayerNorm offsets in
+# rosettafold3/esmfold2 DEAD_TENSORS, which land inside a softmax over j and
+# genuinely vanish -- the distinction is WHERE the constant lands, not how big it
+# is (chai's is absmax 0.30).
+#
+# Found by giving chai1 an L0 gate for the first time: its loader returns five
+# state dicts rather than one, so `dev/audit_coverage.py` could not run on it at
+# all, and 5 of its 1912 tensors were unaccounted the moment it could.
+FUSED_TEMPLATE_FEATURE_BIAS = ('chai1',)
+
+# Models that project the token embedding TWICE -- once for the trunk and once
+# for the diffusion module -- where AF3 computes one `s_inputs` for both.
+#
+# chai's TokenInputEmbedding returns `(s_trunk, s_structure, z_init)`:
+#     input13     = cat[pooled_atom_single, token_single_input_feats]   # 768
+#     s_structure = token_single_proj_in_structure(input13)             # 384
+#     s_trunk     = token_single_proj_in_trunk(input13)                 # 384
+# read straight off the shipped token_embedder graph, whose return node is
+# `TupleConstruct(%s_trunk, %s_structure, %z_init)`. Two independently trained
+# Linears over the same input, and the diffusion conditioning was fitted against
+# the second one.
+#
+# Also found by chai1's first L0 gate. `token_single_proj_in_structure.weight`
+# read as unaccounted; unlike the four genuinely dead tensors beside it, it is
+# called in every `forward_*` of that graph -- which is the check that separates
+# "the converter skipped it" from "the vendor ships it and never uses it".
+SEPARATE_STRUCTURE_TARGET_FEAT = ('chai1',)
+
 
 # Models whose ATOM cross-attention transformer LayerNorms the atom-pair
 # conditioning per block, rather than once for the stack.

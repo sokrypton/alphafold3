@@ -415,6 +415,20 @@ def map_protenix2_to_af3(sd, **overrides):
   return params
 
 
+# `confidence_head.lower_bins` / `upper_bins` are the PAE/PDE bin EDGES, a pair
+# of registered buffers rather than trained weights: protenix keeps its
+# boundaries in the module, and our confidence head derives the same edges from
+# the bin count in the config. So they are deliberately unmapped, not missed --
+# and saying so in a table the L0 audit reads is the difference between an
+# audit that exits clean and one that reports a permanent WARN, behind which a
+# real omission could hide.
+DEAD_TENSORS = (
+    (r'confidence_head\.(lower|upper)_bins$',
+     'PAE/PDE bin edges (a registered buffer, not a weight); our head derives '
+     'the same edges from the configured bin count'),
+)
+
+
 # ─── checkpoint I/O ──────────────────────────────────────────────────────────
 def load_protenix_checkpoint(ckpt_path):
   """Load protenix-v2.pt -> state dict with the `module.` prefix stripped."""

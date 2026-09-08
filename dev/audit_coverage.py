@@ -39,6 +39,7 @@ counted as consumed. That second pass is why the report distinguishes
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 import numpy as np
@@ -174,6 +175,9 @@ _LOADERS = {
     'boltz2': ('boltz2', None,
                '/home/ubuntu/boltz2_weights/boltz2_conf.ckpt'),
     'opendde': ('opendde', None, '/home/ubuntu/opendde_weights/opendde.pt'),
+    # chai's loader takes a DIRECTORY (five TorchScript archives) and returns
+    # {component: state_dict} -- see the multi-component branch in main().
+    'chai1': ('chai1', 'load_chai1', '/home/ubuntu/chai1_weights'),
     # the ESMFold2 family: one loader, the variant chosen by the directory
     **{m: ('esmfold2', 'load_esmfold2_checkpoint',
            '/home/ubuntu/esmfold2_variants/%s' % hub)
@@ -198,6 +202,7 @@ _MAPPERS = {
     'intellifold2': 'map_intellifold2_to_af3',
     'boltz2': 'map_boltz2_to_af3',
     'opendde': 'convert_opendde',
+    'chai1': 'map_chai1_to_af3',
     **{m: 'map_esmfold2_to_af3_graph' for m in (
         'esmfold2', 'esmfold2_fast', 'esmfold2_exp', 'esmfold2_exp_fast',
         'esmfold2_exp_cutoff2025', 'esmfold2_exp_fast_cutoff2025',
@@ -235,13 +240,83 @@ def main(argv=None):
 
   import importlib
 
+  if args.model not in _LOADERS:
+    # Not a KeyError with a traceback: `alphafold3` has no conversion to audit
+    # (it IS the reference implementation and its parameters ship in AF3's own
+    # format), and a model added to the registry but not here would otherwise
+    # look like a crash. Either way the caller needs the reason, not a stack.
+    raise SystemExit(
+        'no converter registered for %r, so there is nothing to audit at L0. '
+        'alphafold3 and the af2 pair are n/a by construction; anything else '
+        'needs a _LOADERS/_MAPPERS entry here.' % args.model)
   mod_name, loader_name, default_ckpt = _LOADERS[args.model]
   mod = importlib.import_module(f'converters.{mod_name}')
   path = args.checkpoint or default_ckpt
-  sd_raw = (getattr(mod, loader_name)(path) if loader_name
+  # A local snapshot is preferred but not guaranteed: the ESMFold2 releases are
+  # downloaded per variant, and the BASE model (`biohub/ESMFold2`) was never
+  # pulled to ~/esmfold2_variants -- which made L0 for `esmfold2` a
+  # FileNotFoundError rather than a result. Fall back to the hub cache, which is
+  # where the other harnesses (esmfold2_msa_dump.py) already find it.
+  if not os.path.exists(path) and args.model.startswith('esmfold2'):
+    import glob
+    from alphafold3.model import model_registry
+    hub = model_registry.ESMFOLD2_HUB_IDS[args.model]
+    # Read the hub cache off disk rather than through huggingface_hub: that
+    # package is not in the GPU venv and must not be installed into it, and the
+    # cache layout is stable enough to glob. If it is not there either, say which
+    # model and which id, because "FileNotFoundError: .../ESMFold2" does not.
+    hits = sorted(glob.glob(os.path.expanduser(
+        '~/.cache/huggingface/hub/models--biohub--%s/snapshots/*' % hub)))
+    if not hits:
+      raise SystemExit(
+          'no weights for %s: neither ~/esmfold2_variants/%s nor a hub cache '
+          'entry for biohub/%s. Fetch it in ~/venv_esm (which has '
+          'huggingface_hub) e.g. via dev/oracles/esmfold2_msa_dump.py.'
+          % (args.model, hub, hub))
+    path = hits[-1]
+    print('  (no local snapshot; using the hub cache at %s)' % path)
+  loaded = (getattr(mod, loader_name)(path) if loader_name
             else _plain_load(path))
-  sd = _Watched(sd_raw)
-  params = getattr(mod, _MAPPERS[args.model])(sd)
+
+  # TWO checkpoint SHAPES. Most converters take one flat state dict; chai
+  # publishes five separate TorchScript archives and `map_chai1_to_af3` takes
+  # {component: state_dict}. Detected rather than flagged per model: if every
+  # value is itself a dict of arrays, watch each component separately and report
+  # keys as `component.key`, which is also how chai's own docs name them.
+  # Without this chai1 had no L0 gate at all -- the one model whose weights are
+  # least inspectable by other means, since its modules have no callable forward.
+  def _is_multi(d):
+    return bool(d) and all(isinstance(v, dict) for v in d.values())
+
+  if _is_multi(loaded):
+    watched = {c: _Watched(d) for c, d in loaded.items()}
+    params = getattr(mod, _MAPPERS[args.model])(watched)
+    sd_raw = {'%s.%s' % (c, k): v for c, d in loaded.items() for k, v in d.items()}
+    sd = _Watched(sd_raw)
+    sd.seen = {'%s.%s' % (c, k) for c, w in watched.items() for k in w.seen}
+  else:
+    sd_raw = loaded
+    sd = _Watched(sd_raw)
+    params = getattr(mod, _MAPPERS[args.model])(sd)
+
+  # A conversion may write MORE THAN ONE artifact, and the audit has to see all
+  # of them or it reports the others' weights as unmapped. esmfold2 is the case:
+  # `convert_esmfold2_weights` writes the blob from map_esmfold2_to_af3_graph AND
+  # a separate `<model>.lm.npz` from `language_model_shim` -- the ESM-C pair shim
+  # runs as its own graph, 40 MB against the blob's 800, and a fold that skips
+  # ESM-C never loads it. Auditing the blob mapper alone called those 10 tensors
+  # unaccounted for.
+  #
+  # So a converter declares the extras by name in AUDIT_EXTRA and they are merged
+  # here. This is the same two-directions point as converter-coverage-audit: the
+  # question is whether every checkpoint tensor reaches SOME artifact, not whether
+  # it reaches the one artifact this script happens to build.
+  for extra in getattr(mod, 'AUDIT_EXTRA', ()):
+    got = getattr(mod, extra)(sd)
+    if got and not isinstance(next(iter(got.values())), dict):
+      got = {extra: got}                     # a flat leaf -> value tree
+    for scope, leaves in got.items():
+      params.setdefault(scope, {}).update(leaves)
 
   missing = audit(args.model, sd, params, args.verbose)
 

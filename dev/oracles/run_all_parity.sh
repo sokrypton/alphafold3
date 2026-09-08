@@ -65,27 +65,38 @@ from alphafold3.model import model_config as c; print(" ".join(c.MODELS))')}
 
 # gate <name> <script+args...> -- runs one gate for one model.
 #   $1 log tag   $2 model   $3 grep pattern for the headline   rest: argv
+# A non-zero exit is not automatically a failure here, which is the whole reason
+# classification is its own function: a gate with no adapter for a model SAYS so
+# and exits 1 (SKIP), and dev/audit_coverage.py exits 1 to REPORT unaccounted
+# checkpoint tensors, which is a finding to read rather than a crash (WARN).
+# Calling those FAIL would bury the real failures in noise. Applied to cached
+# logs too, so a re-run re-classifies instead of keeping an old verdict.
+classify () {  # classify <log> -> status on stdout
+  local log=$1
+  local rc; rc=$(sed -n 's/^__GATE_EXIT //p' "$log" | tail -1)
+  if [ "$rc" = 0 ]; then echo OK; return; fi
+  if [ "$rc" = 124 ]; then echo TIMEOUT; return; fi
+  if grep -qi 'no native adapter\|has no msa_encoder\|has no final-block\|run first:\|No module named\|KeyError' "$log"; then
+    echo SKIP; return
+  fi
+  if grep -qi 'unaccounted for\|unmapped' "$log"; then echo WARN; return; fi
+  echo FAIL
+}
+
 gate () {
   local tag=$1 model=$2 pat=$3; shift 3
   local log=$LOGDIR/$tag.$model.log
-  if [ -z "${FORCE:-}" ] && [ -f "$log" ] && grep -q '^__GATE_EXIT ' "$log"; then
-    printf '  %-28s %-28s cached\n' "$tag" "$model"
-    return
+  if [ -n "${FORCE:-}" ] || [ ! -f "$log" ] || ! grep -q '^__GATE_EXIT ' "$log"; then
+    local overlay; overlay=$(vendor "$model")
+    local pp=src:.
+    [ -n "$overlay" ] && pp=$pp:$overlay
+    ( JAX_DEFAULT_MATMUL_PRECISION=highest PYTHONPATH=$pp \
+        timeout "${GATE_TIMEOUT:-3600}" $PY "$@" 2>&1
+      echo "__GATE_EXIT $?" ) > "$log"
   fi
-  local overlay; overlay=$(vendor "$model")
-  local pp=src:.
-  [ -n "$overlay" ] && pp=$pp:$overlay
-  ( JAX_DEFAULT_MATMUL_PRECISION=highest PYTHONPATH=$pp \
-      timeout "${GATE_TIMEOUT:-3600}" $PY "$@" 2>&1
-    echo "__GATE_EXIT $?" ) > "$log"
-  local rc; rc=$(sed -n 's/^__GATE_EXIT //p' "$log" | tail -1)
+  local status; status=$(classify "$log")
   local head; head=$(grep -E "$pat" "$log" | tail -1)
-  local status=FAIL
-  if [ "$rc" = 0 ]; then status=OK
-  elif grep -qi 'no native adapter\|has no msa_encoder\|run first:\|No module named' "$log"; then status=SKIP
-  elif [ "$rc" = 124 ]; then status=TIMEOUT
-  fi
-  printf '  %-28s %-28s %-8s %s\n' "$tag" "$model" "$status" "${head:0:96}"
+  printf '  %-24s %-30s %-8s %s\n' "$tag" "$model" "$status" "${head:0:88}"
   printf '%s\t%s\t%s\t%s\n' "$tag" "$model" "$status" "$head" >> "$SUMMARY"
 }
 

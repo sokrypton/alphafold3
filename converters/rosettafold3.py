@@ -60,6 +60,28 @@ def _t(w):
   return C.t(w)
 
 
+# rf3 carries an OFFSET on every `attention_pair_bias.ln_0` -- the LayerNorm over
+# the PAIR representation, whose output goes straight into `to_b`, the pair-logits
+# projection. 33 tensors, and this converter reads only the scale. That is not an
+# omission: the offset contributes `offset @ to_b`, one constant per head added to
+# EVERY logit of that head, and softmax is invariant to a constant per row.
+#
+# Measured rather than argued (block 0 of the atom encoder, |offset| up to 0.496,
+# float64): the logit shift has std 2e-16 across (i, j) -- i.e. it IS a single
+# constant -- and the softmax changes by 2.8e-16, machine epsilon. Same position
+# and same proof as esmfold2's `pair_norm.bias` (converters/esmfold2.DEAD_TENSORS).
+#
+# Worth being explicit because the magnitude invites the opposite conclusion: 0.5
+# is not small, and a reader checking only |offset| would call this a dropped bias
+# of the kind [[correlation-hides-bias]] warns about. The difference is WHERE it
+# lands -- inside a softmax over j rather than in an additive output path.
+DEAD_TENSORS = (
+    (r'attention_pair_bias\.ln_0\.bias$',
+     'a per-head constant on every logit of that head; cancels in the softmax '
+     'over j (float64 max|d| 2.8e-16, offsets up to 0.496)'),
+)
+
+
 def load_rf3_checkpoint(ckpt_path, use_ema=True):
   """Load rf3_foundry_*.ckpt -> state dict. Prefer the `shadow.*` EMA copy (use_ema),
   else `model.*`; strip the prefix. Returns {leaf: np.ndarray-able tensor}."""

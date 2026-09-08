@@ -186,7 +186,12 @@ def create_target_feat_embedding(
     soft_seq=None,
     design_mask=None,
 ) -> jnp.ndarray:
-  """Create target feature embedding."""
+  """Create target feature embedding.
+
+  Returns one tensor, or `(trunk, structure)` for the models in
+  `model_config.SEPARATE_STRUCTURE_TARGET_FEAT`, which project the same input
+  twice -- once for the trunk and once for the diffusion module.
+  """
 
   dtype = jnp.bfloat16 if global_config.bfloat16 == 'all' else jnp.float32
 
@@ -298,8 +303,26 @@ def create_target_feat_embedding(
             config.seq_channel, use_bias=False,
             name='chai1_esm_embedding')(esm.astype(dtype))
       s_cat = jnp.concatenate([enc.token_act.astype(dtype), token_feats], axis=-1)
-      return hm.Linear(config.seq_channel, use_bias=False,
-                       name='chai1_single_proj_in_trunk')(s_cat).astype(dtype)
+      # TWO projections of the same concatenation, not one. chai's
+      # TokenInputEmbedding returns `(s_trunk, s_structure, z_init)`:
+      #     s_structure = token_single_proj_in_structure(input13)
+      #     s_trunk     = token_single_proj_in_trunk(input13)
+      # and feeds the trunk the first and the DIFFUSION module the second. AF3
+      # computes one `s_inputs` and hands it to both, so the port fed the
+      # diffusion conditioning the trunk's projection -- a different 384-d
+      # vector from the one those weights were trained against.
+      #
+      # Found by giving chai1 an L0 gate: `token_single_proj_in_structure.weight`
+      # was one of five unaccounted tensors, and unlike the other four it is
+      # called in EVERY forward_* of the shipped token_embedder graph, whose
+      # return is `TupleConstruct(%s_trunk, %s_structure, %z_init)`.
+      trunk = hm.Linear(config.seq_channel, use_bias=False,
+                        name='chai1_single_proj_in_trunk')(s_cat).astype(dtype)
+      if global_config.model in model_config.SEPARATE_STRUCTURE_TARGET_FEAT:
+        return trunk, hm.Linear(
+            config.seq_channel, use_bias=False,
+            name='chai1_single_proj_in_structure')(s_cat).astype(dtype)
+      return trunk
 
     target_feat = jnp.concatenate([target_feat, enc.token_act], axis=-1).astype(
         dtype
@@ -694,6 +717,12 @@ class Model(hk.Module):
         soft_seq=soft_seq,
         design_mask=design_mask,
     )
+    # chai projects the token embedding twice -- see
+    # model_config.SEPARATE_STRUCTURE_TARGET_FEAT. The trunk gets the first and
+    # the diffusion module the second, applied to `diff_emb` below.
+    target_feat_structure = None
+    if isinstance(target_feat, tuple):
+      target_feat, target_feat_structure = target_feat
 
     def recycle_body(_, args):
       prev, key = args
@@ -813,6 +842,13 @@ class Model(hk.Module):
     else:
       diff_batch = batch
       diff_emb = embeddings
+      if target_feat_structure is not None:
+        # The diffusion module's own s_inputs. Not a copy of the dict: the
+        # confidence head below reads `embeddings['target_feat']`, and chai's
+        # confidence head is fed the TRUNK projection (its own graph takes the
+        # trunk single), so only the diffusion path is switched.
+        diff_emb = dict(embeddings)
+        diff_emb['target_feat'] = target_feat_structure
 
     samples = self._sample_diffusion(
         diff_batch,

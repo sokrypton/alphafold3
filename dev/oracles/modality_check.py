@@ -436,11 +436,24 @@ def main(argv=None):
       # `--use_msa false` does -- the last input difference between the two
       # sides when comparing against native.
       msa = '' if os.environ.get('NO_MSA') else '>q\n%s\n' % seq
+      # TEMPLATE=1 hands the model the target's OWN structure as a template.
+      # The reference coordinates come from the same mmCIF, so a model that uses
+      # its template well scores near zero and one that ignores it scores its
+      # de-novo number -- which makes this the only handle on chai1's template
+      # embedder, the one module that cannot be gated directly (TorchScript, no
+      # callable submodule forward). Same target and same template as
+      # template_parity.py's module gate, so the two numbers are comparable.
+      tmpls = []
+      if os.environ.get('TEMPLATE'):
+        import template_parity
+        _, tmpl = template_parity._self_template(case['cif'], case['chain'])
+        tmpls = [tmpl]
       chains = [folding_input.ProteinChain(
           id='A', sequence=seq, ptms=list(case['ptms']),
-          unpaired_msa=msa, paired_msa='', templates=[])]
-      print('  modifications: %s (msa: %s)'
-            % (case['ptms'], 'none' if not msa else 'self'))
+          unpaired_msa=msa, paired_msa='', templates=tmpls)]
+      print('  modifications: %s (msa: %s, template: %s)'
+            % (case['ptms'], 'none' if not msa else 'self',
+               'SELF' if tmpls else 'none'))
     elif kind == 'ligand':
       if case.get('json'):
         fi = folding_input.Input.from_json(open(case['json']).read())

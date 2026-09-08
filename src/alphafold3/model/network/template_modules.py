@@ -403,6 +403,12 @@ class SingleTemplateEmbedding(hk.Module):
             initializer='relu',
             name=f'template_pair_embedding_{i}',
         )(x)
+      if self.global_config.model in model_config.FUSED_TEMPLATE_FEATURE_BIAS:
+        # chai's fused feature projection carries a bias, and nine bias-free
+        # Linears summed cannot express it -- so it is added once, here. See
+        # model_config.FUSED_TEMPLATE_FEATURE_BIAS for why it does not cancel.
+        act += hk.get_parameter('template_feature_bias', (num_channels,),
+                                act.dtype, init=jnp.zeros)
       return act
 
     act = construct_input(query_embedding, templates, multichain_mask_2d)
