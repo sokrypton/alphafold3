@@ -988,10 +988,34 @@ does NOT cover. `dev/oracles/msa_parity.py` starts on the rest:
 | `openfold3` | **1.000000** | 1.0000 |
 | `openbind0` | **1.000000** | 1.0000 |
 | `intellifold2` | **1.000000** | 0.9999 |
+| `opendde` | **1.000000** | 1.0000 |
 | `rosettafold3` | 0.999971 | 0.9976 |
+| `boltz2` | **0.974331** | 1.0584 |
 
-With `prot_parity.py`'s protenix2 and protenix1 that is **6 of the 10** models
-carrying an MSA stack, and every model this fork centres on.
+With `prot_parity.py`'s protenix2 and protenix1 that is **8 of the 10** models
+carrying an MSA stack. Only chai1 (TorchScript, no callable submodule forward)
+and the esmfold2 family are unmeasured.
+
+**boltz2 is the one that is not exact, and it does NOT compound.** One block
+reads 0.967594 and four read 0.974331 -- so the divergence is present in a
+SINGLE block rather than accumulating, which puts it inside the layer body:
+`pair_weighted_averaging`, `msa_transition`, `outer_product_mean`, or the
+`pairformer_layer`. The last is the least likely, since boltz2's 48-block trunk
+pairformer is gated at 1.000000/1.000000 on the same class.
+
+Checked and not the cause: the update-then-OPM order (ours gates on it and
+opendde, which shares that order, reads 1.000000), `use_paired_feature` (read off
+`msa_proj`'s width, 33+3), `get_dropout_mask` (returns ones under `eval()`), the
+OPM normalisation (`CLAMPED_OPM_NORM` is esmfold2-only and the difference there
+is 1e-3 relative, not 3%), and anything applied to `m`/`z` before the loop
+(nothing is).
+
+**Recorded as OPEN, and it may still be the harness.** Three of this session's
+new gates produced plausible degraded numbers that turned out to be harness
+faults, and this one has not yet been cross-checked against an independent
+gate the way those were. What would settle it: instantiate boltz's `MSALayer`
+alone and compare the `m` output as well as `z`, which splits the four
+sublayers.
 
 It compares the PAIR output, which is the half that survives into the trunk;
 comparing only the msa rows would miss a wrong outer-product normalisation
@@ -1062,7 +1086,7 @@ Enumerated against the graph's own module list rather than from memory:
 | module | models carrying it | gated on | note |
 |---|---|---|---|
 | ~~template embedder~~ | 9 | **8** | gated 2026-09-08, found TWO bugs; every model but chai1 |
-| **MSA module** | 10 | **6** | `protenix2`/`protenix1` (`prot_parity.py`) + rf3, both of3, if2 (`msa_parity.py`). LEFT: boltz2 (needs boltz's own feature layout), opendde, chai1 (TorchScript), esmfold2 |
+| **MSA module** | 10 | **8** | all but chai1 (TorchScript) and esmfold2; boltz2 measured at 0.974 and OPEN |
 | ~~distogram head~~ | all | **8** | CLOSED 2026-09-08, `dgram_parity.py`; chai1 is n/a (no native head) |
 | ~~input embedder~~ | all | **2** | CLOSED 2026-09-08, `real_trunk_parity.py` |
 | ~~recycling loop~~ | all | **2** | same gate — it compares the trunk AFTER all recycles |
