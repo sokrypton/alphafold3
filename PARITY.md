@@ -37,8 +37,8 @@ need the vendor's forward pass, so coverage tracks which natives are installed.
 | `protenix05` | ✓ | ✓ | ~ | · | ✓ | ✓ | · |
 | `protenix1` | ✓ | ✓ | ~ | · | ✓ | ✓ | · |
 | `protenix1_20250630` | ✓ | ✓ | ~ | · | ✓ | ✓ | · |
-| `protenix_mini` | ✓ | ✓ | ~ | · | ✓ | ✓ | · |
-| `protenix_tiny` | ✓ | ✓ | ~ | · | ✓ | ✓ | · |
+| `protenix_mini` | ✓ | ✓ | ~ | ~ | ✓ | ✓ | · |
+| `protenix_tiny` | ✓ | ✓ | ~ | ~ | ✓ | ✓ | · |
 | `boltz2` | ✓ | ✓ | ✓ | · | ✓ | ✓ | ✓ |
 | `opendde` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `rosettafold3` | ✓ | ✓ | ~ | · | ✓ | ✓ | ✓ |
@@ -391,7 +391,10 @@ over softmaxed bins, so a 1e-6 logit difference is worth milli-angstroms.
 **2. L3, and L2's other two thirds** — for `openfold3`, `intellifold2`,
 `protenix2` and `rosettafold3`. Token transformers are gated (2a) and so are the
 confidence heads (2b/2c); what remains is the diffusion CONDITIONING, the atom
-encoder/decoder, and then the denoise step. `opendde` is the one model with no
+encoder/decoder, and then the denoise step. DONE since: the atom encoder for
+both of3 releases, `protenix2` and now `intellifold2`; L3 for all six protenix
+releases. LEFT: L3 for of3/if2/rf3, the atom encoder for rf3, and the atom
+DECODER, which no gate reaches directly -- L3 covers it only in composition. `opendde` is the one model with no
 L4 -- it has its own head. These
 need new oracles, and they are the four whose ports predate the injection-ladder
 method (dump native's own tensors, inject them, compare our module's output).
@@ -692,11 +695,58 @@ storage and rosettafold3's alphabet: each time, the port compensates for a
 vendor convention somewhere the harness did not know about, and the harness
 looks like the bug.
 
+### intellifold2's atom encoder, and the layout the CONFIG chooses (2026-09-08)
+
+if2's encoder now has the same gate, and it passes on the layout the checkpoint
+actually runs:
+
+| tensor | corr | max\|d\|/rms |
+|---|---|---|
+| `c_atom_cond` | 1.000000 | 2.3e-06 |
+| `q_atom` | 0.999999 | 7.4e-02 |
+| `a_token` | 0.999999 | 4.8e-02 |
+
+Reaching it turned on a fact worth keeping: **if2 ships TWO atom->token
+broadcasts and the config picks one.** The default `repeat_consecutive_with_lens`
+ignores its `lens` argument and repeats each token 24 times, leaving the padding
+slots interleaved on the atom axis; `_advanced` honours the lens and packs the
+real atoms, which is AF3's layout and ours. Run against the default, the same
+weights on the same inputs score `a_token` **0.965** and `q_atom` 0.199 --
+because the 32-atom windows then hold different atoms on the two sides, so the
+local attention has different neighbourhoods. `v2_inference_config.py` sets
+`advanced_conversion = True` for the atom encoder, the decoder and the input
+embedder, so PACKED is what this checkpoint runs, and the harness defaults to it
+(`IF2_DENSE=1` selects the other, which is how the two were told apart).
+
+The diagnostic that made this legible was `c_atom_cond` = 1.000000 under BOTH
+layouts once the comparison selected native's real slots: the per-atom
+embedding, which has no attention in it, cannot see the window layout, so an
+exact input embedding beside a 0.965 output localises the difference to the
+windowing and nowhere else.
+
 `p_atom_pair` stays at 0.94 while the outputs it feeds are exact to 1e-5. Our
 windows clamp an out-of-range key onto atom 0 -- a real atom, repeated -- where
 protenix pads with zeros, and both sides mask those cells out of the attention.
 The outputs agreeing to 1e-5 IS the evidence that those cells never reach the
 result.
+
+### L3 across the whole protenix family (2026-09-08)
+
+With the atom encoder/decoder block counts now READ off the checkpoint rather
+than defaulting to 3 (the fault that left 476 tensors unmapped for the small
+releases), `denoise_parity.py` covers all six:
+
+| model | native tensors | unmapped | corr | per-atom mean | per-atom max |
+|---|---|---|---|---|---|
+| `protenix2` | — | 0 | 1.000000 | **0.0000 A** | 0.0000 |
+| `protenix_mini` | 290 | 0 | 0.999428 | 0.207 A | 7.18 |
+| `protenix_tiny` | 290 | 0 | 0.999371 | 0.227 A | 4.11 |
+
+Both small releases land in the same partial band as the other `c_z` 128
+checkpoints, and NOT at protenix2's exact match -- consistent with the open
+`c_z` 128 atom-stack item below rather than with anything specific to the
+distilled models. 0 missing and 0 unmapped on both sides means the gap is
+numerical, not a weight that never arrived.
 
 ## L1b, the trunk's other half (2026-09-07)
 
@@ -728,7 +778,7 @@ it covers, because the file itself is the only other record:
 | `dev/oracles/trunk_parity.py` | L1 | pairformer stack vs the vendor's module — 7 models |
 | `dev/oracles/prot_parity.py` | L1b | protenix mini/tiny/05 trunk AND MSA module |
 | `dev/oracles/conditioning_parity.py` | L2 | diffusion pair + single conditioning — 6 protenix, rf3 |
-| `dev/oracles/atom_parity.py` | L2 | atom cross-attention encoder, real batch, windowed |
+| `dev/oracles/atom_parity.py` | L2 | atom cross-attention encoder, real batch, windowed — 6 protenix, both of3, intellifold2 |
 | `dev/oracles/diffusion_parity.py`, `l2_all.sh` | L2 | token diffusion transformer — 10 models |
 | `dev/oracles/confidence_parity.py`, `l4_all.sh` | L4 | confidence head — every port |
 | `dev/oracles/fold_check.py` | L5 | one model, one target, CA-RMSD (`MODEL_DIR=` to compare blobs) |
