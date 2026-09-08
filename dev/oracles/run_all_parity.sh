@@ -1,0 +1,204 @@
+#!/bin/bash
+# EVERY parity gate in this directory, over every model, in one resumable run.
+#
+#   bash dev/oracles/run_all_parity.sh                 # L0-L4 (the module gates)
+#   bash dev/oracles/run_all_parity.sh L5 L6           # the fold-level screens
+#   bash dev/oracles/run_all_parity.sh all             # everything
+#   FORCE=1 bash dev/oracles/run_all_parity.sh L1b     # ignore cached logs
+#   MODELS="boltz2 protenix2" bash dev/oracles/run_all_parity.sh
+#
+# WHY A DRIVER AND NOT A LIST IN A DOCUMENT. Every number in PARITY.md came out
+# of one of these scripts with a specific vendor overlay on PYTHONPATH and
+# JAX_DEFAULT_MATMUL_PRECISION=highest, and getting either wrong produces a
+# plausible degraded number rather than an error -- bf16 params and tf32 matmuls
+# faked six protenix2 "bugs" once. A refactor needs to re-run all of it, and
+# reconstructing thirty command lines by hand is where that goes wrong.
+#
+# HOW IT DECIDES WHAT TO RUN. It asks each gate about each model rather than
+# carrying a table: a gate with no adapter for a model exits non-zero with
+# "no native adapter for ...", which is recorded as SKIP, not FAIL. So adding an
+# adapter is picked up here with no change to this file, and the summary doubles
+# as the coverage matrix -- if it disagrees with PARITY.md, PARITY.md is stale.
+#
+# SERIALLY, ALWAYS. Two concurrent jobs OOM a 23 GB card. And note max|d| moves
+# ~20% between processes on the same input (XLA autotunes by timing), so read
+# corr and max|d|/rms; in-process reruns are bit-identical.
+set -u
+cd "$(dirname "$0")/../.."
+ROOT=$PWD
+PY=${PY:-~/venv/bin/python}
+PY_ESM=${PY_ESM:-~/venv_esm/bin/python}
+
+# --- vendor source overlays. One implementation usually serves a whole family,
+#     which is the leverage: ~/protenix covers both protenix releases and
+#     ~/openfold-3 covers openfold3 + openbind0.
+V_protenix=/home/ubuntu/protenix
+V_of3=/home/ubuntu/openfold-3
+V_if2=/home/ubuntu/IntelliFold
+V_dde=/home/ubuntu/OpenDDE
+V_rf3=/home/ubuntu/rf3_extra:/home/ubuntu/foundry_rf3/src:/home/ubuntu/foundry_rf3/models/rf3/src
+V_boltz2=/home/ubuntu/BoltzDesign1/boltz2/src
+# The overlay is per MODEL, and a wrong one is a silent wrong answer, not an
+# ImportError -- rf3's MSA gate ran green against openfold-3 on PYTHONPATH.
+vendor () {
+  case "$1" in
+    protenix1|protenix2)                echo "$V_protenix" ;;
+    openfold3|openbind0)                echo "$V_of3" ;;
+    intellifold2)                       echo "$V_if2" ;;
+    opendde)                            echo "$V_dde" ;;
+    rosettafold3)                       echo "$V_rf3" ;;
+    boltz2)                             echo "$V_boltz2" ;;
+    # Everything else runs with no overlay: chai1's native is a TorchScript
+    # artifact loaded by path, esmfold2's lives in ~/venv_esm (see l1b_esm),
+    # and alphafold3 IS the reference implementation.
+    *)                                  echo "" ;;
+  esac
+}
+
+LOGDIR=${LOGDIR:-$ROOT/dev/oracles/parity_runs/$(date +%Y-%m-%d)}
+mkdir -p "$LOGDIR"
+SUMMARY=$LOGDIR/summary.tsv
+[ -f "$SUMMARY" ] || printf 'gate\tmodel\tstatus\theadline\n' > "$SUMMARY"
+
+MODELS=${MODELS:-$($PY -c 'import sys; sys.path.insert(0,"src")
+from alphafold3.model import model_config as c; print(" ".join(c.MODELS))')}
+
+# gate <name> <script+args...> -- runs one gate for one model.
+#   $1 log tag   $2 model   $3 grep pattern for the headline   rest: argv
+gate () {
+  local tag=$1 model=$2 pat=$3; shift 3
+  local log=$LOGDIR/$tag.$model.log
+  if [ -z "${FORCE:-}" ] && [ -f "$log" ] && grep -q '^__GATE_EXIT ' "$log"; then
+    printf '  %-28s %-28s cached\n' "$tag" "$model"
+    return
+  fi
+  local overlay; overlay=$(vendor "$model")
+  local pp=src:.
+  [ -n "$overlay" ] && pp=$pp:$overlay
+  ( JAX_DEFAULT_MATMUL_PRECISION=highest PYTHONPATH=$pp \
+      timeout "${GATE_TIMEOUT:-3600}" $PY "$@" 2>&1
+    echo "__GATE_EXIT $?" ) > "$log"
+  local rc; rc=$(sed -n 's/^__GATE_EXIT //p' "$log" | tail -1)
+  local head; head=$(grep -E "$pat" "$log" | tail -1)
+  local status=FAIL
+  if [ "$rc" = 0 ]; then status=OK
+  elif grep -qi 'no native adapter\|has no msa_encoder\|run first:\|No module named' "$log"; then status=SKIP
+  elif [ "$rc" = 124 ]; then status=TIMEOUT
+  fi
+  printf '  %-28s %-28s %-8s %s\n' "$tag" "$model" "$status" "${head:0:96}"
+  printf '%s\t%s\t%s\t%s\n' "$tag" "$model" "$status" "$head" >> "$SUMMARY"
+}
+
+want () {  # is this level selected?
+  local lvl=$1
+  case " $LEVELS " in *" all "*|*" $lvl "*) return 0 ;; *) return 1 ;; esac
+}
+
+LEVELS=${*:-L0 L1 L1b L1t L1d L2 L3 L4}
+echo "levels: $LEVELS"
+echo "models: $MODELS"
+echo "logs:   $LOGDIR"
+
+# --- L0: does every checkpoint tensor reach a parameter, and back ----------
+if want L0; then
+  echo "== L0 conversion coverage (both directions -- see converter-coverage-audit)"
+  for m in $MODELS; do
+    gate L0.audit "$m" 'coverage|missing|unexpected|clean|CLEAN' dev/audit_coverage.py "$m"
+  done
+fi
+
+# --- L1 / L1b: the trunk, and the MSA stack inside it ---------------------
+if want L1; then
+  echo "== L1 trunk pairformer"
+  for m in $MODELS; do gate L1.trunk "$m" '^  (single|pair) ' dev/oracles/trunk_parity.py "$m"; done
+fi
+if want L1b; then
+  # protenix's MSA module (and its trunk) go through prot_parity, which takes
+  # its models positionally and KeyErrors on a name it does not know -- so this
+  # one gate carries an explicit list rather than probing every model.
+  echo "== L1b MSA module (protenix goes through prot_parity)"
+  for m in protenix2 protenix1; do
+    case " $MODELS " in *" $m "*)
+      FP32=1 gate L1b.prot "$m" 'corr' dev/oracles/prot_parity.py "$m" ;;
+    esac
+  done
+  # ESMFold2's native module ships inside `transformers`, which is installed in
+  # ~/venv_esm ONLY and must not be installed beside JAX. So its native side
+  # runs there first and writes an npz (inputs included, so both sides compare
+  # on identical tensors) that msa_parity.py reads with numpy alone.
+  for m in $MODELS; do
+    case $m in esmfold2|esmfold2_exp|esmfold2_exp_cutoff2025)
+      $PY_ESM dev/oracles/esmfold2_msa_dump.py "$m" > "$LOGDIR/L1b.esmdump.$m.log" 2>&1
+      $PY_ESM dev/oracles/esmfold2_msa_dump.py "$m" --nonuniform \
+        >> "$LOGDIR/L1b.esmdump.$m.log" 2>&1 ;;
+    esac
+  done
+  for m in $MODELS; do gate L1b.msa "$m" 'msa -> pair' dev/oracles/msa_parity.py "$m"; done
+  # An all-ones msa mask cannot distinguish two OPM normalisers -- that is how a
+  # wrong boltz2 fix passed once. The non-uniform case is not optional polish.
+  for m in $MODELS; do
+    NONUNIFORM=1 gate L1b.msa_nonuniform "$m" 'msa -> pair' dev/oracles/msa_parity.py "$m"
+  done
+fi
+
+# --- L1t / L1d: the two heads L1 does not reach --------------------------
+if want L1t; then
+  echo "== L1 template embedder"
+  for m in $MODELS; do gate L1t.template "$m" 'template|corr' dev/oracles/template_parity.py "$m"; done
+fi
+if want L1d; then
+  echo "== L1 distogram head"
+  for m in $MODELS; do gate L1d.dgram "$m" 'dgram|corr' dev/oracles/dgram_parity.py "$m"; done
+fi
+
+# --- L2: the three parts, which is why the level table reads `~` ----------
+if want L2; then
+  echo "== L2 token diffusion transformer"
+  for m in $MODELS; do gate L2.diffusion "$m" '^  a ' dev/oracles/diffusion_parity.py "$m"; done
+  echo "== L2 diffusion conditioning"
+  for m in $MODELS; do gate L2.conditioning "$m" 'corr' dev/oracles/conditioning_parity.py "$m"; done
+  echo "== L2 atom cross-attention encoder"
+  for m in $MODELS; do gate L2.atom_encoder "$m" 'corr' dev/oracles/atom_parity.py "$m"; done
+  echo "== L2 atom cross-attention DECODER"
+  for m in $MODELS; do
+    DECODER=1 gate L2.atom_decoder "$m" 'corr' dev/oracles/atom_parity.py "$m"
+  done
+fi
+
+# --- L3: one denoise step, the whole diffusion module ---------------------
+if want L3; then
+  echo "== L3 denoise step"
+  for m in $MODELS; do
+    DIAG=1 gate L3.denoise "$m" 'per-atom distance' dev/oracles/denoise_parity.py "$m"
+  done
+  # boltz2 has no standalone-constructible diffusion module; its L3 is by
+  # injection from a captured native run (~/boltz2_6mrr/diff_dump.npz).
+  gate L3.denoise_inject boltz2 'corr|per-atom' dev/oracles/boltz2_denoise_parity.py
+fi
+
+# --- L4: the confidence head --------------------------------------------
+if want L4; then
+  echo "== L4 confidence head"
+  for m in $MODELS; do
+    gate L4.confidence "$m" '^  (full_pae|plddt)' dev/oracles/confidence_parity.py "$m"
+  done
+fi
+
+# --- L5 / L6: folds. Much slower, and opt-in for that reason -------------
+if want L5; then
+  echo "== L5 fold (6MRR)"
+  for m in $MODELS; do gate L5.fold "$m" 'CA-RMSD' dev/oracles/fold_check.py "$m"; done
+fi
+if want L6; then
+  echo "== L6 modality screens"
+  for m in $MODELS; do
+    for case in rna_1ehz dna_1lmb complex_1lmb ligand_1stp ptm_5k9p plain_5k9p protein_6mrr; do
+      gate "L6.$case" "$m" 'RMSD|best' dev/oracles/modality_check.py "$m" "$case"
+    done
+  done
+fi
+
+echo
+echo "summary: $SUMMARY"
+awk -F'\t' 'NR>1 {n[$3]++} END {for (k in n) printf "  %-8s %d\n", k, n[k]}' "$SUMMARY"
+echo RUN_ALL_PARITY_DONE

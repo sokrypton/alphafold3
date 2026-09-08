@@ -1,0 +1,17 @@
+esmfold2                         GATE PASS: best |fd/|grad| - 1| = 0.002 at eps 3e-02 (tolerance 0.10)
+                                   |grad| 6.651e-02;  fd/|grad| by eps: 3e-01=0.725  1e-01=1.060  3e-02=0.998  1e-02=0.958  3e-03=1.196  1e-03=0.590
+esmfold2_fast                    GATE PASS: best |fd/|grad| - 1| = 0.010 at eps 1e-01 (tolerance 0.10)
+                                   |grad| 1.935e-02;  fd/|grad| by eps: 3e-01=0.988  1e-01=1.010  3e-02=0.900  1e-02=0.749  3e-03=1.400  1e-03=1.216
+esmfold2_exp                     GATE PASS: best |fd/|grad| - 1| = 0.007 at eps 1e-01 (tolerance 0.10)
+                                   |grad| 1.130e-01;  fd/|grad| by eps: 3e-01=0.950  1e-01=0.993  3e-02=0.993  1e-02=0.988  3e-03=0.721  1e-03=0.224
+esmfold2_exp_fast                GATE PASS: best |fd/|grad| - 1| = 0.000 at eps 3e-01 (tolerance 0.10)
+                                   |grad| 2.903e-01;  fd/|grad| by eps: 3e-01=1.000  1e-01=1.020  3e-02=1.001  1e-02=0.999  3e-03=1.037  1e-03=1.471
+esmfold2_exp_cutoff2025          GATE PASS: best |fd/|grad| - 1| = 0.003 at eps 3e-02 (tolerance 0.10)
+                                   |grad| 1.939e-01;  fd/|grad| by eps: 3e-01=0.703  1e-01=1.049  3e-02=1.003  1e-02=1.049  3e-03=1.111  1e-03=1.356
+esmfold2_exp_fast_cutoff2025     GATE PASS: best |fd/|grad| - 1| = 0.000 at eps 3e-02 (tolerance 0.10)
+                                   |grad| 1.652e-01;  fd/|grad| by eps: 3e-01=0.921  1e-01=0.984  3e-02=1.000  1e-02=1.048  3e-03=1.132  1e-03=1.267
+esmfold2_lm600m                  GATE PASS: best |fd/|grad| - 1| = 0.002 at eps 3e-02 (tolerance 0.10)
+                                   |grad| 2.750e-01;  fd/|grad| by eps: 3e-01=0.883  1e-01=1.025  3e-02=0.998  1e-02=1.032  3e-03=1.006  1e-03=1.556
+esmfold2_lm300m                  GATE PASS: best |fd/|grad| - 1| = 0.015 at eps 3e-02 (tolerance 0.10)
+                                   |grad| 2.025e-01;  fd/|grad| by eps: 3e-01=0.879  1e-01=0.982  3e-02=1.015  1e-02=0.965  3e-03=1.234  1e-03=0.982
+DONE

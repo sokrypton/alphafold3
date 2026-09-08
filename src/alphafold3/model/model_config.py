@@ -282,8 +282,10 @@ SSM_RECYCLE = ESMFOLD2_SSM_RECYCLE
 CLAMPED_OPM_NORM = ESMFOLD2_FAMILY
 
 
-# Models whose OuterProductMean divides BEFORE its output projection, and
-# normalises by the per-token ROW COUNT rather than AF3's pairwise count.
+# Models whose OuterProductMean divides BEFORE its output projection, so the
+# output BIAS is not scaled by the mask count. (The name is a misnomer kept for
+# findability: the first reading of boltz's source said "per-token row count",
+# and the comment below records how the gate disproved that.)
 #
 # Boltz-2's OPM (boltz/model/layers/outer_product_mean.py) is
 #     mask = mask[:, :, None, :] * mask[:, :, :, None]   # PAIRWISE first

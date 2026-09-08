@@ -1,0 +1,16 @@
+[
+ {
+  "sequences": [
+   {
+    "proteinChain": {
+     "sequence": "GWSTELEKHREELKEFLKKEGITNVEIRIDNGRLEVRVEGGTERLKRFLEELRQKLEKKGYTVDIKIE",
+     "count": 1,
+     "id": [
+      "A"
+     ]
+    }
+   }
+  ],
+  "name": "6mrr"
+ }
+]

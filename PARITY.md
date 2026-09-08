@@ -1394,12 +1394,16 @@ Left: the template embedder on the other 8 models, and the atom decoder.
 
 ## The gates, and where they live
 
-`dev/` is gitignored (see README, "Where the harnesses live"), so these exist on
-the machine that runs them and NOT in the repository. Each is listed with what
-it covers, because the file itself is the only other record:
+`dev/` is TRACKED (only its `.npz` dumps, logs and bytecode are ignored), and
+`bash dev/oracles/run_all_parity.sh` re-runs every gate below with the right
+vendor overlay and precision, resumably and serially. Each is still listed with
+what it covers, because the table is what says whether a green run is a green
+MATRIX -- the driver's own summary should agree with it, and if the two
+disagree, this table is the stale one:
 
 | gate | level | covers |
 |---|---|---|
+| **`dev/oracles/run_all_parity.sh`** | **all** | **the driver: every gate below, every model, resumable, serial** |
 | `dev/oracles/trunk_parity.py` | L1 | pairformer stack vs the vendor's module — 7 models |
 | `dev/oracles/prot_parity.py` | L1b | protenix trunk AND MSA module (protenix2, protenix1) |
 | `dev/oracles/msa_parity.py` + `esmfold2_msa_dump.py` | L1b | MSA module vs the vendor's own — rf3, both of3, intellifold2, opendde, boltz2, all three MSA-bearing esmfold2 releases. `LAYER=1` splits one boltz2 layer; `NONUNIFORM=1` runs a non-trivial msa mask |

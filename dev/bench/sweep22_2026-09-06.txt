@@ -1,0 +1,23 @@
+alphafold3                       5 samples, CA-RMSD: 0.670 0.751 0.703 0.638 0.632   best 0.632  mean 0.679
+boltz2                           5 samples, CA-RMSD: 0.522 0.561 0.570 0.590 0.434   best 0.434  mean 0.535
+chai1                            5 samples, CA-RMSD: 1.757 1.719 1.798 1.741 1.745   best 1.719  mean 1.752
+intellifold2                     5 samples, CA-RMSD: 1.653 1.655 1.552 1.677 1.514   best 1.514  mean 1.610
+openbind0                        5 samples, CA-RMSD: 2.128 1.779 1.673 1.782 1.637   best 1.637  mean 1.800
+opendde                          5 samples, CA-RMSD: 0.886 0.817 0.767 1.032 0.784   best 0.767  mean 0.857
+openfold3                        5 samples, CA-RMSD: 1.751 1.722 1.711 1.859 1.541   best 1.541  mean 1.717
+protenix05                       5 samples, CA-RMSD: 1.466 1.776 1.380 1.618 1.437   best 1.380  mean 1.535
+protenix1                        5 samples, CA-RMSD: 2.239 1.694 1.789 1.758 1.710   best 1.694  mean 1.838
+protenix1_20250630               5 samples, CA-RMSD: 1.786 1.695 1.730 1.699 1.752   best 1.695  mean 1.732
+protenix2                        5 samples, CA-RMSD: 0.702 1.317 1.638 1.533 1.502   best 0.702  mean 1.339
+protenix_mini                    5 samples, CA-RMSD: 1.714 1.541 1.557 1.593 1.641   best 1.541  mean 1.609
+protenix_tiny                    5 samples, CA-RMSD: 1.484 1.554 1.499 1.568 1.559   best 1.484  mean 1.533
+rosettafold3                     5 samples, CA-RMSD: 1.667 1.627 1.670 0.986 1.676   best 0.986  mean 1.525
+esmfold2                         5 samples, CA-RMSD: 1.874 1.517 1.916 1.868 1.483   best 1.483  mean 1.732
+esmfold2_fast                    5 samples, CA-RMSD: 1.245 2.023 1.717 1.814 1.706   best 1.245  mean 1.701
+esmfold2_exp                     5 samples, CA-RMSD: 1.337 1.199 0.722 0.997 0.974   best 0.722  mean 1.046
+esmfold2_exp_fast                5 samples, CA-RMSD: 1.482 1.521 1.267 1.631 1.745   best 1.267  mean 1.529
+esmfold2_exp_cutoff2025          5 samples, CA-RMSD: 1.611 1.653 1.652 1.626 1.828   best 1.611  mean 1.674
+esmfold2_exp_fast_cutoff2025     5 samples, CA-RMSD: 1.423 1.768 1.523 1.716 1.755   best 1.423  mean 1.637
+esmfold2_lm600m                  5 samples, CA-RMSD: 0.858 1.628 1.588 1.640 1.664   best 0.858  mean 1.476
+esmfold2_lm300m                  5 samples, CA-RMSD: 1.753 1.774 1.773 1.760 1.762   best 1.753  mean 1.764
+SWEEP20 DONE

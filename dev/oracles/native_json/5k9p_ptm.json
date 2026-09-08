@@ -1,0 +1,22 @@
+[
+ {
+  "sequences": [
+   {
+    "proteinChain": {
+     "sequence": "MQIFVKTLTGKTITLEVEPSDTIENVKAKIQDKEGIPPDQQRLIFAGKQLEDGRTLSDYNIQKESTLHLVLRLRGG",
+     "count": 1,
+     "id": [
+      "A"
+     ],
+     "modifications": [
+      {
+       "ptmType": "CCD_SEP",
+       "ptmPosition": 20
+      }
+     ]
+    }
+   }
+  ],
+  "name": "5k9p_ptm"
+ }
+]

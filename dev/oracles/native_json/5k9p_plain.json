@@ -1,0 +1,16 @@
+[
+ {
+  "sequences": [
+   {
+    "proteinChain": {
+     "sequence": "MQIFVKTLTGKTITLEVEPSDTIENVKAKIQDKEGIPPDQQRLIFAGKQLEDGRTLSDYNIQKESTLHLVLRLRGG",
+     "count": 1,
+     "id": [
+      "A"
+     ]
+    }
+   }
+  ],
+  "name": "5k9p_plain"
+ }
+]

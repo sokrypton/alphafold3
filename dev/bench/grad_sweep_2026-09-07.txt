@@ -1,0 +1,73 @@
+alphafold3                     float32   GATE PASS: best |fd/|grad| - 1| = 0.002 at eps 1e-01 (tolerance 0.10)
+                                 loss -0.222386   grad: finite True  nonzero 1360/1360  max|g| 1.271e-02
+                                 |grad| 6.251e-02;  fd/|grad| by eps: 3e-01=0.911  1e-01=1.002  3e-02=1.010  1e-02=1.041  3e-03=0.984  1e-03=0.783
+openfold3                      float32   GATE PASS: best |fd/|grad| - 1| = 0.019 at eps 1e-01 (tolerance 0.10)
+                                 loss -0.246498   grad: finite True  nonzero 1360/1360  max|g| 1.302e-02
+                                 |grad| 7.509e-02;  fd/|grad| by eps: 3e-01=0.979  1e-01=1.019  3e-02=1.075  1e-02=0.960  3e-03=1.449  1e-03=0.490
+openbind0                      float32   GATE PASS: best |fd/|grad| - 1| = 0.030 at eps 3e-03 (tolerance 0.10)
+                                 loss -0.220809   grad: finite True  nonzero 1360/1360  max|g| 7.130e-02
+                                 |grad| 4.689e-01;  fd/|grad| by eps: 3e-01=0.239  1e-01=0.464  3e-02=0.686  1e-02=0.966  3e-03=1.030  1e-03=1.064
+protenix05                     float32   GATE PASS: best |fd/|grad| - 1| = 0.007 at eps 3e-02 (tolerance 0.10)
+                                 loss -0.225194   grad: finite True  nonzero 1360/1360  max|g| 5.154e-02
+                                 |grad| 3.362e-01;  fd/|grad| by eps: 3e-01=0.733  1e-01=0.961  3e-02=0.993  1e-02=0.960  3e-03=0.920  1e-03=0.841
+protenix1                      float32   GATE PASS: best |fd/|grad| - 1| = 0.014 at eps 3e-03 (tolerance 0.10)
+                                 loss -0.255153   grad: finite True  nonzero 1360/1360  max|g| 1.873e-01
+                                 |grad| 9.864e-01;  fd/|grad| by eps: 3e-01=0.021  1e-01=0.126  3e-02=0.703  1e-02=0.953  3e-03=1.014  1e-03=1.064
+protenix1_20250630             float32   GATE PASS: best |fd/|grad| - 1| = 0.006 at eps 1e-02 (tolerance 0.10)
+                                 loss -0.254077   grad: finite True  nonzero 1360/1360  max|g| 1.214e-01
+                                 |grad| 9.409e-01;  fd/|grad| by eps: 3e-01=0.246  1e-01=0.706  3e-02=1.020  1e-02=1.006  3e-03=0.990  1e-03=1.018
+protenix_mini                  float32   GATE PASS: best |fd/|grad| - 1| = 0.003 at eps 1e-03 (tolerance 0.10)
+                                 loss -0.246597   grad: finite True  nonzero 1360/1360  max|g| 7.820e-01
+                                 |grad| 4.191e+00;  fd/|grad| by eps: 3e-01=0.005  1e-01=0.127  3e-02=0.272  1e-02=0.529  3e-03=0.874  1e-03=0.997
+protenix_tiny                  float32   GATE PASS: best |fd/|grad| - 1| = 0.019 at eps 3e-03 (tolerance 0.10)
+                                 loss -0.186738   grad: finite True  nonzero 1360/1360  max|g| 1.333e+00
+                                 |grad| 3.717e+00;  fd/|grad| by eps: 3e-01=0.086  1e-01=0.198  3e-02=0.240  1e-02=0.742  3e-03=0.981  1e-03=0.976
+protenix2                      float32   GATE PASS: best |fd/|grad| - 1| = 0.002 at eps 3e-02 (tolerance 0.10)
+                                 loss -0.221338   grad: finite True  nonzero 1360/1360  max|g| 4.526e-02
+                                 |grad| 2.455e-01;  fd/|grad| by eps: 3e-01=0.689  1e-01=0.930  3e-02=0.998  1e-02=0.988  3e-03=0.964  1e-03=1.139
+intellifold2                   float32   GATE PASS: best |fd/|grad| - 1| = 0.001 at eps 3e-02 (tolerance 0.10)
+                                 loss -0.242055   grad: finite True  nonzero 1360/1360  max|g| 3.016e-02
+                                 |grad| 1.996e-01;  fd/|grad| by eps: 3e-01=0.872  1e-01=0.971  3e-02=1.001  1e-02=1.036  3e-03=1.003  1e-03=0.933
+opendde                        float32   GATE PASS: best |fd/|grad| - 1| = 0.013 at eps 1e-01 (tolerance 0.10)
+                                 loss -0.186678   grad: finite True  nonzero 1360/1360  max|g| 1.882e-02
+                                 |grad| 1.023e-01;  fd/|grad| by eps: 3e-01=0.894  1e-01=0.987  3e-02=0.978  1e-02=1.041  3e-03=0.867  1e-03=0.799
+boltz2                         float32   GATE PASS: best |fd/|grad| - 1| = 0.016 at eps 3e-02 (tolerance 0.10)
+                                 loss -0.215358   grad: finite True  nonzero 1360/1360  max|g| 5.187e-02
+                                 |grad| 1.952e-01;  fd/|grad| by eps: 3e-01=0.804  1e-01=1.172  3e-02=1.016  1e-02=1.028  3e-03=0.942  1e-03=0.904
+rosettafold3                   float32   GATE PASS: best |fd/|grad| - 1| = 0.001 at eps 3e-01 (tolerance 0.10)
+                                 loss -0.188319   grad: finite True  nonzero 1360/1360  max|g| 9.501e-03
+                                 |grad| 8.546e-02;  fd/|grad| by eps: 3e-01=0.999  1e-01=0.984  3e-02=0.995  1e-02=0.975  3e-03=1.108  1e-03=0.641
+chai1                          float32   GATE PASS: best |fd/|grad| - 1| = 0.001 at eps 1e-01 (tolerance 0.10)
+                                 loss -0.237535   grad: finite True  nonzero 1360/1360  max|g| 1.461e-02
+                                 |grad| 6.150e-02;  fd/|grad| by eps: 3e-01=0.964  1e-01=1.001  3e-02=0.983  1e-02=1.001  3e-03=0.994  1e-03=0.960
+esmfold2                       float32   GATE PASS: best |fd/|grad| - 1| = 0.009 at eps 1e-01 (tolerance 0.10)
+                                 loss -0.227929   grad: finite True  nonzero 1360/1360  max|g| 1.147e-02
+                                 |grad| 1.011e-01;  fd/|grad| by eps: 3e-01=1.029  1e-01=1.009  3e-02=0.983  1e-02=0.983  3e-03=0.953  1e-03=0.989
+esmfold2_fast                  float32   GATE PASS: best |fd/|grad| - 1| = 0.035 at eps 1e-02 (tolerance 0.10)
+                                 loss -0.243336   grad: finite True  nonzero 1360/1360  max|g| 4.383e-01
+                                 |grad| 7.282e-01;  fd/|grad| by eps: 3e-01=-0.099  1e-01=0.044  3e-02=0.740  1e-02=0.965  3e-03=0.936  1e-03=0.956
+esmfold2_exp                   float32   GATE PASS: best |fd/|grad| - 1| = 0.009 at eps 3e-02 (tolerance 0.10)
+                                 loss 0.268445   grad: finite True  nonzero 1360/1360  max|g| 3.510e-01
+                                 |grad| 1.395e+00;  fd/|grad| by eps: 3e-01=0.286  1e-01=0.861  3e-02=0.991  1e-02=0.988  3e-03=0.987  1e-03=1.113
+esmfold2_exp_fast              float32   GATE PASS: best |fd/|grad| - 1| = 0.002 at eps 1e-02 (tolerance 0.10)
+                                 loss 0.143896   grad: finite True  nonzero 1360/1360  max|g| 3.237e-02
+                                 |grad| 3.109e-01;  fd/|grad| by eps: 3e-01=1.371  1e-01=1.138  3e-02=0.993  1e-02=0.998  3e-03=1.005  1e-03=1.343
+esmfold2_exp_cutoff2025        float32   GATE PASS: best |fd/|grad| - 1| = 0.002 at eps 1e-02 (tolerance 0.10)
+                                 loss 0.034353   grad: finite True  nonzero 1360/1360  max|g| 1.378e-01
+                                 |grad| 1.044e+00;  fd/|grad| by eps: 3e-01=0.571  1e-01=1.095  3e-02=0.989  1e-02=0.998  3e-03=1.016  1e-03=1.100
+esmfold2_exp_fast_cutoff2025   float32   GATE PASS: best |fd/|grad| - 1| = 0.013 at eps 3e-02 (tolerance 0.10)
+                                 loss 0.174376   grad: finite True  nonzero 1360/1360  max|g| 1.623e-01
+                                 |grad| 9.713e-01;  fd/|grad| by eps: 3e-01=0.497  1e-01=0.885  3e-02=0.987  1e-02=1.020  3e-03=0.894  1e-03=1.192
+esmfold2_lm600m                float32   GATE PASS: best |fd/|grad| - 1| = 0.001 at eps 3e-02 (tolerance 0.10)
+                                 loss 0.102465   grad: finite True  nonzero 1360/1360  max|g| 6.856e-02
+                                 |grad| 2.549e-01;  fd/|grad| by eps: 3e-01=0.879  1e-01=0.990  3e-02=1.001  1e-02=0.967  3e-03=1.038  1e-03=1.204
+esmfold2_lm300m                float32   GATE PASS: best |fd/|grad| - 1| = 0.005 at eps 1e-02 (tolerance 0.10)
+                                 loss -0.070106   grad: finite True  nonzero 1360/1360  max|g| 9.422e-02
+                                 |grad| 3.437e-01;  fd/|grad| by eps: 3e-01=0.848  1e-01=0.984  3e-02=0.993  1e-02=1.005  3e-03=1.056  1e-03=1.229
+af2_ptm                        float32   GATE PASS: best |fd/|grad| - 1| = 0.010 at eps 3e-03 (tolerance 0.10)
+                                 loss -0.264881   grad: finite True  nonzero 1360/1360  max|g| 2.368e-02
+                                 |grad| 1.076e-01;  fd/|grad| by eps: 3e-01=0.561  1e-01=0.795  3e-02=0.964  1e-02=1.014  3e-03=1.010  1e-03=1.245
+af2_multimer                   float32   GATE PASS: best |fd/|grad| - 1| = 0.027 at eps 3e-02 (tolerance 0.10)
+                                 loss -0.230496   grad: finite True  nonzero 1360/1360  max|g| 1.664e-02
+                                 |grad| 8.585e-02;  fd/|grad| by eps: 3e-01=0.853  1e-01=0.953  3e-02=0.973  1e-02=1.048  3e-03=1.051  1e-03=1.137
+DONE
