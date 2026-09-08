@@ -182,15 +182,19 @@ agreeing to 0.0006 Å).
   injection when they were ported, which is a different and coarser standard.
 * **The atom DECODER is gated on `protenix2`** (exact, 0.000002 Å/atom) and
   covered in composition elsewhere by the exact denoise steps.
-* **`chai1`'s template embedder cannot be gated** from its shipped TorchScript:
-  the submodule's parameters are reachable but it has no callable `forward`.
+* **`chai1`'s template embedder cannot be gated as a module** from its shipped
+  TorchScript: the submodule's parameters are reachable but it has no callable
+  `forward`. What closed the gap partway instead was a conversion audit (its
+  five-archive checkpoint had never been audited at all) plus a parameter
+  ABLATION — `ZERO=<scope>/<leaf>` in `template_parity.py`. That found a dropped
+  bias worth 35.6% of the module's output at corr 0.999648.
 
 And the table hides four modules that nothing has ever compared, because the
 levels were organised around the diffusion path:
 
 | module | models carrying it | gated on |
 |---|---|---|
-| **template embedder** | 9 | **8** — gated 2026-09-08, found two bugs |
+| **template embedder** | 9 | **8** — gated 2026-09-08, found three bugs (two protenix, one chai1) |
 | **MSA module** | 12 | **11** — all exact; only chai1 unreachable. boltz2's 0.974 was a real OPM bug, fixed |
 | ~~distogram head~~ | all | **8** — closed 2026-09-08 |
 | ~~input embedder~~ | all | **2** — closed 2026-09-08 |

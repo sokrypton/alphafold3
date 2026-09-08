@@ -1135,6 +1135,131 @@ embedded MSA from native's own `msa_subsampler` and feeding it to both sides
 gives 0.999971. **If a gate's two sides do not provably see the same input, its
 number is not a measurement.**
 
+## chai1's first L0 gate, and the two bugs it found (2026-09-08)
+
+`dev/audit_coverage.py` had never run on chai1. Not an oversight of priority --
+a shape mismatch: every other converter takes one flat state dict, and chai
+publishes five TorchScript archives, so `load_chai1` returns
+`{component: state_dict}` and the audit's `_Watched` wrapper had nothing to wrap.
+The audit now detects that shape (all values are dicts) and watches each
+component, reporting keys as `component.key`.
+
+**1912 tensors, 5 unaccounted for, and the check that sorted them was the
+GRAPH.** A tensor a vendor ships is not necessarily a tensor a vendor uses, and
+the only way to tell is to ask whether its `forward_*` methods reference it:
+
+    torch.jit.load(...)._c._get_method('forward_256').graph
+
+Three did not appear and are genuinely dead. Two did, and both were real.
+
+### The template feature bias
+
+chai embeds template features with ONE fused `Linear(76 -> 64, bias=True)`
+(`input_projs.TEMPLATES.0`). AF3 uses nine bias-free Linears whose outputs are
+summed, so `converters/chai1.py` splits the WEIGHT across AF3's slots -- and the
+bias had nowhere to go.
+
+It does not cancel. The 64-d activation goes straight into the template
+pairformer, whose LayerNorms normalise per position across channels, so a
+constant vector added at every (i, j) changes each position's normalised
+direction. That is the distinction worth carrying: rosettafold3's and esmfold2's
+dropped LayerNorm offsets DO vanish, because they land inside a softmax over j.
+Where the constant lands decides it, not how big it is.
+
+**How it was sized, with no native module to compare against.**
+`template_parity.py` gained `ZERO=<scope>/<leaf>`, which reruns OUR module with
+one parameter zeroed and reports the difference. On chai1's self-template 5K9P:
+
+    |param| max 0.3005 -> output max|d| 0.91595   rms(out) 2.5759
+    relative 0.3556                               corr 0.999648
+
+**35.6% relative at corr 0.999648.** A 0.999 gate passes that, which is the
+third instance in this file of [[correlation-hides-bias]] and the reason the
+method exists: when there is no oracle, ablate the parameter and measure what it
+was worth.
+
+### The diffusion module's own s_inputs
+
+chai's `TokenInputEmbedding` returns THREE tensors, and its graph says so
+explicitly -- `TupleConstruct(%s_trunk, %s_structure, %z_init)`:
+
+    input13     = cat[pooled_atom_single, token_single_input_feats]   # 768
+    s_structure = token_single_proj_in_structure(input13)             # 384
+    s_trunk     = token_single_proj_in_trunk(input13)                 # 384
+
+Two independently trained projections of the same input: the trunk gets the
+first, the DIFFUSION module the second. AF3 computes one `s_inputs` and hands it
+to both, so the port fed the diffusion conditioning the trunk's vector. The two
+matrices are effectively ORTHOGONAL -- cosine -0.0024, rms 0.107 against 0.182 --
+so this was not a near-miss, it was an unrelated 384-d vector. Gated by
+`model_config.SEPARATE_STRUCTURE_TARGET_FEAT`; `diff_emb['target_feat']` was
+already a seam, since opendde's structural path replaces it.
+
+**And its fold-level effect is nearly nil, which is worth stating plainly.**
+6MRR 1.721 -> 1.704, 1STP+BTN (with ESM) 0.467/0.534 -> 0.456/0.535 -- and
+ZEROING the structure projection outright moves 6MRR by 0.004 A. chai's
+diffusion conditioning is almost insensitive to `s_inputs` because the trunk
+single already carries that information. The fix is correctness; there is no
+number behind it, and pretending otherwise would misprice the next one.
+
+### A trap this turned up: every in-repo chai1 number is a NO-ESM number
+
+chai1's token stream is mostly ESM2, and the harnesses supply it only when
+`ESM_EMB` names an npz. Without it `fold_check.py` and `modality_check.py` fold
+**a different model**: 1STP+BTN reads 3.9 A protein / 1.7 A ligand where the
+recorded figure is 0.335 / 0.993, and with ESM2 embeddings the same code reads
+0.456 / 0.535. The 6MRR 1.718 in the fold table is likewise a no-ESM number,
+against chai's own 0.642.
+
+That cost a wrong lead here -- the 3.9 A was read as a regression from converter
+drift, and a blob built with both fixes NEUTRALISED (structure projection set to
+the trunk's, template bias zeroed) is what showed it was not: 3.891 with the old
+behaviour, 3.926 with the new. Rebuilding the old behaviour inside the new
+converter is the cheap way to separate "my change" from "everything else that
+changed since the recorded number".
+
+## L0 on the other models: five benign findings, each verified not waved through
+
+The same sweep ran L0 across all 18 models. Everything it turned up outside
+chai1 was benign, but "benign" was established rather than assumed:
+
+**OF3 checkpoints ship the diffusion module TWICE.** 740 tensors under
+`diffusion_module.` and byte-identical twins under
+`sample_diffusion.diffusion_module.`, verified key by key with
+`np.array_equal`, in the UPSTREAM file -- 571.53M elements of which 203.24M are
+duplication. We convert one copy: 368.39M parameters against 368.29M unique.
+Recorded with a warning, because `map_diffusion_head`'s guard reads the
+un-prefixed name and RETURNS EARLY if it misses -- a release that kept only the
+prefixed copy would map no diffusion head at all, silently.
+
+**rosettafold3 drops 33 `attention_pair_bias.ln_0.bias`, and that is correct.**
+Verified rather than argued by analogy: the offset contributes `offset @ to_b`,
+one constant per head on every logit, and softmax is invariant to a constant per
+row. In float64 the logit shift has std 2e-16 across (i, j) -- it IS a single
+constant -- and the softmax changes by 2.8e-16, with offsets up to 0.496. Worth
+measuring precisely because the magnitude invites the opposite conclusion.
+
+**esmfold2's shim is a SECOND artifact, and the audit only saw the first.** The
+conversion writes the blob from `map_esmfold2_to_af3_graph` AND `<model>.lm.npz`
+from `language_model_shim`; auditing the blob mapper alone called the shim's 10
+`language_model.base_z_*` tensors unaccounted. Converters now declare extra
+artifacts in `AUDIT_EXTRA`. This is the two-directions point again
+([[converter-coverage-audit]]): the question is whether every tensor reaches SOME
+artifact, not the one artifact the script happens to build.
+
+**And L0 for the base `esmfold2` was a FileNotFoundError, not a result** -- its
+weights are hub-only, never pulled to `~/esmfold2_variants`. The audit now reads
+the hub cache off disk, by glob: `huggingface_hub` is not in the GPU venv and
+must not be installed into it.
+
+Plus `confidence_head.{lower,upper}_bins` (protenix) and
+`atom_distance_v_bins` (chai) -- bin EDGES, registered buffers rather than
+weights, derived on our side from the configured bin count.
+
+**All 18 models now either audit clean or say why they cannot.** A model with no
+converter entry -- `alphafold3`, which IS the reference implementation -- says so
+instead of raising `KeyError`.
+
 ## The atom DECODER, gated directly for the first time (2026-09-08)
 
 `DECODER=1 python dev/oracles/atom_parity.py protenix2` runs protenix's own
@@ -1171,7 +1296,7 @@ Enumerated against the graph's own module list rather than from memory:
 
 | module | models carrying it | gated on | note |
 |---|---|---|---|
-| ~~template embedder~~ | 9 | **8** | gated 2026-09-08, found TWO bugs; every model but chai1 |
+| ~~template embedder~~ | 9 | **8** | gated 2026-09-08, found THREE bugs (two protenix, one chai1); the 9th, chai1, has no callable native module, but its parameters now audit clean and a `ZERO=<param>` ablation sizes them |
 | **MSA module** | 12 | **11** | every model but chai1 (TorchScript, no callable submodule); all 11 exact (boltz2 was 0.974 -- a real bug, now fixed). The five `msa=0` esmfold2 rows are n/a, not ungated |
 | ~~distogram head~~ | all | **8** | CLOSED 2026-09-08, `dgram_parity.py`; chai1 is n/a (no native head) |
 | ~~input embedder~~ | all | **2** | CLOSED 2026-09-08, `real_trunk_parity.py` |
