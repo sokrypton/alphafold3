@@ -1135,6 +1135,29 @@ embedded MSA from native's own `msa_subsampler` and feeding it to both sides
 gives 0.999971. **If a gate's two sides do not provably see the same input, its
 number is not a measurement.**
 
+## The matrix, as the driver reports it (2026-09-08)
+
+`bash dev/oracles/run_all_parity.sh` over all 18 models and the L0-L4 gates,
+after everything below landed:
+
+    OK    86        SKIP  132        WARN  0        FAIL  0
+
+**Zero WARN and zero FAIL is the claim worth checking, not the 86.** Every
+non-OK cell is a SKIP -- a gate with no adapter for that model, which the gate
+itself says. The interesting number is how many cells are EMPTY, and the answer
+is that 132 of 218 have no oracle: chai1 has no callable native module for most
+of them, `alphafold3` is the reference implementation, and the eight esmfold2
+releases have no vendor to compare against for the diffusion path. The driver's
+`summary.tsv` is the honest version of the coverage tables in this file, and
+where they disagree it is the tables that are stale.
+
+**Its first full run found four real port bugs**, every one in a (gate, model)
+pair that existed but had never been run together -- protenix1's window
+convention, chai1's template bias, chai1's diffusion s_inputs, boltz2's cyclic
+conditioning. Three of the four moved no fold at all. That is what the L0-L6
+table cannot tell you: it says how far down each MODEL goes, never which cells
+were actually filled.
+
 ## L0 across all 18: two more real omissions, and the audit's own blind spots
 
 Running L0 for every model (rather than the ones someone thought to check)
