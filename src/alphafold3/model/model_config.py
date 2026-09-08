@@ -374,6 +374,31 @@ DIFFUSION_PROJECTED_RELPOS = (('boltz2', 'rosettafold3') + ESMFOLD2_FAMILY
 TRANSPOSED_COLUMN_PAIR_BIAS = ('openfold3', 'openbind0', 'opendde', 'boltz2') + PROTENIX_FAMILY
 
 
+# Models whose TEMPLATE stack adds an OUTER residual around the whole pairformer
+# (`v = v + stack(v)`) rather than replacing the activation (`v = stack(v)`).
+#
+# The blocks are internally residual on both sides, so the outer term adds the
+# input a SECOND time -- it is a real difference, not a rearrangement. And the
+# vendors genuinely disagree:
+#   * boltz2 DOES it: `v = v + self.pairformer(v, pair_mask, ...)` in
+#     boltz/model/modules/trunkv2.py.
+#   * protenix does NOT: `_, v = self.pairformer_stack(s=None, z=v, ...)`.
+#   * rosettafold3 does NOT either, by the same reading:
+#     `for block in self.pairformer: _, v_II = block(None, v_II)` in
+#     rf3/model/layers/pairformer_layers.py.
+#
+# Our three template classes share one fused forward, so protenix and rf3
+# inherited boltz's convention. For protenix that was worth corr 0.999998 vs
+# 1.000000 at L1 (template_parity.py, 2026-09-08) -- small because the stack's
+# contribution is small next to the projections, which is also why it hid behind
+# a larger bug until that one was fixed.
+#
+# rosettafold3 is STILL LISTED HERE deliberately: the native reading says it
+# does not belong, but rf3 has no template gate yet, and this project's rule is
+# that a behaviour change waits for the measurement. Gate it, then remove it.
+TEMPLATE_STACK_OUTER_RESIDUAL = ('boltz2', 'rosettafold3')
+
+
 # Models whose ATOM cross-attention transformer LayerNorms the atom-pair
 # conditioning per block, rather than once for the stack.
 #

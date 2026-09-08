@@ -520,7 +520,14 @@ class Boltz2TemplateEmbedding(hk.Module):
       # block, so it creates every parameter with a leading axis of 0 -- which the
       # converter then has to invent. Skipping the stack keeps the tree honest.
       if c.template_stack.num_layer:
-        v = v + hk.experimental.layer_stack(c.template_stack.num_layer)(block)(v)
+        stacked = hk.experimental.layer_stack(c.template_stack.num_layer)(
+            block)(v)
+        # See model_config.TEMPLATE_STACK_OUTER_RESIDUAL: boltz2 adds the input
+        # a second time around the whole stack, protenix and rf3 do not.
+        if gc.model in model_config.TEMPLATE_STACK_OUTER_RESIDUAL:
+          v = v + stacked
+        else:
+          v = stacked
       return hm.LayerNorm(name='v_norm', use_fast_variance=False)(v)   # (N,N,64)
 
     v_all = hk.vmap(per_template, in_axes=0, out_axes=0,
@@ -544,7 +551,9 @@ class Protenix2TemplateEmbedding(Boltz2TemplateEmbedding):
       sign quirk), masked by frame2d * asym.
     * restype_i/j(32): one_hot(aatype, 32) in OF3/Protenix class order (AF3->OF3 remap;
       same remap the 1.58A fold validated for s_inputs restype).
-    * order: [dgram(39), pb_mask(1), restype_i(32), restype_j(32), uvec(3), bb_mask(1)].
+    * order: [dgram(39), pb_mask(1), restype_j(32), restype_i(32), uvec(3), bb_mask(1)]
+      -- protenix's own concat order, j-varying block FIRST; see the note at the
+      concatenate. Getting this backwards cost corr 0.9985 vs 0.999998.
   N/CA/C via RESTYPE_RIGIDGROUP group 0 (order [C,CA,N]); CB via pseudo_beta_fn.
   """
 
@@ -597,7 +606,17 @@ class Protenix2TemplateEmbedding(Boltz2TemplateEmbedding):
     rt = jax.nn.one_hot(remap[aatype], 32)                           # (N,32)
     rt_i = jnp.broadcast_to(rt[:, None, :], (N, N, 32))
     rt_j = jnp.broadcast_to(rt[None, :, :], (N, N, 32))
-    return jnp.concatenate([disto, pb_ch, rt_i, rt_j, uvec, bb_ch], -1)  # (N,N,108)
+    # rt_j BEFORE rt_i, which is not a typo. protenix appends
+    #     expand_at_dim(aatype, dim=-3)   then   expand_at_dim(aatype, dim=-2)
+    # and `expand_at_dim` UNSQUEEZES at that dim, so dim=-3 inserts the new axis
+    # first and leaves the tensor varying along j, while dim=-2 leaves it
+    # varying along i. So native's first 32-column block is the j-indexed one.
+    # `a_proj` is converted with no column permutation, so our order has to be
+    # native's exactly; having these the other way round was worth corr 0.9985
+    # vs 0.999998 and went unnoticed until template_parity.py existed
+    # (2026-09-08). The docstring above lists them i,j in NATIVE's naming --
+    # the tensors are named for which index they vary along.
+    return jnp.concatenate([disto, pb_ch, rt_j, rt_i, uvec, bb_ch], -1)  # (N,N,108)
 
 
 class RoseTTAFold3TemplateEmbedding(Boltz2TemplateEmbedding):

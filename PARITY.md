@@ -934,55 +934,68 @@ Enumerated against the graph's own module list rather than from memory:
 
 | module | models carrying it | gated on | note |
 |---|---|---|---|
-| **template embedder** | 9 | **1** | first gate 2026-09-08, `template_parity.py` — and protenix2 is NOT exact, see below |
+| ~~template embedder~~ | 9 | **2** | gated 2026-09-08 and it found TWO bugs; protenix2/1 now **1.000000** |
 | **MSA module** | **10** | **2** | only `protenix2` and `protenix1`, via `prot_parity.py` (L1b) |
 | ~~distogram head~~ | all | **6** | CLOSED 2026-09-08, `dgram_parity.py` — see below |
 | ~~input embedder~~ | all | **2** | CLOSED 2026-09-08, `real_trunk_parity.py` |
 | ~~recycling loop~~ | all | **2** | same gate — it compares the trunk AFTER all recycles |
 | atom decoder | all | 0 direct | covered in composition by the three exact L3 steps |
 
-### The template embedder, gated for the first time -- and OPEN (2026-09-08)
+### The template embedder: gated for the first time, and it found TWO bugs (2026-09-08)
 
 Nine models carry a template stack and nothing had ever compared one against
-its vendor. `dev/oracles/template_parity.py` now does, for protenix2, and the
-answer is not clean:
+its vendor. `dev/oracles/template_parity.py` now does, and the first run was
+NOT clean -- 0.998468 for protenix2, where the 48-block trunk pairformer reads
+1.000000 and this stack is two blocks. Two independent port bugs, the second
+hidden behind the first:
 
-| model | corr | rms ours/native | max\|d\|/rms |
-|---|---|---|---|
-| `protenix2` | **0.998468** | 1.0093 | 5.5 |
+| protenix2 template embedder | corr | rms ours/native |
+|---|---|---|
+| as shipped | 0.998468 | 1.0093 |
+| + restype_i/j in native's order | 0.999998 | 1.0002 |
+| + no outer residual | **1.000000** | 1.0000 |
 
-**0.998 is a poor number for this module.** The trunk's 48-block pairformer
-reads 1.000000 on the same model; the template stack is 2 blocks and reads
-0.9985. Everything around it has been checked and is right:
+**Bug 1: `restype_i` and `restype_j` were swapped.** protenix appends
+`expand_at_dim(aatype, dim=-3)` then `expand_at_dim(aatype, dim=-2)`, and
+`expand_at_dim` UNSQUEEZES at that dim -- so `dim=-3` inserts the new axis first
+and leaves the block varying along **j**, `dim=-2` along **i**. Native's first
+32-column block is therefore the j-indexed one; ours was the i-indexed one, and
+`a_proj` is converted with no column permutation, so the two 32-column blocks
+fed the wrong weights.
 
-  * **0 missing / 0 unexpected** on the native side (89 tensors), 0 unmapped on
-    ours (34 scopes).
-  * **The feature order matches.** Ours builds
-    `[dgram(39), pb_mask(1), restype_i(32), restype_j(32), uvec(3), bb_mask(1)]`
-    and the converter passes `linear_no_bias_a` through with no column
-    permutation, which is only correct if native concatenates the same way. It
-    does -- but its CONFIG dict lists a different order
-    (`distogram, backbone_frame_mask, unit_vector, pseudo_beta_mask`), and only
-    the `to_concat` sequence in `single_template_forward` is authoritative.
-    Reading the config would have produced a wrong "fix".
-  * **`hidden_scale_up=True` is confirmed by the checkpoint**, not guessed:
-    False builds 64x128 where the weights are 64x64, and load_state_dict
-    raises. (`TMPL_HSU=0/1` forces it.)
-  * **The template COUNT is controlled.** The batch pads to 4 slots; feeding
-    native 1 while ours aggregated 4 would be no comparison at all. Fixing that
-    changed the number by nothing (0.998468 either way), so the padding slots
-    are inert and the residual is not them.
+**Bug 2: an outer residual protenix does not have.** Our three template classes
+share one fused forward which does `v = v + stack(v)`. boltz2's native really
+does that (`v = v + self.pairformer(v, ...)`); **protenix does not**
+(`_, v = self.pairformer_stack(s=None, z=v, ...)`), and neither does rf3. The
+blocks are internally residual on both sides, so the outer term adds the input a
+SECOND time. Now `model_config.TEMPLATE_STACK_OUTER_RESIDUAL`.
 
-**Prime suspect, untested: the template pairformer's pair-bias convention.**
-protenix2 is in `TRANSPOSED_COLUMN_PAIR_BIAS`, which our trunk honours; whether
-our `tmpl_pairformer` applies it, and whether native's template
-`pairformer_stack` does, has not been checked. That is where to look next.
+**At the fold level, on a templated 5K9P (self-template, seed 101):**
 
-Worth stating plainly: the module docstrings ALREADY claimed this path was
-"VALIDATED exact vs native geometry" (features) and "corr 1.0 vs Boltz's
-TemplateModule" (the fused forward). Those claims were made during the port,
-were never a tracked gate, and the first tracked measurement disagrees. A
-docstring is not a gate.
+| | best | mean |
+|---|---|---|
+| before | 1.588 | 2.124 |
+| after | **0.227** | **0.560** |
+
+Seven times better best-RMSD. Untemplated folds are untouched (6MRR protenix2
+0.700 against a 0.702 baseline, protenix1 1.695 against 1.694), and so are the
+models sharing the code (boltz2 0.426 vs 0.434, rosettafold3 0.976 vs 0.986).
+No weight changed; both fixes are forward-graph.
+
+**Why folds never caught it.** A wrong-but-plausible template contribution still
+points the fold in roughly the right direction -- 1.588 A looks like a working
+template, and templates were only ever verified by folds. It took a module
+comparison to see that 1.588 should have been 0.227.
+
+**And the docstrings claimed this path was already validated** -- "VALIDATED
+exact vs native geometry" for the features, "corr 1.0 vs Boltz's TemplateModule"
+for the forward. The second was true for BOLTZ2 and was silently inherited by
+protenix and rf3, which is exactly how a shared forward hides a per-vendor
+convention. A docstring is not a gate.
+
+**rosettafold3 is still listed in `TEMPLATE_STACK_OUTER_RESIDUAL`** even though
+the native reading says it should not be. It has no template gate yet, and a
+behaviour change here waits for the measurement. That is the next job.
 
 Templates do work end to end (boltz2 folds 5CAJ to 0.72 A with one,
 rosettafold3 to 1.56 A), which bounds how bad this can be -- and the one earlier
@@ -1062,7 +1075,7 @@ it covers, because the file itself is the only other record:
 | `dev/oracles/atom_parity.py` | L2 | atom cross-attention encoder, real batch, windowed — protenix2/1, both of3, intellifold2, rosettafold3 |
 | `dev/oracles/diffusion_parity.py`, `l2_all.sh` | L2 | token diffusion transformer — 10 models |
 | `dev/oracles/denoise_parity.py` | L3 | one denoise step, whole diffusion module — protenix2/1, both of3, intellifold2, rosettafold3 |
-| `dev/oracles/template_parity.py` | L1 | template embedder vs the vendor's own module — protenix2 (OPEN at 0.998468) |
+| `dev/oracles/template_parity.py` | L1 | template embedder vs the vendor's own module — protenix2/1 at 1.000000; found 2 bugs |
 | `dev/oracles/real_trunk_parity.py` + `native_trunk_dump.sh` | L1 real-input | input embedder, trunk output and recycling, against native's own featurised run — protenix2/1 |
 | `dev/oracles/dgram_parity.py` | L4 | distogram head — protenix2/1, both of3, intellifold2, rosettafold3 |
 | `dev/oracles/confidence_parity.py`, `l4_all.sh` | L4 | confidence head — every port |
