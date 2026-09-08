@@ -191,7 +191,7 @@ levels were organised around the diffusion path:
 | module | models carrying it | gated on |
 |---|---|---|
 | **template embedder** | 9 | **8** — gated 2026-09-08, found two bugs |
-| **MSA module** | 10 | **8** — all exact; boltz2's 0.974 was a real OPM bug, fixed |
+| **MSA module** | 12 | **11** — all exact; only chai1 unreachable. boltz2's 0.974 was a real OPM bug, fixed |
 | ~~distogram head~~ | all | **8** — closed 2026-09-08 |
 | ~~input embedder~~ | all | **2** — closed 2026-09-08 |
 | ~~recycling loop~~ | all | **2** — same gate |
@@ -321,6 +321,7 @@ those harnesses measured, and is the only such record.
 |---|---|---|
 | `dev/oracles/trunk_parity.py` | L1 | pairformer stack vs the vendor's module — 7 models |
 | `dev/oracles/prot_parity.py` | L1b | protenix trunk AND MSA module |
+| `dev/oracles/msa_parity.py` + `esmfold2_msa_dump.py` | L1b | MSA module vs the vendor's own — rf3, both of3, intellifold2, opendde, boltz2, all three MSA-bearing esmfold2 releases. `LAYER=1` splits one boltz2 layer; `NONUNIFORM=1` runs a non-trivial msa mask |
 | `dev/oracles/conditioning_parity.py` | L2 | diffusion pair + single conditioning — protenix2, protenix1, rf3 |
 | `dev/oracles/atom_parity.py` | L2 | atom cross-attention encoder, real batch, windowed — protenix2/1, both of3, intellifold2, rosettafold3 |
 | `dev/oracles/diffusion_parity.py`, `l2_all.sh` | L2 | token diffusion transformer — 10 models |

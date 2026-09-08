@@ -994,10 +994,50 @@ does NOT cover. `dev/oracles/msa_parity.py` starts on the rest:
 | `opendde` | **1.000000** | 1.0000 |
 | `rosettafold3` | 0.999971 | 0.9976 |
 | `boltz2` | **1.000000** | 1.0000 (was 0.974331 / 1.0584 -- a real port bug, below) |
+| `esmfold2` | **1.000000** | 1.0000 |
+| `esmfold2_exp` | **1.000000** | 1.0000 |
+| `esmfold2_exp_cutoff2025` | **1.000000** | 1.0000 |
 
-With `prot_parity.py`'s protenix2 and protenix1 that is **8 of the 10** models
-carrying an MSA stack. Only chai1 (TorchScript, no callable submodule forward)
-and the esmfold2 family are unmeasured.
+With `prot_parity.py`'s protenix2 and protenix1 that is **11 of the 12** models
+carrying an MSA stack. The one left is chai1 (TorchScript, no callable submodule
+`forward`), blocked by packaging rather than by effort.
+
+**And five of the eight esmfold2 releases were never a gap.** `msa=0` in
+`model_registry.ESMFOLD2_VARIANTS` for every `*_fast` and `lm*` row: those
+configs set `msa_encoder.enabled` false and their checkpoints carry no such
+weights, so they are **n/a**, not ungated. Only `esmfold2`, `esmfold2_exp` and
+`esmfold2_exp_cutoff2025` have an MSA encoder, and all three now read 1.000000.
+Counting the family as one unmeasured row overstated the hole by four models --
+the same error the level table makes at the model granularity.
+
+**The esmfold2 adapter is the only one here that does not run the vendor
+in-process**, and the reason is worth recording: ESMFold2's implementation ships
+inside `transformers` (`models/esmfold2/modeling_esmfold2.py`), which is
+installed in `~/venv_esm` only, and it must not be installed beside JAX in the
+GPU venv. So `dev/oracles/esmfold2_msa_dump.py` runs the native module there and
+writes its INPUTS as well as its output to an npz that `msa_parity.py` reads
+with numpy alone. Writing the inputs is the load-bearing part: two independently
+seeded `default_rng(0)` streams in two processes are not the same tensors, and
+comparing on them would have measured nothing.
+
+**A divergence that looked real and is not: the DEAD final block.**
+`MSAEncoder.__init__` hardcodes `is_final_block=(i == n_layers - 1)`, so
+transformers' last block has no `msa_pair_weighted_averaging` / `msa_transition`
+at all. On the released line that matches the checkpoint. On the EXPERIMENTAL
+line the checkpoint DOES ship those 12 tensors and `load_state_dict` reports
+them as *unexpected* -- native inference never runs weights it was shipped with,
+while our port does (`converters/esmfold2._drops_msa_update` reads the
+checkpoint rather than the index, deliberately).
+
+It makes no difference, and the gate is what proves it rather than an argument
+about intent. `MSAEncoderBlock` runs the OPM into the pair FIRST and updates `m`
+after, and `MSAEncoder` returns only `x_pair` -- so the last block's `m` is
+never consumed by anything. Dumped both ways (`--keep_final_update`), our side
+compares at 1.000000 against EITHER, max|d| 0.055 vs 0.063 on an rms of 2168.
+Those 12 tensors are dead weight in both implementations.
+
+Run with a NON-UNIFORM mask too (`--nonuniform` / `NONUNIFORM=1`): 1.000000,
+which is the case that caught the wrong boltz2 fix below.
 
 **boltz2 was the one that was not exact, and it was a REAL PORT BUG.** Fixed;
 the localisation is worth writing down because it is the cleanest example in
@@ -1125,7 +1165,7 @@ Enumerated against the graph's own module list rather than from memory:
 | module | models carrying it | gated on | note |
 |---|---|---|---|
 | ~~template embedder~~ | 9 | **8** | gated 2026-09-08, found TWO bugs; every model but chai1 |
-| **MSA module** | 10 | **8** | all but chai1 (TorchScript) and esmfold2; all 8 exact (boltz2 was 0.974 -- a real bug, now fixed) |
+| **MSA module** | 12 | **11** | every model but chai1 (TorchScript, no callable submodule); all 11 exact (boltz2 was 0.974 -- a real bug, now fixed). The five `msa=0` esmfold2 rows are n/a, not ungated |
 | ~~distogram head~~ | all | **8** | CLOSED 2026-09-08, `dgram_parity.py`; chai1 is n/a (no native head) |
 | ~~input embedder~~ | all | **2** | CLOSED 2026-09-08, `real_trunk_parity.py` |
 | ~~recycling loop~~ | all | **2** | same gate — it compares the trunk AFTER all recycles |
@@ -1355,6 +1395,7 @@ it covers, because the file itself is the only other record:
 |---|---|---|
 | `dev/oracles/trunk_parity.py` | L1 | pairformer stack vs the vendor's module — 7 models |
 | `dev/oracles/prot_parity.py` | L1b | protenix trunk AND MSA module (protenix2, protenix1) |
+| `dev/oracles/msa_parity.py` + `esmfold2_msa_dump.py` | L1b | MSA module vs the vendor's own — rf3, both of3, intellifold2, opendde, boltz2, all three MSA-bearing esmfold2 releases. `LAYER=1` splits one boltz2 layer; `NONUNIFORM=1` runs a non-trivial msa mask |
 | `dev/oracles/conditioning_parity.py` | L2 | diffusion pair + single conditioning — protenix2, protenix1, rf3 |
 | `dev/oracles/atom_parity.py` | L2 | atom cross-attention encoder, real batch, windowed — protenix2/1, both of3, intellifold2, rosettafold3 |
 | `dev/oracles/diffusion_parity.py`, `l2_all.sh` | L2 | token diffusion transformer — 10 models |
