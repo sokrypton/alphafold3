@@ -32,7 +32,7 @@ need the vendor's forward pass, so coverage tracks which natives are installed.
 | `alphafold3` | n/a | n/a | n/a | n/a | n/a | ✓ | · |
 | `openfold3` | ✓ | ✓ | ~ | ✓ | ✓ | ✓ | ✓ |
 | `openbind0` | ✓ | ✓ | ~ | ✓ | ✓ | ✓ | · |
-| `intellifold2` | ✓ | ✓ | ~ | ~ | ✓ | ✓ | ✓ |
+| `intellifold2` | ✓ | ✓ | ~ | ✓ | ✓ | ✓ | ✓ |
 | `protenix2` | ✓ | ✓ | ~ | ✓ | ✓ | ✓ | ✓ |
 | `protenix05` | ✓ | ✓ | ~ | ~ | ✓ | ✓ | · |
 | `protenix1` | ✓ | ✓ | ~ | ~ | ✓ | ✓ | · |
@@ -41,7 +41,7 @@ need the vendor's forward pass, so coverage tracks which natives are installed.
 | `protenix_tiny` | ✓ | ✓ | ~ | ~ | ✓ | ✓ | · |
 | `boltz2` | ✓ | ✓ | ✓ | · | ✓ | ✓ | ✓ |
 | `opendde` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `rosettafold3` | ✓ | ✓ | ~ | ~ | ✓ | ✓ | ✓ |
+| `rosettafold3` | ✓ | ✓ | ~ | ✓ | ✓ | ✓ | ✓ |
 | `chai1` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `esmfold2` family | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a — protein only |
 | `af2_ptm` / `af2_multimer` | n/a | n/a | n/a | n/a | n/a | ✓ | n/a — protein only |
@@ -394,9 +394,10 @@ confidence heads (2b/2c); what remains is the diffusion CONDITIONING, the atom
 encoder/decoder, and then the denoise step. DONE since: the atom encoder for
 both of3 releases, `protenix2` and now `intellifold2`; L3 for all six protenix
 releases; the atom encoder for `rosettafold3`; **L3 for every remaining port**
-(of3, openbind0, intellifold2, rosettafold3). LEFT: rf3's 2.79 A at L3, whose
-first suspect is the atom DECODER -- the one module no gate reaches on its own,
-covered only in composition by the three models whose denoise step is exact. `opendde` is the one model with no
+(of3, openbind0, intellifold2, rosettafold3). LEFT: the atom DECODER has no gate
+of its own -- it is covered only in composition, by the three models whose
+denoise step is exact -- and the window-edge residual that if2 and rf3 both show
+is the padded-key mask item. `opendde` is the one model with no
 L4 -- it has its own head. These
 need new oracles, and they are the four whose ports predate the injection-ladder
 method (dump native's own tensors, inject them, compare our module's output).
@@ -774,12 +775,29 @@ step, so L3 covers every port that has a native:
 | `openfold3` | 763 | 0 / 0 | 1.000000 | **0.0001 A** | 0.0013 | 15.8 |
 | `openbind0` | 740 | 24 handled / 1 | 1.000000 | **0.0021 A** | 0.019 | 19.8 |
 | `intellifold2` | 706 | 0 / 0 | 0.999950 | **0.075 A** | 1.59 | 19.3 |
-| `rosettafold3` | 879 | 0 / 0 | 0.999347 | **2.79 A** | 14.9 | 130.4 |
+| `rosettafold3` | 879 | 0 / 0 | 0.999948 | **0.401 A** | 14.7 | 130.2 |
 
 **of3 joins protenix2 as exact**, on both releases -- and that matters beyond
 of3, because a denoise step runs the atom DECODER, which no gate reaches on its
 own. An exact step is the only evidence the decoder is right, and there are now
 three models carrying it.
+
+**rf3 read 2.79 A until the harness handed it the right alphabet.** The first
+run's error was flat across window positions (edge/interior 1.02) but varied
+13x across TOKENS, and held at ~2% of the coordinate scale across noise levels
+1 / 4 / 16 / 64 -- a systematic, token-dependent term, not a numerical one.
+`main()` builds our 447-wide view of `s_inputs` with OF3's permutation for every
+model, and rf3's alphabet is not of3's: the native side must be handed OUR
+vector scattered into RF3's positions, not the vendor array read at rf3's
+positions. Those two differ in exactly the transposed G/C columns. Corrected,
+the step goes to **0.401 A / 0.999948**, relative error 2.16% -> 0.31%, and what
+is left concentrates at the window edges (edge/interior 1.74, next to if2's
+1.54) -- the padded-key item, not the decoder.
+
+This is the third time rf3's alphabet has produced a wrong number, and the first
+time it was the HARNESS rather than the port. The rule it earns: any harness
+that builds a vendor-layout tensor must use THAT vendor's permutation, and the
+tell is a systematic per-token error that survives every scale.
 
 openbind0's 24 "missing" are the per-block pair LayerNorms it does not have:
 v0.5.0 runs that LayerNorm ONCE for the stack where preview-2 runs it inside
