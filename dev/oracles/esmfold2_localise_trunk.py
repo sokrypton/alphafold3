@@ -94,7 +94,13 @@ z,_,_ = R.trunk(f, lm_hidden, pref, dims, n_loops=3, key=jax.random.PRNGKey(0),
                 lm_dropout=0.0, msa=msa)
 zr = np.asarray(z)
 # stage-by-stage, pass 0: which of z_init / z_inject / z_parcae first diverges
-gt = ev.ESM_TRUNK_TAPS
+# Optional, and the library's taps are gone -- the port instrumented
+# `evoformer.ESM_TRUNK_TAPS` while localising and they were removed afterwards,
+# which is right (debug taps should not ship). The headline comparison at the
+# bottom needs none of them, so skip rather than crash the gate.
+gt = getattr(ev, 'ESM_TRUNK_TAPS', {}) or {}
+if not gt:
+    print('   (per-stage trunk taps not in the library; headline only)')
 for name in ('z_pair0', 'z_relpos', 'z_init', 'z_inject', 'z_parcae'):
     if name in gt and name in R.TAPS:
         for i in range(min(len(gt[name]), len(R.TAPS[name]), N_PASSES)):

@@ -105,54 +105,67 @@ def _strip(k):
 _p = {_strip(k): v for k, v in _p.items()}
 out = np.asarray(fwd.apply(_p, jax.random.PRNGKey(0), b, jnp.asarray(dense)))
 x_graph = out[gmask][:n]
-gt = dh.DIFF_TAPS
-for name in ('single_cond', 'pair_cond', 'token_act', 'act_pre_transformer',
-             'act_post_transformer', 'r_update'):
-    if name in gt and name in R.TAPS:
-        x = np.asarray(gt[name][0]); y = np.asarray(R.TAPS[name][0])
-        if name == 'r_update':                     # dense vs flat atom layout
-            x = x[gmask][:n]; y = y[rmask][:n]
-            globals()['r_ref_own'] = y
-        if x.shape != y.shape:
-            print('   %-20s SHAPE %s vs %s' % (name, x.shape, y.shape)); continue
-        print('   %-20s corr %.6f  std %.4f vs %.4f'
-              % (name, np.corrcoef(x.ravel(), y.ravel())[0, 1], x.std(), y.std()))
+# THE PER-STAGE BREAKDOWN IS OPTIONAL, and the taps it reads are gone. The port
+# instrumented `diffusion_head.DIFF_TAPS` and `atom_cross_attention.ATOM_TAPS`
+# while it was being localised, and those were removed afterwards -- correctly,
+# debug taps should not ship. The HEADLINE comparison below needs none of them,
+# so the breakdown is skipped rather than crashing the gate with
+# `module ... has no attribute 'DIFF_TAPS'`, which is what it did.
+#
+# To get the breakdown back, reinstate the taps in the library for the duration
+# of the investigation; it is a localisation aid, not the measurement.
+gt = getattr(dh, 'DIFF_TAPS', None)
+if gt is None:
+  print('   (per-stage taps not present in the library; headline only)')
+else:
+  for name in ('single_cond', 'pair_cond', 'token_act', 'act_pre_transformer',
+               'act_post_transformer', 'r_update'):
+      if name in gt and name in R.TAPS:
+          x = np.asarray(gt[name][0]); y = np.asarray(R.TAPS[name][0])
+          if name == 'r_update':                     # dense vs flat atom layout
+              x = x[gmask][:n]; y = y[rmask][:n]
+              globals()['r_ref_own'] = y
+          if x.shape != y.shape:
+              print('   %-20s SHAPE %s vs %s' % (name, x.shape, y.shape)); continue
+          print('   %-20s corr %.6f  std %.4f vs %.4f'
+                % (name, np.corrcoef(x.ravel(), y.ravel())[0, 1], x.std(), y.std()))
 
-from alphafold3.model.network import atom_cross_attention as aca
-nk = np.asarray(aca.ATOM_TAPS['diffusion_swa_nkeys'][0]).ravel()
-qr = np.asarray(aca.ATOM_TAPS['diffusion_q_rank'][0]).ravel()
-real = np.asarray(aca.ATOM_TAPS['diffusion_qmask'][0]).ravel().astype(bool)
-nr = nk[real]
-print('   swa keys per query: min %d  median %d  max %d over %d real queries'
-      ' (ideal 129 in the interior)' % (nr.min(), int(np.median(nr)), nr.max(), real.sum()))
-import collections
-print('   histogram', sorted(collections.Counter(nr.tolist()).items())[:6], '...',
-      sorted(collections.Counter(nr.tolist()).items())[-4:])
-# WHICH flat order is the queries layout? Compare the per-atom features, whose
-# value is fixed by the element and atom name, under both readings: dense
-# (token, slot) flattened, or the compact atom list.
-xa = np.asarray(aca.ATOM_TAPS['diffusion_atom_features'][0])
-ya = np.asarray(R.TAPS['atom_features'][0])[:n]
-for how, v in (('dense[gmask]', xa.reshape(-1, xa.shape[-1])[np.asarray(gmask).ravel()][:n]),
-               ('flat[:n]', xa.reshape(-1, xa.shape[-1])[:n])):
-    print('   atom_features %-14s corr %.6f' % (how, np.corrcoef(v.ravel(), ya.ravel())[0, 1]))
+  from alphafold3.model.network import atom_cross_attention as aca
+  nk = np.asarray(aca.ATOM_TAPS['diffusion_swa_nkeys'][0]).ravel()
+  qr = np.asarray(aca.ATOM_TAPS['diffusion_q_rank'][0]).ravel()
+  real = np.asarray(aca.ATOM_TAPS['diffusion_qmask'][0]).ravel().astype(bool)
+  nr = nk[real]
+  print('   swa keys per query: min %d  median %d  max %d over %d real queries'
+        ' (ideal 129 in the interior)' % (nr.min(), int(np.median(nr)), nr.max(), real.sum()))
+  import collections
+  print('   histogram', sorted(collections.Counter(nr.tolist()).items())[:6], '...',
+        sorted(collections.Counter(nr.tolist()).items())[-4:])
+  # WHICH flat order is the queries layout? Compare the per-atom features, whose
+  # value is fixed by the element and atom name, under both readings: dense
+  # (token, slot) flattened, or the compact atom list.
+  xa = np.asarray(aca.ATOM_TAPS['diffusion_atom_features'][0])
+  ya = np.asarray(R.TAPS['atom_features'][0])[:n]
+  for how, v in (('dense[gmask]', xa.reshape(-1, xa.shape[-1])[np.asarray(gmask).ravel()][:n]),
+                 ('flat[:n]', xa.reshape(-1, xa.shape[-1])[:n])):
+      print('   atom_features %-14s corr %.6f' % (how, np.corrcoef(v.ravel(), ya.ravel())[0, 1]))
 
-for gname, rname in (('diffusion_enc_queries_in', 'enc_queries_in'),
-                     ('diffusion_enc_queries', 'enc_queries'),
-                     ('diffusion_dec_queries', 'dec_queries')):
-    if gname in aca.ATOM_TAPS and rname in R.TAPS:
-        x = np.asarray(aca.ATOM_TAPS[gname][0])
-        y = np.asarray(R.TAPS[rname][0])
-        # the queries layout is the FLAT atom list in blocks of 32, not the
-        # per-token dense layout gmask indexes -- reshaping and masking with
-        # gmask would compare different atoms.
-        x = x.reshape(-1, x.shape[-1])
-        print('     (%s shapes %s vs %s; ref mask trailing=%s)'
-              % (rname, x.shape, y.shape, bool(rmask[:int(rmask.sum())].all())))
-        x, y = x[:n], y[:n]
-        print('   %-20s corr %.6f  std %.4f vs %.4f'
-              % (rname, np.corrcoef(x.ravel(), y.ravel())[0, 1], x.std(), y.std()))
+  for gname, rname in (('diffusion_enc_queries_in', 'enc_queries_in'),
+                       ('diffusion_enc_queries', 'enc_queries'),
+                       ('diffusion_dec_queries', 'dec_queries')):
+      if gname in aca.ATOM_TAPS and rname in R.TAPS:
+          x = np.asarray(aca.ATOM_TAPS[gname][0])
+          y = np.asarray(R.TAPS[rname][0])
+          # the queries layout is the FLAT atom list in blocks of 32, not the
+          # per-token dense layout gmask indexes -- reshaping and masking with
+          # gmask would compare different atoms.
+          x = x.reshape(-1, x.shape[-1])
+          print('     (%s shapes %s vs %s; ref mask trailing=%s)'
+                % (rname, x.shape, y.shape, bool(rmask[:int(rmask.sum())].all())))
+          x, y = x[:n], y[:n]
+          print('   %-20s corr %.6f  std %.4f vs %.4f'
+                % (rname, np.corrcoef(x.ravel(), y.ravel())[0, 1], x.std(), y.std()))
 
+# the headline's own operands, outside the optional breakdown above
 a, c = x_graph.ravel(), x_ref[:n].ravel()
 print('x_denoised  GRAPH vs REFERENCE   (t_hat = %.3g, %d atoms)' % (T_HAT, n))
 print('   corr %.6f   rms diff %.4f A' % (np.corrcoef(a, c)[0, 1],
@@ -173,6 +186,10 @@ gmask_ref = np.asarray(fb0.ref_structure.mask).astype(bool)
 gflat = gpos_dense[gmask_ref]
 sub[rmask] = gflat[:int(rmask.sum())]
 f2['ref_pos'] = jnp.asarray(sub)
+# The REFERENCE's own taps are still there (it is our code); only the library's
+# were removed. So take its r_update from this run before the swap clears them,
+# rather than from the graph taps the optional breakdown above used to provide.
+r_ref_own = np.asarray(R.TAPS['r_update'][0])[rmask][:n]
 R.TAPS.clear()
 R.denoise(jnp.asarray(x_flat), T_HAT, f2, s_in, zr, rp, pref, dims)
 r_swap = np.asarray(R.TAPS['r_update'][0])[rmask][:n]

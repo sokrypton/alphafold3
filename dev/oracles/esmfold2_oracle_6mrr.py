@@ -65,7 +65,11 @@ d = {'feat.' + k: v.detach().float().cpu().numpy() for k, v in feats.items()}
 d['lm_hidden'] = cap['lm_hidden']
 d['native_ca'] = NAT
 d['out.sample_atom_coords'] = o['sample_atom_coords'].float().cpu().numpy()
-d['out.plddt'] = o['plddt'].float().cpu().numpy()
+# The experimental fast/lm* releases carry a different confidence head and
+# return no 'plddt' key at all -- optional, or the dump dies after the forward
+# pass it just spent a minute on.
+if 'plddt' in o:
+    d['out.plddt'] = o['plddt'].float().cpu().numpy()
 import os as _os
 _D = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), 'dumps')
 _os.makedirs(_D, exist_ok=True)
@@ -84,4 +88,6 @@ def rmsd(a, b):
     u, _, vt = np.linalg.svd(a.T@b); s = np.sign(np.linalg.det(u@vt))
     return float(np.sqrt((((a@(u@np.diag([1,1,s])@vt))-b)**2).sum(1).mean()))
 x = d['out.sample_atom_coords'][0]
-print('NATIVE 6MRR (68 res, CA gather): %.3f A   pLDDT %.3f' % (rmsd(x[rep], NAT), d['out.plddt'].mean()))
+print('NATIVE 6MRR (68 res, CA gather): %.3f A   pLDDT %s'
+      % (rmsd(x[rep], NAT),
+         '%.3f' % d['out.plddt'].mean() if 'out.plddt' in d else 'n/a'))
