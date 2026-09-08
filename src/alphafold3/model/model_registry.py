@@ -515,7 +515,16 @@ _FEATURISE = {
     # attach_structural_batch rounds the true count up to a multiple of 32, which
     # keeps shapes stable across similar inputs without capping them.
     'opendde': dict(opendde=True, padded_keys=True),
-    'protenix2': dict(padded_keys=True),
+    # PER FAMILY, not per model. One `protenix/model/modules/primitives.py`
+    # serves every protenix release, so the padded key window is a property of
+    # the implementation and not of a checkpoint. It was set for protenix2
+    # alone, and protenix1 therefore SLID its window where native pads --
+    # invisible to L1/L2-conditioning/L3-token-transformer (all 1.000000) and
+    # visible only in the atom encoder, which nothing had ever run for
+    # protenix1: p_atom_pair corr 0.844, and a denoise step 1.16 A/atom whose
+    # error sat at the chain ends (1.95 vs 0.53 interior) and in the final
+    # partial window (2.93) -- the signature of sliding against padding.
+    **{m: dict(padded_keys=True) for m in model_config.PROTENIX_FAMILY},
     # rf3 (atomworks) renames atomised atoms to their ELEMENT symbol, carries
     # chirality features, aligns restypes to its own alphabet, and calls an
     # atomised polymer token UNKNOWN where AlphaFold 3 keeps the parent residue

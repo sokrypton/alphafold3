@@ -1135,6 +1135,63 @@ embedded MSA from native's own `msa_subsampler` and feeding it to both sides
 gives 0.999971. **If a gate's two sides do not provably see the same input, its
 number is not a measurement.**
 
+## The driver paid for itself on its first full run: protenix1 (2026-09-08)
+
+`run_all_parity.sh` asks every gate about every model. That is how protenix1's
+atom encoder came to be run for the first time -- the L2/L3 write-ups above
+cover "openfold3, openbind0, intellifold2 and rosettafold3", and protenix1 was
+simply never in the list. It was not clean:
+
+| protenix1 gate | before | after |
+|---|---|---|
+| L1 trunk / L1b MSA / template / distogram | 1.000000 | unchanged |
+| L2 token diffusion transformer | 1.000000 | unchanged |
+| L2 diffusion conditioning | 1.000000 | unchanged |
+| L2 atom encoder `c_atom_cond` | 1.000000 | unchanged |
+| L2 atom encoder `p_pair_valid` | **0.867785** | **1.000000** |
+| L2 atom encoder `a_token` | 0.997238 | **1.000000** |
+| L2 atom decoder `r_update` | 0.996954 | **1.000000** |
+| **L3 denoise step** | **1.1635 A/atom** | **0.0000 A** (max 0.0003) |
+
+**The bug: a convention set per MODEL that belongs to the FAMILY.**
+`model_registry`'s featurise knobs had `'protenix2': dict(padded_keys=True)` and
+nothing for protenix1 -- so protenix1 SLID its atom key window where native
+pads. But one `protenix/model/modules/primitives.py` serves every protenix
+release: the padded window is a property of the implementation, not of a
+checkpoint. Now `**{m: dict(padded_keys=True) for m in PROTENIX_FAMILY}`.
+
+This is the same lesson as the template outer residual, in the same file, two
+sections apart: **per-vendor conventions must be NAMED by family, or the next
+release of that vendor silently gets AF3's default.** Adding protenix1 to
+`KEY_MASKED_ATOM_ATTENTION` had already been done -- and was inert, because a
+model that does not pad has no padded keys to mask. Half a convention is not
+half a fix.
+
+**The DIAG signature is what a window-convention bug looks like**, and it is
+worth memorising because three gates read normal while this one did not:
+
+    per-atom mean 1.1635 A, max 15.99
+    window edge / interior           0.93     <- NOT the window edges
+    ends [<128, >=446] / interior    3.64     <- the chain ENDS
+    final partial window (>=544)     2.93 vs 1.07 elsewhere
+    per-token spread                 0.100 / 0.516 / 7.528 (min/median/max)
+    worst tokens                     61, 3, 66, 4, 62 of 68 -- both termini
+
+Sliding and padding agree everywhere except where the window runs off the end,
+so the error concentrates at the sequence ends and in the last partial window --
+NOT at the 32-atom window edges, which is the diagnostic most likely to be
+reached for. (And that edge/interior ratio is only trustworthy since the DIAG
+fix earlier the same day; it used to compute the window position from the masked
+atom list.)
+
+**The folds do not move, and that is the point of having activation gates.**
+6MRR 1.704 -> 1.705 best (mean 1.844 either way), `ligand_1stp` 1.867 protein /
+0.943 BTN, `rna_1ehz` 1.824, `complex_1lmb` 10.198/10.161 protein and
+1.192/1.182 DNA -- the last in line with protenix2's 11.763/11.669 and
+openfold3's 11.347/11.308, so no regression. A 1.16 A/atom error in a single
+denoise step left the end-to-end structure where it was; only the module
+comparison could see it.
+
 ## chai1's first L0 gate, and the two bugs it found (2026-09-08)
 
 `dev/audit_coverage.py` had never run on chai1. Not an oversight of priority --
