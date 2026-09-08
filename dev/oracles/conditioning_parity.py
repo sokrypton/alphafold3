@@ -182,13 +182,20 @@ def native_esmfold2(model, batch, rng, n, noise):
   and the ours-layout VIEW of it is returned, the same trick native_protenix
   uses for protenix's 449.
   """
+  import jax.numpy as jnp
+
   import esmfold2_dumps
   import esmfold2_reference as R
   from converters import esmfold2 as CV
 
   sd = esmfold2_dumps.state_dict(model)
   dims = CV.derive_dims(sd)
-  pref = {k: np.asarray(v) for k, v in CV.map_esmfold2_to_af3(sd).items()}
+  full = {k: np.asarray(v) for k, v in CV.map_esmfold2_to_af3(sd).items()}
+  # `R.diffusion_conditioning` strips a leading 'conditioning/', so it wants the
+  # diffusion sub-tree, not the whole thing.
+  pref = {k[len('diffusion/'):]: v for k, v in full.items()
+          if k.startswith('diffusion/')}
+  pref['rel_pos/weights'] = full['rel_pos/weights']
   c_z = int(pref['conditioning/z_projection/weights'].shape[-1])
   c_s = int(pref['conditioning/s_projection/weights'].shape[-1])
   c_in_esm = int(pref['conditioning/s_input_norm/scale'].shape[0])

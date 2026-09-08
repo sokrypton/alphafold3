@@ -202,6 +202,21 @@ class DiffusionHead(hk.Module):
           seq_features=batch.token_features,
           max_relative_idx=32,
           max_relative_chain=2,
+          # THE SAME GATE AS THE TRUNK'S (evoformer.py:343). ESMFold2 keys the
+          # relative-CHAIN bucket on same-CHAIN and sends the MATCH to 2*c+1,
+          # where AF3 keys it on same-ENTITY and sends the MISMATCH there -- so
+          # on a monomer EVERY pair takes a different bucket. That was fixed for
+          # the trunk (fbac0fc, worth 1.522 -> 0.719 A on esmfold2_lm600m) and
+          # this call site was missed, which left the diffusion conditioning
+          # reading AF3's convention while the trunk read ESMFold2's.
+          #
+          # Cost: pair_cond corr 0.998925 with ours 3.5% too large, and a
+          # denoise step at 1.36 A/atom against a trunk that is exact
+          # (0.999957). Two call sites for one convention is exactly the shape
+          # of bug this repo keeps finding; the flag is named identically in
+          # both places so a grep finds them together.
+          chain_bucket_on_same_chain=(
+              self.global_config.model in model_config.ESMFOLD2_FAMILY),
       ).astype(pair_embedding.dtype)
       pc = self.config.conditioning.pair_channel
       if self.global_config.model == 'opendde':

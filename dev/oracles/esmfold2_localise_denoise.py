@@ -62,20 +62,68 @@ rp = jnp.asarray(R.rel_pos_features(
     f['entity_id'].astype(int), f['token_index'].astype(int))) @ pref['rel_pos/weights']
 if NB:
     dims = dict(dims); dims['n_diff_atom'] = NB
-x_ref = np.asarray(R.denoise(jnp.asarray(x_flat), T_HAT, f, s_in, zr, rp, pref, dims))[rmask]
 
 N_PASSES = 4
 b = jax.tree_util.tree_map(jnp.asarray, utils.remove_invalidly_typed_feats(batch))
 fb0 = feat_batch.Batch.from_data_dict(b)
 gmask = np.asarray(fb0.predicted_structure_info.atom_mask).astype(bool)
+
+# MATCH THE TWO ATOM LISTS BY NAME, NOT BY POSITION. Our featuriser emits 574
+# atoms for 6MRR and ESMFold2's 573 -- ours carries the terminal OXT, its
+# PROTEIN_HEAVY_ATOMS table does not -- so `buf[:n] = x_real[:n]` put every atom
+# after that one against its neighbour. Measured before fixing: 567 of 573 atoms
+# more than 0.5 A apart in ref_pos alone, mean 3.31 A. The gate was reporting a
+# permutation (1.34 A/atom) and it looked like a port bug.
+#
+# Same lesson as the conformer Kabsch that read a flat ~0.9 A for everything:
+# match on `ref_atom_name_chars` (see PARITY.md, "the atom correspondence"), per
+# token, and compare only atoms both sides have.
+def _names(chars):
+  ch = np.asarray(chars).astype(int)
+  if ch.ndim == 3 and ch.shape[-1] > 8:            # one-hot over 64 characters
+    ch = ch.argmax(-1)
+  return ch
+
+_gn = _names(fb0.ref_structure.atom_name_chars)     # (tokens, slots, 4)
+_rn = _names(f['ref_atom_name_chars'])              # (flat_atoms, 4)
+_r2t = np.asarray(f['atom_to_token']).astype(int)
+_nm = lambda v: ''.join(chr(c + 32) for c in v).strip()
+
+_our_by_tok = {}
+for _t in range(_gn.shape[0]):
+  for _sl in range(_gn.shape[1]):
+    if gmask[_t, _sl]:
+      _our_by_tok.setdefault(_t, {})[_nm(_gn[_t, _sl])] = _t * _gn.shape[1] + _sl
+
+_ref_idx, _our_flat = [], []
+for _i in np.flatnonzero(rmask):
+  _slot = _our_by_tok.get(int(_r2t[_i]), {}).get(_nm(_rn[_i]))
+  if _slot is not None:
+    _ref_idx.append(int(_i)); _our_flat.append(int(_slot))
+_ref_idx = np.asarray(_ref_idx); _our_flat = np.asarray(_our_flat)
+n = len(_ref_idx)
+print('atoms: ours %d, reference %d, MATCHED BY NAME %d'
+      % (int(gmask.sum()), int(rmask.sum()), n))
+
+# One shared noise vector, placed at each side's own index for the same atom.
+x_common = np.asarray(jax.random.normal(jax.random.PRNGKey(7), (n, 3))) * T_HAT
+x_flat = np.zeros(rmask.shape + (3,), np.float32)
+x_flat.reshape(-1, 3)[_ref_idx] = x_common
 dense = np.zeros(gmask.shape + (3,), np.float32)
-n = min(int(gmask.sum()), len(x_real))
-buf = np.zeros((int(gmask.sum()), 3), np.float32); buf[:n] = x_real[:n]
-dense[gmask] = buf
+dense.reshape(-1, 3)[_our_flat] = x_common
+
+
+# INJECT=1 feeds the REFERENCE's trunk output into our diffusion head instead of
+# running our own trunk. Without it the two sides each run their own trunk, and
+# the trunk agrees only to relerr 4.9e-03 on a z of std 33.6 -- which the score
+# network then amplifies, so the headline mixes "our trunk" with "our
+# denoiser". This is the seam that separates them, and it is the only way to
+# read the denoise number as a statement about the score network.
+INJECT = os.environ.get('INJECT') == '1'
 
 
 @hk.transform
-def fwd(bb, x_noisy):
+def fwd(bb, x_noisy, z_inj=None, s_inj=None):
     fb = feat_batch.Batch.from_data_dict(bb)
     L = fb.token_features.mask.shape[0]
     c = cfg.evoformer.pair_channel
@@ -84,11 +132,18 @@ def fwd(bb, x_noisy):
             'single': jnp.zeros((L, cfg.evoformer.seq_channel), jnp.float32)}
     tf = af3_model.create_target_feat_embedding(
         batch=fb, config=cfg.evoformer, global_config=cfg.global_config)
-    mod = ev.Evoformer(cfg.evoformer, cfg.global_config)
-    for _ in range(N_PASSES):
-        emb = mod(batch=fb, prev=prev, target_feat=tf, key=jax.random.PRNGKey(0))
-        prev = {**prev, **{k: v.astype(jnp.float32) for k, v in emb.items() if k in prev}}
-    emb = {k: v.astype(jnp.float32) for k, v in emb.items()}
+    if z_inj is not None:
+        # ESMFold2 has no single track (PAIR_ONLY_TRUNK), so the head reads
+        # `pair` and `target_feat` only; `single` is carried to satisfy the dict.
+        emb = {'pair': z_inj.astype(jnp.float32),
+               'single': jnp.zeros((L, cfg.evoformer.seq_channel), jnp.float32),
+               'target_feat': s_inj.astype(jnp.float32)}
+    else:
+        mod = ev.Evoformer(cfg.evoformer, cfg.global_config)
+        for _ in range(N_PASSES):
+            emb = mod(batch=fb, prev=prev, target_feat=tf, key=jax.random.PRNGKey(0))
+            prev = {**prev, **{k: v.astype(jnp.float32) for k, v in emb.items() if k in prev}}
+        emb = {k: v.astype(jnp.float32) for k, v in emb.items()}
     out = dh.DiffusionHead(cfg.heads.diffusion, cfg.global_config)(
         positions_noisy=x_noisy, noise_level=jnp.asarray(T_HAT),
         batch=fb, embeddings=emb, use_conditioning=True)
@@ -103,8 +158,50 @@ def _strip(k):
     k = k[len('diffuser/'):]
   return k[len('~/'):] if k.startswith('~/') else k
 _p = {_strip(k): v for k, v in _p.items()}
-out = np.asarray(fwd.apply(_p, jax.random.PRNGKey(0), b, jnp.asarray(dense)))
-x_graph = out[gmask][:n]
+
+# TRUNCATE BOTH SIDES. NB shortens the atom stack, and the blob's params carry
+# the full 3 blocks -- asking the graph for 1 is a shape error, not a shorter
+# run ('pair_logits_projection/weights' with retrieved shape (16, 3, 4) does not
+# match (16, 1, 4)). The same rule every other block knob in this repo obeys.
+# Note the per-layer axis differs by scope: leading for the layer_stack'd
+# weights, axis 1 for the per-super-block pair logits.
+if NB:
+  # The block count is read off the ARRAYS, not from `dims` -- `dims` has
+  # already been set to NB by this point, so using it truncated nothing and the
+  # shape error stood.
+  _cut, _was = {}, None
+  for k, v in _p.items():
+    if 'diffusion_atom_transformer' not in k:
+      _cut[k] = v; continue
+    _cut[k] = {}
+    for leaf, arr in v.items():
+      a_ = np.asarray(arr)
+      if 'pair_logits_projection' in k and a_.ndim == 3 and a_.shape[1] > NB:
+        _was = _was or a_.shape[1]; a_ = a_[:, :NB]
+      elif '__layer_stack' in k and a_.ndim and a_.shape[0] > NB:
+        _was = _was or a_.shape[0]; a_ = a_[:NB]
+      _cut[k][leaf] = a_
+  _p = _cut
+  print('   NB=%d: atom stack truncated on BOTH sides (was %s)' % (NB, _was))
+# Both sides denoise the same atoms from the same coordinates, and each is read
+# back at ITS OWN indices for those atoms.
+x_ref_full = np.asarray(
+    R.denoise(jnp.asarray(x_flat), T_HAT, f, s_in, zr, rp, pref, dims))
+x_ref = x_ref_full.reshape(-1, 3)[_ref_idx]
+# The reference's s_inputs is ESM's 451 layout; ours is 447 and the graph pads
+# it back to 451 itself, so inject the OURS-layout view or the pad makes 455.
+#     ESMFold2  [atom 384 | restype 33 | profile 33 | deletion 1]  = 451
+#     AF3       [restype 31 | profile 31 | deletion 1 | atom 384]  = 447
+# with ESM reserving two restype classes AF3 does not (hence the +2 offsets).
+_idx = np.concatenate([384 + 2 + np.arange(31), 384 + 33 + 2 + np.arange(31),
+                       [384 + 33 + 33], np.arange(384)])
+_s_ours = np.asarray(s_in)[:, _idx] if INJECT else None
+out = np.asarray(fwd.apply(
+    _p, jax.random.PRNGKey(0), b, jnp.asarray(dense),
+    *( (jnp.asarray(zr), jnp.asarray(_s_ours)) if INJECT else (None, None) )))
+if INJECT:
+    print('   INJECT=1: our denoiser on the REFERENCE trunk (score network only)')
+x_graph = out.reshape(-1, 3)[_our_flat]
 # THE PER-STAGE BREAKDOWN IS OPTIONAL, and the taps it reads are gone. The port
 # instrumented `diffusion_head.DIFF_TAPS` and `atom_cross_attention.ATOM_TAPS`
 # while it was being localised, and those were removed afterwards -- correctly,
@@ -166,11 +263,46 @@ else:
                 % (rname, np.corrcoef(x.ravel(), y.ravel())[0, 1], x.std(), y.std()))
 
 # the headline's own operands, outside the optional breakdown above
-a, c = x_graph.ravel(), x_ref[:n].ravel()
+a, c = x_graph.ravel(), x_ref.ravel()
 print('x_denoised  GRAPH vs REFERENCE   (t_hat = %.3g, %d atoms)' % (T_HAT, n))
 print('   corr %.6f   rms diff %.4f A' % (np.corrcoef(a, c)[0, 1],
-                                          np.sqrt(((x_graph - x_ref[:n]) ** 2).sum(-1).mean())))
-print('   graph std %.4f   ref std %.4f' % (x_graph.std(), x_ref[:n].std()))
+                                          np.sqrt(((x_graph - x_ref) ** 2).sum(-1).mean())))
+print('   graph std %.4f   ref std %.4f' % (x_graph.std(), x_ref.std()))
+# WHERE the disagreement sits. Our featuriser emits one atom ESMFold2's does not
+# (the terminal OXT), and a +/-64 rank window means that atom is a KEY for the
+# last ~64 atoms only. If the error is concentrated there, it is an input
+# difference and not the score network; if it is flat, it is the network.
+_d = np.sqrt(((x_graph - x_ref) ** 2).sum(-1))
+_k = 64
+print('   per-atom |d|: first %d mean %.4f | middle mean %.4f | last %d mean %.4f'
+      % (_k, _d[:_k].mean(), _d[_k:-_k].mean(), _k, _d[-_k:].mean()))
+# IS IT A TRANSLATION? A centring convention (one side re-centres the noisy
+# coordinates, the other does not) shifts every atom by the same vector, which
+# leaves corr and std almost untouched and shows up as a near-uniform per-atom
+# |d| -- exactly what the three means above look like. So take the mean offset
+# out and see what is left.
+_off = (x_graph - x_ref).mean(0)
+_res = np.sqrt((((x_graph - _off) - x_ref) ** 2).sum(-1).mean())
+print('   mean offset %s |%.4f| A -> rms after removing it %.4f A (was %.4f)'
+      % (np.round(_off, 4), float(np.linalg.norm(_off)), _res,
+         np.sqrt(((x_graph - x_ref) ** 2).sum(-1).mean())))
+# IS IT A ROTATION? An augmentation/frame convention on one side only would
+# leave a rigid-body difference. Kabsch the two and report what survives: if
+# the aligned rms collapses the gap is a frame, if it does not the score network
+# genuinely disagrees.
+def _kab(a_, b_):
+    ac, bc = a_ - a_.mean(0), b_ - b_.mean(0)
+    u, _, vt = np.linalg.svd(ac.T @ bc)
+    dsign = np.sign(np.linalg.det(u @ vt))
+    r = u @ np.diag([1.0, 1.0, dsign]) @ vt
+    return float(np.sqrt(((ac @ r - bc) ** 2).sum(-1).mean()))
+print('   rigid-body aligned rms %.4f A (unaligned %.4f) -> %s'
+      % (_kab(x_graph, x_ref), np.sqrt(((x_graph - x_ref) ** 2).sum(-1).mean()),
+         'a FRAME difference' if _kab(x_graph, x_ref) < 0.3
+         else 'NOT rigid-body'))
+_q = np.quantile(_d, [0.5, 0.9, 0.99])
+print('   per-atom |d| median %.4f  p90 %.4f  p99 %.4f  max %.4f'
+      % (_q[0], _q[1], _q[2], _d.max()))
 
 # How much of the residual is simply a DIFFERENT REFERENCE CONFORMER? Our
 # featuriser builds ref_pos from the CCD/RDKit ideal, ESMFold2's dump carries
@@ -184,14 +316,14 @@ sub = np.asarray(f['ref_pos']).copy()
 gpos_dense = np.asarray(fb0.ref_structure.positions)
 gmask_ref = np.asarray(fb0.ref_structure.mask).astype(bool)
 gflat = gpos_dense[gmask_ref]
-sub[rmask] = gflat[:int(rmask.sum())]
+sub.reshape(-1, 3)[_ref_idx] = gpos_dense.reshape(-1, 3)[_our_flat]
 f2['ref_pos'] = jnp.asarray(sub)
 # The REFERENCE's own taps are still there (it is our code); only the library's
 # were removed. So take its r_update from this run before the swap clears them,
 # rather than from the graph taps the optional breakdown above used to provide.
-r_ref_own = np.asarray(R.TAPS['r_update'][0])[rmask][:n]
+r_ref_own = np.asarray(R.TAPS['r_update'][0]).reshape(-1, 3)[_ref_idx]
 R.TAPS.clear()
 R.denoise(jnp.asarray(x_flat), T_HAT, f2, s_in, zr, rp, pref, dims)
-r_swap = np.asarray(R.TAPS['r_update'][0])[rmask][:n]
+r_swap = np.asarray(R.TAPS['r_update'][0]).reshape(-1, 3)[_ref_idx]
 print('reference r_update, OUR conformer vs ITS own: corr %.6f'
       % np.corrcoef(r_swap.ravel(), np.asarray(r_ref_own).ravel())[0, 1])

@@ -1135,6 +1135,71 @@ embedded MSA from native's own `msa_subsampler` and feeding it to both sides
 gives 0.999971. **If a gate's two sides do not provably see the same input, its
 number is not a measurement.**
 
+## ESMFold2's diffusion conditioning read AF3's chain bucket (2026-09-08)
+
+The trunk's relative-CHAIN convention was fixed at `fbac0fc` -- ESMFold2 keys
+that bucket on same-CHAIN and sends the MATCH to `2c+1`, where AF3 keys it on
+same-ENTITY and sends the MISMATCH there, so on a monomer EVERY pair takes a
+different bucket. It was worth 1.522 -> 0.719 A on `esmfold2_lm600m`.
+
+**It was applied to one of the two call sites.** `evoformer.py:343` passes
+`chain_bucket_on_same_chain=(model in ESMFOLD2_FAMILY)`; `diffusion_head.py:201`
+did not, so the diffusion conditioning read AF3's convention while the trunk
+read ESMFold2's. Cost, measured by a new esmfold2 adapter in
+`conditioning_parity.py` driven by the reference:
+
+| | before | after |
+|---|---|---|
+| `pair_cond` | 0.998925, rms ours/native **1.0354** | **1.000000**, rms 1.0000 |
+| `single_cond` | 1.000000 | 1.000000 |
+
+`single_cond` being exact throughout is what pointed at the pair path, and from
+there at its only non-parametric input. Graph-only: no blob changes, so no
+republish. protenix2 re-checked at 1.000000/1.000000 -- the flag is inert
+outside the family.
+
+**Two call sites for one convention** is the same shape as protenix1's
+`padded_keys` earlier the same day, and as the template outer residual before
+that. The flag is spelled identically in both places now, so a grep finds them
+together.
+
+### The residual, and everything it is NOT
+
+The denoise step did NOT close: 1.3607 -> 1.3411 A per atom, corr 0.990764,
+against every other port's 0.0000-0.401 A. Recorded OPEN, with the exclusions,
+because a list of what a gap is not is worth more than a guess at what it is:
+
+  * **the trunk.** `INJECT=1` runs our denoiser on the REFERENCE's trunk output:
+    1.3396 A, unchanged. (The trunk itself is corr 0.999957, relerr 4.9e-03.)
+  * **the conditioning**, now exact both halves.
+  * **the atom correspondence.** The gate matched atoms by POSITION while our
+    featuriser emits 574 atoms and ESMFold2's 573 -- ours carries the terminal
+    OXT. Now matched by name per token, all 573; the number did not move, so the
+    old alignment was right by luck, and `ref_pos` differing by mean 3.31 A is a
+    local-FRAME difference the reference is insensitive to (swapping our
+    conformer in moves its `r_update` by corr 0.999984).
+  * **every atom-block parameter**: q/k/v out of the fused qkv, the attention
+    gate, both transitions, the 6-way split of the fused adaLN modulation, and
+    the key-side modulation -- all bit-equal to the reference's tree. The q
+    projection's bias (which the reference does not have) is zero. The atom
+    pair-logits projection, which ESMFold2 has no weight for, is zero.
+  * **the attention scale** (per-head 32 on both sides), **the QK RMSNorm**
+    (present both sides, same `finfo(float32).eps`), and **the RoPE tables**
+    (same formula and bases).
+  * **the sliding window.** ESMFold2's is +/-64 by rank over the whole atom
+    list; ours restricts it to AF3's query/key subsets, and the arithmetic looked
+    fatal (32 queries x +/-64 spans 160 > 128 keys) -- but esmfold2's subset is
+    192 keys and a direct count finds **0** in-window partners missing.
+  * **the discrete atom features**: `ref_element` and `ref_charge` identical
+    atom for atom.
+  * **a frame**: the mean offset is 0.34 A and removing it leaves 1.295 A;
+    rigid-body alignment leaves 1.287 A. Not a translation, not a rotation.
+
+What it costs end to end is bounded and small: 6MRR 1.494 -> 1.493 best,
+1.742 -> 1.732 mean, against native's 1.739. The error accumulates with atom
+blocks (`NB=1/2/3` -> 0.588 / 0.836 / 1.341 A), which is the one positive clue:
+it is inside the atom stack and it compounds.
+
 ## L5 for all 18, in one driver run, with the language models attached (2026-09-08)
 
 `bash dev/oracles/run_all_parity.sh L5`. Every row 6MRR, 5 samples from seed 0,
