@@ -29,3 +29,6 @@ dev/**/*.cif
 dev/**/*.pdb
 dev/**/*.log
 dev/**/__pycache__/
+# run_all_parity.sh's output: one log per gate per model plus a summary.tsv.
+# Results, not source -- and PARITY.md is where a result becomes a record.
+dev/oracles/parity_runs/
