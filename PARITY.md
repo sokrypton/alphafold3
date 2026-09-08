@@ -934,11 +934,11 @@ it covers, because the file itself is the only other record:
 | gate | level | covers |
 |---|---|---|
 | `dev/oracles/trunk_parity.py` | L1 | pairformer stack vs the vendor's module — 7 models |
-| `dev/oracles/prot_parity.py` | L1b | protenix mini/tiny/05 trunk AND MSA module |
-| `dev/oracles/conditioning_parity.py` | L2 | diffusion pair + single conditioning — 6 protenix, rf3 |
-| `dev/oracles/atom_parity.py` | L2 | atom cross-attention encoder, real batch, windowed — 6 protenix, both of3, intellifold2, rosettafold3 |
+| `dev/oracles/prot_parity.py` | L1b | protenix trunk AND MSA module (protenix2, protenix1) |
+| `dev/oracles/conditioning_parity.py` | L2 | diffusion pair + single conditioning — protenix2, protenix1, rf3 |
+| `dev/oracles/atom_parity.py` | L2 | atom cross-attention encoder, real batch, windowed — protenix2/1, both of3, intellifold2, rosettafold3 |
 | `dev/oracles/diffusion_parity.py`, `l2_all.sh` | L2 | token diffusion transformer — 10 models |
-| `dev/oracles/denoise_parity.py` | L3 | one denoise step, whole diffusion module — 6 protenix, both of3, intellifold2, rosettafold3 |
+| `dev/oracles/denoise_parity.py` | L3 | one denoise step, whole diffusion module — protenix2/1, both of3, intellifold2, rosettafold3 |
 | `dev/oracles/confidence_parity.py`, `l4_all.sh` | L4 | confidence head — every port |
 | `dev/oracles/fold_check.py` | L5 | one model, one target, CA-RMSD (`MODEL_DIR=` to compare blobs) |
 | `dev/oracles/modality_check.py` | L6 | RNA / DNA / ligand / complex folds scored against a reference, and `--write` validates the mmCIF the model emits |
