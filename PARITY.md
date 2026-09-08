@@ -967,7 +967,7 @@ Enumerated against the graph's own module list rather than from memory:
 |---|---|---|---|
 | ~~template embedder~~ | 9 | **4** | gated 2026-09-08, found TWO bugs; protenix2/1, rosettafold3, boltz2 all **1.000000** |
 | **MSA module** | **10** | **2** | only `protenix2` and `protenix1`, via `prot_parity.py` (L1b) |
-| ~~distogram head~~ | all | **6** | CLOSED 2026-09-08, `dgram_parity.py` — see below |
+| ~~distogram head~~ | all | **8** | CLOSED 2026-09-08, `dgram_parity.py`; chai1 is n/a (no native head) |
 | ~~input embedder~~ | all | **2** | CLOSED 2026-09-08, `real_trunk_parity.py` |
 | ~~recycling loop~~ | all | **2** | same gate — it compares the trunk AFTER all recycles |
 | atom decoder | all | 0 direct | covered in composition by the three exact L3 steps |
@@ -1083,6 +1083,8 @@ models, and all six are EXACT:
 | `openbind0` | 128 | 64 | no | 1.000000 | 0.00000 |
 | `intellifold2` | 512 | 64 | no | 1.000000 | 2.2e-07 |
 | `rosettafold3` | 128 | **65** | yes | 1.000000 | 2.4e-07 |
+| `boltz2` | 128 | 64 | yes | 1.000000 | 2.4e-07 |
+| `opendde` | 384 | **96** | yes | 1.000000 | 0.00000 |
 
 The head is one projection off the trunk pair, so synthetic z suffices -- no
 real batch, unlike the atom gates. What it actually checks is the thing a
@@ -1093,6 +1095,17 @@ weight, off by a factor of two on the BIAS -- which is why
 `converters/rosettafold3.py` stores b/2, and this gate is what verifies that
 claim instead of trusting the comment beside it. Both sides come out exactly
 symmetric on every model.
+
+**boltz2 is on rf3's side of that split** (`z = z + z.transpose(1, 2)` then the
+linear) and `converters/boltz2.py` already halves its bias; opendde is on
+protenix's side and correctly does not. Both now verified rather than asserted.
+Bin counts differ too and are read off the checkpoint, never assumed: 64 for
+most, 65 for rf3, **96 for opendde**.
+
+`chai1` is the one model with no native distogram to compare: it has no such
+head of its own, and ours was trained post-hoc on its frozen trunk
+(`sokrypton/chai-lab@dgram`), so there is nothing to be faithful TO. That is a
+genuine n/a rather than a gap.
 
 **The input embedder and the recycling loop are CLOSED (2026-09-08)**, by
 promoting the ad-hoc comparison that came out of the 5K9P investigation into
@@ -1144,7 +1157,7 @@ it covers, because the file itself is the only other record:
 | `dev/oracles/denoise_parity.py` | L3 | one denoise step, whole diffusion module — protenix2/1, both of3, intellifold2, rosettafold3 |
 | `dev/oracles/template_parity.py` | L1 | template embedder vs the vendor's own module — protenix2/1, rosettafold3, boltz2, all 1.000000; found 2 bugs |
 | `dev/oracles/real_trunk_parity.py` + `native_trunk_dump.sh` | L1 real-input | input embedder, trunk output and recycling, against native's own featurised run — protenix2/1 |
-| `dev/oracles/dgram_parity.py` | L4 | distogram head — protenix2/1, both of3, intellifold2, rosettafold3 |
+| `dev/oracles/dgram_parity.py` | L4 | distogram head — protenix2/1, both of3, intellifold2, rosettafold3, boltz2, opendde |
 | `dev/oracles/confidence_parity.py`, `l4_all.sh` | L4 | confidence head — every port |
 | `dev/oracles/fold_check.py` | L5 | one model, one target, CA-RMSD (`MODEL_DIR=` to compare blobs) |
 | `dev/oracles/modality_check.py` | L6 | RNA / DNA / ligand / complex folds scored against a reference, and `--write` validates the mmCIF the model emits |
