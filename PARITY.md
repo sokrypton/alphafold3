@@ -596,50 +596,91 @@ features and its windowed atom-pair distances, so this is a real input differenc
 in every protenix fold -- of the same class as the boltz2 atom-encoder conformer
 gap, and equally not a port bug.
 
-It does NOT obviously explain protenix2, and saying so is the point: protenix05
+It does NOT explain protenix2's 5K9P behaviour (see the retraction below), and
+saying so is the point: the since-removed protenix05
 carries the same conformer difference through the same code and matches native
 end to end (ours 1.569/1.465, native 1.552/1.332). So the conformer difference is
 real, is worth closing, and is not on its own the cause.
 
-**OPEN: protenix2 does not reproduce native on a MODIFIED residue.** The one
-place in this whole session where our port and native end-to-end disagree.
-Phospho-ubiquitin (5K9P, SEP-20), native seed 101, native settings (10 recycles
-x 200 sampling steps), no MSA on either side:
+**RETRACTED, and replaced by what the evidence actually shows (2026-09-08).**
+This section previously read "protenix2 does not reproduce native on a MODIFIED
+residue", built on a single comparison: ours 7.584 A against native's 1.080 on
+5K9P+SEP-20 at seed 101. Both halves of that framing were wrong.
 
-| | ours | native protenix2 |
+**1. The plain target fails too, so it was never the modification.** Re-run
+side by side at seed 101, no MSA, native's own settings:
+
+| target | ours best / mean | native best / mean |
 |---|---|---|
-| 5K9P plain | 7.161 | 9.648 |
-| 5K9P + SEP-20 | 7.584 | **1.080** |
+| 5K9P plain | 7.489 / 9.581 | 9.648 / 11.368 |
+| 5K9P + SEP-20 | 7.978 / 9.651 | 1.080 / 1.767 |
 
-Natively the modification transforms the fold (9.6 -> 1.1 A, all five samples);
-for us it changes nothing (7.16 -> 7.58). On the PLAIN target we are better than
-native, so this is specific to the modified-residue path. What has been excluded:
+Our two rows are the same number. Nothing about the modified-residue path is
+implicated by them.
 
-  * SEEDS -- ours reads 7.2-8.3 across seeds 1, 7 and 101, native's own seed 101
-    gives 1.08. Not sampling noise.
-  * THE MSA -- ours is 7.99 with a self-MSA and 7.99 with none.
-  * TOKENISATION -- both sides atomise a modified residue (protenix's
-    `add_centre_atom_mask` cites the same AF3 SI rule), 76 tokens -> 85.
-  * RESTYPE -- both give the atomised tokens the PARENT type: protenix maps
-    `SEP -> S -> SER` in `add_cano_seq_resname`, which is what we do.
-  * The junction BONDS an atomised residue loses. `atomized_backbone_bonds` is
-    rf3-only in our registry and protenix builds its bonds from the atom array,
-    so it looked like the answer; enabling it moves nothing (7.584 -> 7.225,
-    inside noise). Reverted rather than kept on a hunch.
+**2. Native's 1.080 was one lucky seed.** Native protenix2 on this target is
+wildly seed-dependent -- and seed 303 INVERTS the story, folding the plain
+target well (1.57 A mean) and the modified one badly (10.2):
 
-RULED OUT SINCE, by the featurisation diff above: the token and atom counts,
-restype, residue_index, ref_charge, ref_space_uid, ref_element and the MSA row
-are all identical to native's own featuriser. Also ruled out: the template path
-(native's featuriser emits `template_aatype` with an ALL-EMPTY mask and runs its
-embedder on it exactly as we do -- forcing our contribution to zero changes
-nothing, 6MRR 0.700 vs 0.699), and protenix2's own modules, every one of which
-is now measured exact including the MSA stack at 1.00000000.
+| native seed | plain mean | +SEP mean |
+|---|---|---|
+| 101 | 11.37 | 1.77 |
+| 202 | 4.92 | 1.87 |
+| 303 | **1.57** | **10.21** |
+| 404 | 6.40 | 1.25 |
+| all 20 samples each | 6.06 (7/20 under 3 A) | 3.77 (15/20 under 3 A) |
 
-What is left: the reference conformers (0.90 A per residue), and the recycling /
-sampler integration, which no gate covers -- L3 compares ONE denoise step at a
-fixed noise level with given conditioning. Every protenix2 MODULE is exact against native (L1, L2
-conditioning including 4-chain, L2 token transformer, L2 atom encoder, L3 a full
-denoise step at 0.0000 A, L4), so whatever this is, it is an input difference.
+Native does gain something real from the modification (15/20 under 3 A against
+7/20), but a fifth of that table's spread is bigger than the effect, and the
+single-seed pair this section was built on was mostly noise. **One seed is not a
+measurement on a target a model folds unreliably.**
+
+**3. What survives is a distributional gap, not a defect anyone has localised.**
+Across 40 samples (4 seeds x 5 samples x 2 targets) native lands under 3 A
+twenty-two times; across our own 40 we never go below 7.3 A. Native reaches the
+right basin on this target and we do not. That is real and unexplained.
+
+**The first REAL-INPUT trunk comparison (2026-09-08).** Every gate above feeds
+the trunk RANDOM s/z, so nothing had ever compared the trunk's actual output on
+a real input -- the one link between "every module is exact" and "the fold
+disagrees". Native's own tensors, captured where it hands them to its sampler
+(`Protenix.sample_diffusion`, plus `DiffusionConditioning.prepare_cache` for the
+raw pair, since native passes `z_trunk=None` and caches a CONDITIONED pair --
+comparing ours against that one instead reads corr 0.011 and means nothing):
+
+| tensor | 5K9P (both fold badly) | 6MRR (both fold at 0.70 A) |
+|---|---|---|
+| `s_inputs` | **0.99999658** | — |
+| `s_trunk` (single) | 0.99823 (rms 0.896) | 0.99915 (rms 1.014) |
+| `z_trunk` (pair) | **0.867** | **0.960** |
+
+**The 6MRR column is why this is not a smoking gun.** On the target where our
+fold MATCHES native at 0.70 A, the trunk pair still only correlates 0.96 -- so a
+pair correlation well below 1.0 is the normal amplification of float differences
+through 48 blocks x 10 recycles, and coexists with a perfect fold. 5K9P is worse
+(0.867) but the same in kind. The input embedder is exact on both.
+
+**Hypotheses tested and REJECTED here, so they are not retested:**
+  * *The duplicate MSA row.* AF3 emits the query twice when the unpaired and
+    paired MSAs are both empty; native keeps one. Masking ours to native's depth
+    makes the trunk pair WORSE (0.867 -> 0.720). The fold number moved too
+    (best 7.978 -> 3.996) but that is inside the 4-11 A spread of this target.
+  * *The sampler loop.* Read against `generator.py::sample_diffusion` line by
+    line: churn (`gamma_0` above `gamma_min`), `t_hat`, the noise term, the
+    Euler step with `step_scale_eta`, and centre-random-augmentation at the top
+    of every step all match.
+  * *The noise schedule.* Identical for 200 of 201 entries; ours ends at 0.0064
+    where native forces the last level to exactly 0.
+  * *Recycling.* 0, 1, 4 and 10 recycles give 9.47 / 9.46 / 8.78 / 9.59 mean --
+    our fold is flat in recycles on this target.
+  * *`modified_res_mask`.* Native's featuriser emits it; no native model module
+    reads it.
+
+Still open, and now stated correctly: **on single-sequence 5K9P neither
+implementation is reliable, and native's failures and successes are further
+apart than ours.** No module, feature, or sampler difference explains it, and
+the trunk evidence says the divergence is amplification rather than a discrete
+fault.
 
 **Modified residues are their own case.** `ptm_5k9p` is ubiquitin
 phosphorylated at Ser20 (SEP): AF3 ATOMISES a modified residue, so it reaches a
