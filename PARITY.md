@@ -925,6 +925,45 @@ dims-from-constants fix as everything else here: `PairformerStack` builds
 the harness passed `hidden_scale_up=True` -- which trunk_parity.py had been
 passing all along.
 
+## What has NO gate at all (2026-09-08)
+
+The L0-L6 table answers "how far down does each model's coverage go" and hides
+the more useful question: which MODULES has nothing ever compared? The levels
+were organised around the diffusion path, so the answer is not visible there.
+Enumerated against the graph's own module list rather than from memory:
+
+| module | models carrying it | gated on | note |
+|---|---|---|---|
+| **template embedder** | **9** | **0** | `TemplateEmbedding`, `SingleTemplateEmbedding`, `Boltz2TemplateEmbedding` — no oracle imports any of them |
+| **MSA module** | **10** | **2** | only `protenix2` and `protenix1`, via `prot_parity.py` (L1b) |
+| **distogram head** | all | **0** | `DistogramHead` appears in `confidence_parity.py` only as a FEATURE name (`distogram_rep_atom_mask`), never compared |
+| **input embedder** | all | **0 standing** | `create_target_feat_embedding` is built in 5 oracles and compared in none |
+| atom decoder | all | 0 direct | covered in composition by the three exact L3 steps |
+| recycling loop | all | 0 | L1-L4 all measure a SINGLE pass |
+
+**The template gap is the biggest one.** Nine models carry a template stack and
+templates demonstrably work end to end (boltz2 folds 5CAJ to 0.72 A with one,
+rosettafold3 to 1.56 A), but no vendor-vs-ours comparison of the template
+embedder has ever been run. Everything known about it comes from folds. That
+also means the one time a template hypothesis was tested here -- zeroing our
+contribution on 6MRR, which changed nothing -- proved only that the path is
+inert when NO template is supplied, which is not the same claim.
+
+**The distogram gap matters more than its size suggests.** It is the head design
+gradients flow through (`zero recycles, backprop into the distogram and stop`),
+so a silent divergence there would be invisible to every structural number in
+this document and would corrupt exactly the use case the design work depends on.
+
+**The input embedder has one measurement, and it is not a gate.** Chasing the
+protenix2 5K9P question produced a real-input comparison of `s_inputs`:
+0.99999658 for protenix2. That is a single scratchpad run on one model, not a
+harness, and it should become one -- along with the real-input TRUNK comparison
+from the same session (which is where the 6MRR pair-0.960 control came from).
+
+Two of these are cheap: the input embedder and the distogram head are single
+projections off tensors the existing harnesses already build. The template
+embedder is a real adapter per vendor, in the shape of `denoise_parity.py`.
+
 ## The gates, and where they live
 
 `dev/` is gitignored (see README, "Where the harnesses live"), so these exist on

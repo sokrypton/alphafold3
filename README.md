@@ -186,6 +186,22 @@ agreeing to 0.0006 Å).
   composition, by the three models whose whole denoise step is exact.
 * **L6 is unrun for `openbind0` and `protenix1`**, not known to be broken.
 
+And the table hides four modules that nothing has ever compared, because the
+levels were organised around the diffusion path:
+
+| module | models carrying it | gated on |
+|---|---|---|
+| **template embedder** | 9 | **0** |
+| **MSA module** | 10 | **2** (protenix2, protenix1) |
+| **distogram head** | all | **0** |
+| **input embedder** | all | **0 standing** (one ad-hoc measurement) |
+
+Templates demonstrably work end to end — `boltz2` folds 5CAJ to 0.72 Å with one,
+`rosettafold3` to 1.56 Å — but that is evidence from folds, not from a
+comparison against the vendor's own module. The distogram head is the one design
+gradients flow through, so a silent divergence there would be invisible to every
+structural number here. See `PARITY.md`.
+
 ### L1 — the trunk, against each model's own native module
 
 Correlation of our single (`s`) and pair (`z`) trunk representations against the
