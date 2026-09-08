@@ -934,20 +934,60 @@ Enumerated against the graph's own module list rather than from memory:
 
 | module | models carrying it | gated on | note |
 |---|---|---|---|
-| **template embedder** | **9** | **0** | `TemplateEmbedding`, `SingleTemplateEmbedding`, `Boltz2TemplateEmbedding` — no oracle imports any of them |
+| **template embedder** | 9 | **1** | first gate 2026-09-08, `template_parity.py` — and protenix2 is NOT exact, see below |
 | **MSA module** | **10** | **2** | only `protenix2` and `protenix1`, via `prot_parity.py` (L1b) |
 | ~~distogram head~~ | all | **6** | CLOSED 2026-09-08, `dgram_parity.py` — see below |
 | ~~input embedder~~ | all | **2** | CLOSED 2026-09-08, `real_trunk_parity.py` |
 | ~~recycling loop~~ | all | **2** | same gate — it compares the trunk AFTER all recycles |
 | atom decoder | all | 0 direct | covered in composition by the three exact L3 steps |
 
-**The template gap is the biggest one.** Nine models carry a template stack and
-templates demonstrably work end to end (boltz2 folds 5CAJ to 0.72 A with one,
-rosettafold3 to 1.56 A), but no vendor-vs-ours comparison of the template
-embedder has ever been run. Everything known about it comes from folds. That
-also means the one time a template hypothesis was tested here -- zeroing our
-contribution on 6MRR, which changed nothing -- proved only that the path is
-inert when NO template is supplied, which is not the same claim.
+### The template embedder, gated for the first time -- and OPEN (2026-09-08)
+
+Nine models carry a template stack and nothing had ever compared one against
+its vendor. `dev/oracles/template_parity.py` now does, for protenix2, and the
+answer is not clean:
+
+| model | corr | rms ours/native | max\|d\|/rms |
+|---|---|---|---|
+| `protenix2` | **0.998468** | 1.0093 | 5.5 |
+
+**0.998 is a poor number for this module.** The trunk's 48-block pairformer
+reads 1.000000 on the same model; the template stack is 2 blocks and reads
+0.9985. Everything around it has been checked and is right:
+
+  * **0 missing / 0 unexpected** on the native side (89 tensors), 0 unmapped on
+    ours (34 scopes).
+  * **The feature order matches.** Ours builds
+    `[dgram(39), pb_mask(1), restype_i(32), restype_j(32), uvec(3), bb_mask(1)]`
+    and the converter passes `linear_no_bias_a` through with no column
+    permutation, which is only correct if native concatenates the same way. It
+    does -- but its CONFIG dict lists a different order
+    (`distogram, backbone_frame_mask, unit_vector, pseudo_beta_mask`), and only
+    the `to_concat` sequence in `single_template_forward` is authoritative.
+    Reading the config would have produced a wrong "fix".
+  * **`hidden_scale_up=True` is confirmed by the checkpoint**, not guessed:
+    False builds 64x128 where the weights are 64x64, and load_state_dict
+    raises. (`TMPL_HSU=0/1` forces it.)
+  * **The template COUNT is controlled.** The batch pads to 4 slots; feeding
+    native 1 while ours aggregated 4 would be no comparison at all. Fixing that
+    changed the number by nothing (0.998468 either way), so the padding slots
+    are inert and the residual is not them.
+
+**Prime suspect, untested: the template pairformer's pair-bias convention.**
+protenix2 is in `TRANSPOSED_COLUMN_PAIR_BIAS`, which our trunk honours; whether
+our `tmpl_pairformer` applies it, and whether native's template
+`pairformer_stack` does, has not been checked. That is where to look next.
+
+Worth stating plainly: the module docstrings ALREADY claimed this path was
+"VALIDATED exact vs native geometry" (features) and "corr 1.0 vs Boltz's
+TemplateModule" (the fused forward). Those claims were made during the port,
+were never a tracked gate, and the first tracked measurement disagrees. A
+docstring is not a gate.
+
+Templates do work end to end (boltz2 folds 5CAJ to 0.72 A with one,
+rosettafold3 to 1.56 A), which bounds how bad this can be -- and the one earlier
+template test here, zeroing our contribution on 6MRR and seeing nothing change,
+proved only that the path is inert when NO template is supplied.
 
 **The distogram gap is CLOSED (2026-09-08).** It mattered out of proportion to
 its size -- it is the head design gradients flow through (`zero recycles,
@@ -1006,8 +1046,7 @@ produces a meaningless number:
     against it reads **corr 0.011**, which looks like catastrophe and means
     nothing.
 
-Left: **the template embedder** (9 models, 0 gated) and the atom decoder. The
-template one is a real adapter per vendor, in the shape of `denoise_parity.py`.
+Left: the template embedder on the other 8 models, and the atom decoder.
 
 ## The gates, and where they live
 
@@ -1023,6 +1062,7 @@ it covers, because the file itself is the only other record:
 | `dev/oracles/atom_parity.py` | L2 | atom cross-attention encoder, real batch, windowed — protenix2/1, both of3, intellifold2, rosettafold3 |
 | `dev/oracles/diffusion_parity.py`, `l2_all.sh` | L2 | token diffusion transformer — 10 models |
 | `dev/oracles/denoise_parity.py` | L3 | one denoise step, whole diffusion module — protenix2/1, both of3, intellifold2, rosettafold3 |
+| `dev/oracles/template_parity.py` | L1 | template embedder vs the vendor's own module — protenix2 (OPEN at 0.998468) |
 | `dev/oracles/real_trunk_parity.py` + `native_trunk_dump.sh` | L1 real-input | input embedder, trunk output and recycling, against native's own featurised run — protenix2/1 |
 | `dev/oracles/dgram_parity.py` | L4 | distogram head — protenix2/1, both of3, intellifold2, rosettafold3 |
 | `dev/oracles/confidence_parity.py`, `l4_all.sh` | L4 | confidence head — every port |

@@ -191,15 +191,20 @@ levels were organised around the diffusion path:
 
 | module | models carrying it | gated on |
 |---|---|---|
-| **template embedder** | 9 | **0** |
+| **template embedder** | 9 | **1** — and protenix2 reads 0.998468, not exact |
 | **MSA module** | 10 | **2** (protenix2, protenix1) |
 | ~~distogram head~~ | all | **6** — closed 2026-09-08 |
 | ~~input embedder~~ | all | **2** — closed 2026-09-08 |
 | ~~recycling loop~~ | all | **2** — same gate |
 
 Templates demonstrably work end to end — `boltz2` folds 5CAJ to 0.72 Å with one,
-`rosettafold3` to 1.56 Å — but that is evidence from folds, not from a
-comparison against the vendor's own module.
+`rosettafold3` to 1.56 Å — but that was evidence from folds, not from a
+comparison against the vendor's own module. The first such comparison now
+exists for `protenix2` and reads **0.998468**, which is poor for this module:
+the 48-block trunk pairformer on the same model reads 1.000000 and the template
+stack is 2 blocks. Config, feature order and template count are all verified
+correct, so it is recorded as OPEN with the template pairformer's pair-bias
+convention as the prime suspect. See `PARITY.md`.
 
 The distogram head **was** on that list and is now gated on six models, all
 exact. It was worth doing first despite being one projection: it is the head
