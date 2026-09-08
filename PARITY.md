@@ -80,18 +80,25 @@ the removal itself implies.
 | `esmfold2` family | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a — protein only |
 | `af2_ptm` / `af2_multimer` | n/a | n/a | n/a | n/a | n/a | ✓ | n/a — protein only |
 
-L2 is now covered in all three of its parts for protenix: the **token
-transformer** (ten models), the **diffusion conditioning** (protenix's six plus
-rosettafold3) and the **atom encoder** (protenix2, corr 1.000000 on the
-per-atom conditioning, the per-atom output and the per-token output). The atom
-DECODER and the other families' atom paths remain unmeasured.
+**What `~` at L2 means, model by model.** L2 has three parts, and the column is
+`~` wherever fewer than all three are measured:
 
-The token-transformer half: ten models run their own vendor's
-`DiffusionTransformer` and ours side by side on identical synthetic
-`a`/`s`/`z`, all at corr 1.000000 and `rms ours/native` 1.0000
-(`dev/oracles/diffusion_parity.py`, table under plan item 2a). The conditioning
-projections and the atom encoder/decoder in the same column are still
-unmeasured, so this is a third of L2, not L2.
+| part | gate | covered |
+|---|---|---|
+| token diffusion transformer | `diffusion_parity.py` | ten models, all corr 1.000000, `rms ours/native` 1.0000 |
+| diffusion conditioning | `conditioning_parity.py` | `protenix2`, `protenix1`, `rosettafold3` |
+| atom cross-attention ENCODER | `atom_parity.py` | `protenix2`, `protenix1`, both of3 releases, `intellifold2`, `rosettafold3` |
+
+So `boltz2`, `opendde`, `chai1` and the `esmfold2` family read `✓` because their
+L2 was gated a different way when they were ported (whole-module injection),
+while the AF3-family rows read `~` because this document's three-part L2 is the
+stricter standard and their conditioning or atom encoder is not all measured.
+
+**The atom DECODER has no gate of its own, on any model.** It is covered only in
+composition, by the models whose whole denoise step (L3) is exact -- `protenix2`
+at 0.0000 A per atom, `openfold3` at 0.0001, `openbind0` at 0.0021. That is real
+evidence, but it cannot localise a decoder-only fault, and it is the largest
+remaining structural hole here.
 
 `alphafold3` and the AF2 pair are `n/a` at L0–L4 by construction: the first IS
 the reference implementation, and the second runs DeepMind's own network
