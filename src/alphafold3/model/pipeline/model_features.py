@@ -320,12 +320,29 @@ def _attach_lm_pair(batch, lm_pair):
   if lm.shape[:2] != (n, n):
     is_protein = np.asarray(batch['is_protein']).astype(bool)
     idxs = np.flatnonzero(is_protein)
-    if lm.shape[:2] != (len(idxs), len(idxs)):
+    # ONE ROW PER RESIDUE, NOT PER TOKEN. The language model reads a sequence,
+    # so its rows are residues; AF3 ATOMISES a modified residue into one token
+    # per atom, all of them protein. Keying on the protein-token COUNT therefore
+    # failed on any PTM -- `lm_pair is (76, 76) but the batch has 85 tokens
+    # (85 of them protein)` on phospho-ubiquitin -- and ESMFold2 could not be
+    # given its language model at all on such an input.
+    #
+    # So map each protein token to the row of ITS RESIDUE, which is the same
+    # parent-residue convention AF3 uses for an atomised residue's restype. With
+    # nothing atomised every residue is one token and this is exactly the
+    # identity it replaces.
+    asym = np.asarray(batch['asym_id']).reshape(-1)[idxs]
+    resi = np.asarray(batch['residue_index']).reshape(-1)[idxs]
+    rank, rows = {}, []
+    for key in zip(asym.tolist(), resi.tolist()):
+      rows.append(rank.setdefault(key, len(rank)))
+    rows = np.asarray(rows, np.int64)
+    if lm.shape[:2] != (len(rank), len(rank)):
       raise ValueError(
           f'lm_pair is {lm.shape[:2]} but the batch has {n} tokens '
-          f'({len(idxs)} of them protein)')
+          f'({len(idxs)} of them protein, spanning {len(rank)} residues)')
     full = np.zeros((n, n, lm.shape[-1]), np.float32)
-    full[np.ix_(idxs, idxs)] = lm
+    full[np.ix_(idxs, idxs)] = lm[np.ix_(rows, rows)]
     lm = full
   batch['lm_pair'] = lm
   return batch

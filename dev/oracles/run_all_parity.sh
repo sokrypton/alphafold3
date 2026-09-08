@@ -93,9 +93,14 @@ gate () {
     # LM_CASE is set by the L5/L6 loops; the module gates feed their own inputs
     # and want none of this.
     local lm=; [ -n "${LM_CASE:-}" ] && lm=$(lm_env "$model" "$LM_CASE")
+    # Only a real VAR=path is passed to env. `${lm#__LM_MISSING=*}` was wrong
+    # here: `#` strips the SHORTEST matching prefix, so a missing-file marker
+    # became the bare filename and env ran it as a command (exit 127).
+    local lmset=
+    case "$lm" in *=*) [ "${lm#__LM_MISSING}" = "$lm" ] && lmset=$lm ;; esac
     ( echo "__LM ${lm:-none}"
       JAX_DEFAULT_MATMUL_PRECISION=highest PYTHONPATH=$pp \
-        env ${lm#__LM_MISSING=*} \
+        env ${lmset:+"$lmset"} \
         timeout "${GATE_TIMEOUT:-3600}" $PY "$@" 2>&1
       echo "__GATE_EXIT $?" ) > "$log"
   fi
@@ -241,8 +246,12 @@ if want L6; then
   echo "== L6 modality screens"
   for m in $MODELS; do
     for case in rna_1ehz dna_1lmb complex_1lmb ligand_1stp ptm_5k9p plain_5k9p protein_6mrr; do
-      # ptm_5k9p reuses plain_5k9p's LM input: SEP is a modification of a
-      # residue already in that sequence, so the two share it exactly.
+      # ptm_5k9p reuses plain_5k9p's LM input: the SEQUENCE is identical (SEP
+      # modifies a residue already there), and a language model reads sequences.
+      # This only became valid once `_attach_lm_pair` learned to map its rows by
+      # RESIDUE -- AF3 atomises a modified residue, so the batch has 85 protein
+      # tokens against the LM's 76 rows, and keying on the token count raised
+      # `lm_pair is (76, 76) but the batch has 85 tokens`.
       lmcase=$case; [ "$case" = ptm_5k9p ] && lmcase=plain_5k9p
       LM_CASE=$lmcase gate "L6.$case" "$m" 'RMSD|best' \
         dev/oracles/modality_check.py "$m" "$case"

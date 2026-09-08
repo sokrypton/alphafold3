@@ -190,7 +190,13 @@ _LOADERS = {
            ('esmfold2_exp_fast_cutoff2025',
             'ESMFold2-Experimental-Fast-Cutoff2025'),
            ('esmfold2_lm600m',
-            'ESMFold2-Experimental-Fast-base600M-step1500k'))},
+            'ESMFold2-Experimental-Fast-base600M-step1500k'),
+           # lm300m was missing, so L0 had never run on it -- the same omission
+           # this file's own comment records for five protenix models. Listing
+           # every variant is the fix; a driver that probes every model is what
+           # makes the omission visible.
+           ('esmfold2_lm300m',
+            'ESMFold2-Experimental-Fast-base300M-step1500k'))},
 }
 
 _MAPPERS = {
@@ -206,7 +212,7 @@ _MAPPERS = {
     **{m: 'map_esmfold2_to_af3_graph' for m in (
         'esmfold2', 'esmfold2_fast', 'esmfold2_exp', 'esmfold2_exp_fast',
         'esmfold2_exp_cutoff2025', 'esmfold2_exp_fast_cutoff2025',
-        'esmfold2_lm600m')},
+        'esmfold2_lm600m', 'esmfold2_lm300m')},
 }
 
 
