@@ -32,7 +32,7 @@ need the vendor's forward pass, so coverage tracks which natives are installed.
 | `alphafold3` | n/a | n/a | n/a | n/a | n/a | ✓ | · |
 | `openfold3` | ✓ | ✓ | ~ | · | ✓ | ✓ | ✓ |
 | `openbind0` | ✓ | ✓ | ~ | · | ✓ | ✓ | · |
-| `intellifold2` | ✓ | ✓ | ~ | · | ✓ | ✓ | ✓ |
+| `intellifold2` | ✓ | ✓ | ~ | ~ | ✓ | ✓ | ✓ |
 | `protenix2` | ✓ | ✓ | ~ | · | ✓ | ✓ | ✓ |
 | `protenix05` | ✓ | ✓ | ~ | · | ✓ | ✓ | · |
 | `protenix1` | ✓ | ✓ | ~ | · | ✓ | ✓ | · |
@@ -41,7 +41,7 @@ need the vendor's forward pass, so coverage tracks which natives are installed.
 | `protenix_tiny` | ✓ | ✓ | ~ | ~ | ✓ | ✓ | · |
 | `boltz2` | ✓ | ✓ | ✓ | · | ✓ | ✓ | ✓ |
 | `opendde` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `rosettafold3` | ✓ | ✓ | ~ | · | ✓ | ✓ | ✓ |
+| `rosettafold3` | ✓ | ✓ | ~ | ~ | ✓ | ✓ | ✓ |
 | `chai1` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `esmfold2` family | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a — protein only |
 | `af2_ptm` / `af2_multimer` | n/a | n/a | n/a | n/a | n/a | ✓ | n/a — protein only |
@@ -393,8 +393,10 @@ over softmaxed bins, so a 1e-6 logit difference is worth milli-angstroms.
 confidence heads (2b/2c); what remains is the diffusion CONDITIONING, the atom
 encoder/decoder, and then the denoise step. DONE since: the atom encoder for
 both of3 releases, `protenix2` and now `intellifold2`; L3 for all six protenix
-releases; the atom encoder for `rosettafold3`. LEFT: L3 for of3/if2/rf3, and the
-atom DECODER, which no gate reaches directly -- L3 covers it only in composition. `opendde` is the one model with no
+releases; the atom encoder for `rosettafold3`; L3 for `intellifold2` and
+`rosettafold3`. LEFT: L3 for of3, and the atom DECODER, which no gate reaches
+directly -- L3 covers it only in composition, and rf3's L3 is the reason that
+matters. `opendde` is the one model with no
 L4 -- it has its own head. These
 need new oracles, and they are the four whose ports predate the injection-ladder
 method (dump native's own tensors, inject them, compare our module's output).
@@ -762,6 +764,34 @@ protenix pads with zeros, and both sides mask those cells out of the attention.
 The outputs agreeing to 1e-5 IS the evidence that those cells never reach the
 result.
 
+### L3 for intellifold2 and rosettafold3 (2026-09-08)
+
+Both vendors' whole diffusion modules now run against ours on one step:
+
+| model | native tensors | missing / unexpected | corr | per-atom mean | per-atom max | native rms |
+|---|---|---|---|---|---|---|
+| `intellifold2` | 706 | 0 / 0 | 0.999950 | **0.075 A** | 1.59 | 19.3 |
+| `rosettafold3` | 879 | 0 / 0 | 0.999347 | **2.79 A** | 14.9 | 130.4 |
+
+**if2 lands where the other exact ports do.** Two vendor facts had to be right
+first: its module returns `r_update`, NOT `x_denoised` -- the EDM scaling lives
+outside it in `model.py::diffusion_edm_forward`, so the harness applies it -- and
+its `s_inputs` is 447 wide, not 449 (`layer_norm_s` is 831 = 384 + 447), so if2
+is NOT one of `model_config.PADDED_SINGLE_COND`. Both are the kind of difference
+that still correlates well while being wrong.
+
+**rf3 is the loose one, and its own parts are tighter than the whole.** Its
+conditioning is 1.000000, its token transformer is gated, its atom encoder is
+0.999870 -- yet the composed step is 2.79 A per atom (2% of a 130 A coordinate
+spread). The one piece under it that NO gate reaches is the atom DECODER, which
+makes it the first suspect; the second is `process_ch`, the chiral term the port
+does not implement, dropped on the native side here so that both sides omit it.
+Recorded as measured, not explained.
+
+`force_bfloat16 = True` on all 30 of rf3's attention blocks has to be switched
+off for this to run at all (a hard dtype error on CPU), the same surgery
+`diffusion_parity.py` does for the token stack alone.
+
 ### L3 across the whole protenix family (2026-09-08)
 
 With the atom encoder/decoder block counts now READ off the checkpoint rather
@@ -812,6 +842,7 @@ it covers, because the file itself is the only other record:
 | `dev/oracles/conditioning_parity.py` | L2 | diffusion pair + single conditioning — 6 protenix, rf3 |
 | `dev/oracles/atom_parity.py` | L2 | atom cross-attention encoder, real batch, windowed — 6 protenix, both of3, intellifold2, rosettafold3 |
 | `dev/oracles/diffusion_parity.py`, `l2_all.sh` | L2 | token diffusion transformer — 10 models |
+| `dev/oracles/denoise_parity.py` | L3 | one denoise step, whole diffusion module — 6 protenix, intellifold2, rosettafold3 |
 | `dev/oracles/confidence_parity.py`, `l4_all.sh` | L4 | confidence head — every port |
 | `dev/oracles/fold_check.py` | L5 | one model, one target, CA-RMSD (`MODEL_DIR=` to compare blobs) |
 | `dev/oracles/modality_check.py` | L6 | RNA / DNA / ligand / complex folds scored against a reference, and `--write` validates the mmCIF the model emits |
