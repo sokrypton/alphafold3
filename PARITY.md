@@ -143,7 +143,10 @@ Checked by grepping each `model_config` table to the class that consumes it:
     caught wrong for openbind0.
 
 **NOT covered by L1, though they are trunk conventions**
-  * `CLAMPED_OPM_NORM` -- `OuterProductMean`, in the MSA module
+  * `CLAMPED_OPM_NORM`, `OPM_ROW_COUNT_NORM` -- `OuterProductMean`, in the
+    MSA module. Both are now covered by L1b (`msa_parity.py`), and the second
+    exists BECAUSE L1b was written: it is a real port bug this list's own
+    "NOT covered" line predicted.
   * `NO_MSA_ROW_UPDATE` -- `EvoformerIteration`, the MSA stack
   * `MSA_AFTER_RECYCLE`, `SSM_RECYCLE`, `PAIR_ONLY_TRUNK`, `LM_PAIR_DROPOUT` --
     evoformer level, outside the stack
@@ -990,32 +993,68 @@ does NOT cover. `dev/oracles/msa_parity.py` starts on the rest:
 | `intellifold2` | **1.000000** | 0.9999 |
 | `opendde` | **1.000000** | 1.0000 |
 | `rosettafold3` | 0.999971 | 0.9976 |
-| `boltz2` | **0.974331** | 1.0584 |
+| `boltz2` | **1.000000** | 1.0000 (was 0.974331 / 1.0584 -- a real port bug, below) |
 
 With `prot_parity.py`'s protenix2 and protenix1 that is **8 of the 10** models
 carrying an MSA stack. Only chai1 (TorchScript, no callable submodule forward)
 and the esmfold2 family are unmeasured.
 
-**boltz2 is the one that is not exact, and it does NOT compound.** One block
-reads 0.967594 and four read 0.974331 -- so the divergence is present in a
-SINGLE block rather than accumulating, which puts it inside the layer body:
-`pair_weighted_averaging`, `msa_transition`, `outer_product_mean`, or the
-`pairformer_layer`. The last is the least likely, since boltz2's 48-block trunk
-pairformer is gated at 1.000000/1.000000 on the same class.
+**boltz2 was the one that was not exact, and it was a REAL PORT BUG.** Fixed;
+the localisation is worth writing down because it is the cleanest example in
+this file of a gate that only bites under the right input.
 
-Checked and not the cause: the update-then-OPM order (ours gates on it and
-opendde, which shares that order, reads 1.000000), `use_paired_feature` (read off
-`msa_proj`'s width, 33+3), `get_dropout_mask` (returns ones under `eval()`), the
-OPM normalisation (`CLAMPED_OPM_NORM` is esmfold2-only and the difference there
-is 1e-3 relative, not 3%), and anything applied to `m`/`z` before the loop
-(nothing is).
+The number did NOT compound -- one block read 0.967594 and four read 0.974331 --
+so the divergence lived inside a single layer body rather than accumulating.
+`msa_parity.py LAYER=1` then drives boltz's `MSALayer` alone and compares BOTH
+outputs: `m` came back exact at 1.000000 while `z` read 0.925, which isolates it
+to the pair-producing sublayer, and OPM alone read 0.992598.
 
-**Recorded as OPEN, and it may still be the harness.** Three of this session's
-new gates produced plausible degraded numbers that turned out to be harness
-faults, and this one has not yet been cross-checked against an independent
-gate the way those were. What would settle it: instantiate boltz's `MSALayer`
-alone and compare the `m` output as well as `z`, which splits the four
-sublayers.
+The bug is in `OuterProductMean` (`modules.py`), and it is an ORDERING one:
+
+    AF3:    act = einsum(a, b) @ output_w + output_b ;  return act / norm
+    boltz:  act = einsum(a, b) ;  return proj_o(act / num_mask)   # bias AFTER
+
+so ours divided the bias by the row count and boltz does not. Predicted before
+measuring: the residual should be exactly `(1 - 1/n) * output_b`, a per-channel
+CONSTANT. Confirmed at -0.008120 against a prediction of -0.008121, spread
+6.5e-04. Gated by `model_config.OPM_ROW_COUNT_NORM` (named for the wrong first
+reading, kept so the comment explaining it stays findable).
+
+**And the fix was wrong the first time, which the gate caught.** boltz's source
+reads `num_mask = mask.sum(1).clamp(min=1)`, which looks like a per-token ROW
+count where AF3 uses `einsum('abc,adc->bdc', mask, mask)`, the count of rows
+covering BOTH i and j. It is not: boltz builds the PAIRWISE mask first
+(`mask[:, :, None, :] * mask[:, :, :, None]`) and only then sums, so the counts
+are the same and `clamp(min=1)` vs `+ 1e-3` is the only remainder.
+
+Implementing the per-token reading left the gate **exact** on an all-ones msa
+mask and made a NON-UNIFORM one WORSE (OPM 0.996 -> 0.968, rms 0.980 -> 0.886).
+A uniform mask cannot tell the two normalisers apart -- every row covers every
+token, so the two counts are equal -- which is why `msa_parity.py` runs
+`NONUNIFORM=1` as well, and why the second effect showed up at all: masking part
+of the MSA turns a per-channel constant residual (spread 6.5e-04) into one that
+varies across (i, j) (spread 2.1e-01). With the bias placement alone, both the
+uniform and the non-uniform case read **1.000000**, and the four-block stack
+went 0.974331 -> **1.000000**.
+
+**It moved a fold, which is the point of the level.** The bug needs MSA depth >
+1 to exist at all, so 6MRR (single-sequence) could never show it -- 0.424 A
+before and after. The MSA-bearing case did:
+
+| boltz2 | protein A | BTN A |
+|---|---|---|
+| `ligand_1stp` before | 0.385 | 0.907 |
+| `ligand_1stp` after | **0.277** | **0.458** |
+
+`complex_1lmb` (no MSA) is unmoved: A 0.307 / B 0.230 / C 0.273 / D 0.283,
+whole complex 0.391. `OPM_ROW_COUNT_NORM` is boltz2-only, so no other model's
+numbers can move.
+
+Two lessons, both already earned elsewhere in this file and earned again here:
+a gate is only as good as the input variety it runs (the non-uniform mask is the
+whole reason the wrong fix did not ship), and a difference that is a per-channel
+constant is invisible to correlation -- see [[correlation-hides-bias]] -- so the
+residual has to be looked at, not just `corr`.
 
 It compares the PAIR output, which is the half that survives into the trunk;
 comparing only the msa rows would miss a wrong outer-product normalisation
@@ -1086,7 +1125,7 @@ Enumerated against the graph's own module list rather than from memory:
 | module | models carrying it | gated on | note |
 |---|---|---|---|
 | ~~template embedder~~ | 9 | **8** | gated 2026-09-08, found TWO bugs; every model but chai1 |
-| **MSA module** | 10 | **8** | all but chai1 (TorchScript) and esmfold2; boltz2 measured at 0.974 and OPEN |
+| **MSA module** | 10 | **8** | all but chai1 (TorchScript) and esmfold2; all 8 exact (boltz2 was 0.974 -- a real bug, now fixed) |
 | ~~distogram head~~ | all | **8** | CLOSED 2026-09-08, `dgram_parity.py`; chai1 is n/a (no native head) |
 | ~~input embedder~~ | all | **2** | CLOSED 2026-09-08, `real_trunk_parity.py` |
 | ~~recycling loop~~ | all | **2** | same gate — it compares the trunk AFTER all recycles |

@@ -546,12 +546,17 @@ class OuterProductMean(hk.Module):
         init=hk.initializers.Constant(0.0),
     )
 
+    # boltz2 divides BEFORE the output projection, so its bias must not be
+    # added inside the chunk -- see model_config.OPM_ROW_COUNT_NORM.
+    bias_after_norm = (
+        self.global_config.model in model_config.OPM_ROW_COUNT_NORM)
+
     def compute_chunk(left_act):
       # Make sure that the 'b' dimension is the most minor batch like dimension
       # so it will be treated as the real batch by XLA (both during the forward
       # and the backward pass)
       out = jnp.einsum('abc,ade,cef->bdf', left_act, right_act, output_w)
-      return out + output_b
+      return out if bias_after_norm else out + output_b
 
     act = mapping.inference_subbatch(
         compute_chunk,
@@ -563,6 +568,16 @@ class OuterProductMean(hk.Module):
     )
 
     norm = jnp.einsum('abc,adc->bdc', mask, mask)
+    if bias_after_norm:
+      # boltz2: divide by the PAIRWISE count clamped at 1, THEN add the output
+      # bias. The count is AF3's -- boltz builds the pairwise mask first
+      # (`mask[:, :, None, :] * mask[:, :, :, None]`) and only then sums over
+      # rows, so `mask.sum(1)` in its source is already a pairwise count and
+      # NOT a per-token row count. Reading it as per-token and normalising that
+      # way made a non-uniform mask WORSE (0.996 -> 0.968) while leaving the
+      # uniform case exact -- which is exactly why the non-uniform case is in
+      # the gate. See model_config.OPM_ROW_COUNT_NORM.
+      return act / jnp.maximum(norm, 1.0) + output_b
     if self.global_config.model in model_config.CLAMPED_OPM_NORM:
       # ESMFold2 clamps the pair count at 1 instead of adding AF3's 1e-3. The
       # two agree to 1/(1 + eps/n), which is 3.3e-04 at depth 3 and 1e-03 at

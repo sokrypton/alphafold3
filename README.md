@@ -191,7 +191,7 @@ levels were organised around the diffusion path:
 | module | models carrying it | gated on |
 |---|---|---|
 | **template embedder** | 9 | **8** — gated 2026-09-08, found two bugs |
-| **MSA module** | 10 | **8** — boltz2 reads 0.974 and is OPEN |
+| **MSA module** | 10 | **8** — all exact; boltz2's 0.974 was a real OPM bug, fixed |
 | ~~distogram head~~ | all | **8** — closed 2026-09-08 |
 | ~~input embedder~~ | all | **2** — closed 2026-09-08 |
 | ~~recycling loop~~ | all | **2** — same gate |

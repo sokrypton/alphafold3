@@ -282,6 +282,35 @@ SSM_RECYCLE = ESMFOLD2_SSM_RECYCLE
 CLAMPED_OPM_NORM = ESMFOLD2_FAMILY
 
 
+# Models whose OuterProductMean divides BEFORE its output projection, and
+# normalises by the per-token ROW COUNT rather than AF3's pairwise count.
+#
+# Boltz-2's OPM (boltz/model/layers/outer_product_mean.py) is
+#     mask = mask[:, :, None, :] * mask[:, :, :, None]   # PAIRWISE first
+#     num_mask = mask.sum(1).clamp(min=1)
+#     z = einsum(a, b) / num_mask                        # divide FIRST
+#     return self.proj_o(z)                              # ...then project
+# where AF3 projects first (bias included) and divides after. The COUNT is the
+# same as AF3's -- boltz builds the pairwise mask before summing, so its
+# `mask.sum(1)` is a pairwise count, not a per-token row count -- and the only
+# other difference is `clamp(min=1)` against AF3's `+ 1e-3`.
+#
+# The bias placement is worth exactly (1 - 1/n) * output_b, predicted and then
+# confirmed to 8e-04 (residual -0.008120 against a prediction of -0.008121;
+# msa_parity.py LAYER=1, 2026-09-08).
+#
+# The gate runs a NON-UNIFORM msa mask as well as an all-ones one, and that is
+# what caught a wrong first fix: reading `mask.sum(1)` as a per-token row count
+# left the uniform case exact while making the non-uniform case WORSE
+# (0.996 -> 0.968). A uniform mask cannot tell the two normalisers apart, so it
+# cannot catch that error.
+#
+# **This bug needs MSA DEPTH > 1 to bite.** At depth 1 the bias term is
+# (1 - 1/1) * b = 0 and the two normalisers agree, which is why boltz2's
+# single-sequence 6MRR fold was exact throughout while its MSA module was not.
+OPM_ROW_COUNT_NORM = ('boltz2',)
+
+
 # Models whose ATOM attention is a sliding window with 3D rotary positions
 # instead of AF3's windowed pair bias.
 #
