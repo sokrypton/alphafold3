@@ -193,14 +193,20 @@ levels were organised around the diffusion path:
 |---|---|---|
 | **template embedder** | 9 | **0** |
 | **MSA module** | 10 | **2** (protenix2, protenix1) |
-| **distogram head** | all | **0** |
+| ~~distogram head~~ | all | **6** — closed 2026-09-08 |
 | **input embedder** | all | **0 standing** (one ad-hoc measurement) |
 
 Templates demonstrably work end to end — `boltz2` folds 5CAJ to 0.72 Å with one,
 `rosettafold3` to 1.56 Å — but that is evidence from folds, not from a
-comparison against the vendor's own module. The distogram head is the one design
-gradients flow through, so a silent divergence there would be invisible to every
-structural number here. See `PARITY.md`.
+comparison against the vendor's own module.
+
+The distogram head **was** on that list and is now gated on six models, all
+exact. It was worth doing first despite being one projection: it is the head
+design gradients flow through, so a divergence would have been invisible to
+every structural number here. The gate checks what a correlation hides — where
+each vendor symmetrises. protenix, of3 and if2 do it after the projection
+(`W(z+zᵀ) + 2b`); `rosettafold3` does it before (`W(z+zᵀ) + b`), which is why
+its bias is halved on conversion. See `PARITY.md`.
 
 ### L1 — the trunk, against each model's own native module
 

@@ -936,7 +936,7 @@ Enumerated against the graph's own module list rather than from memory:
 |---|---|---|---|
 | **template embedder** | **9** | **0** | `TemplateEmbedding`, `SingleTemplateEmbedding`, `Boltz2TemplateEmbedding` — no oracle imports any of them |
 | **MSA module** | **10** | **2** | only `protenix2` and `protenix1`, via `prot_parity.py` (L1b) |
-| **distogram head** | all | **0** | `DistogramHead` appears in `confidence_parity.py` only as a FEATURE name (`distogram_rep_atom_mask`), never compared |
+| ~~distogram head~~ | all | **6** | CLOSED 2026-09-08, `dgram_parity.py` — see below |
 | **input embedder** | all | **0 standing** | `create_target_feat_embedding` is built in 5 oracles and compared in none |
 | atom decoder | all | 0 direct | covered in composition by the three exact L3 steps |
 | recycling loop | all | 0 | L1-L4 all measure a SINGLE pass |
@@ -949,10 +949,31 @@ also means the one time a template hypothesis was tested here -- zeroing our
 contribution on 6MRR, which changed nothing -- proved only that the path is
 inert when NO template is supplied, which is not the same claim.
 
-**The distogram gap matters more than its size suggests.** It is the head design
-gradients flow through (`zero recycles, backprop into the distogram and stop`),
-so a silent divergence there would be invisible to every structural number in
-this document and would corrupt exactly the use case the design work depends on.
+**The distogram gap is CLOSED (2026-09-08).** It mattered out of proportion to
+its size -- it is the head design gradients flow through (`zero recycles,
+backprop into the distogram and stop`), so a divergence would have been
+invisible to every structural number here while corrupting exactly the use case
+the design work depends on. `dev/oracles/dgram_parity.py` now gates it on six
+models, and all six are EXACT:
+
+| model | c_z | bins | bias | corr | max\|d\| |
+|---|---|---|---|---|---|
+| `protenix2` | 256 | 64 | yes | 1.000000 | 0.00000 |
+| `protenix1` | 128 | 64 | yes | 1.000000 | 0.00000 |
+| `openfold3` | 128 | 64 | no | 1.000000 | 0.00000 |
+| `openbind0` | 128 | 64 | no | 1.000000 | 0.00000 |
+| `intellifold2` | 512 | 64 | no | 1.000000 | 2.2e-07 |
+| `rosettafold3` | 128 | **65** | yes | 1.000000 | 2.4e-07 |
+
+The head is one projection off the trunk pair, so synthetic z suffices -- no
+real batch, unlike the atom gates. What it actually checks is the thing a
+correlation would hide: **where each vendor symmetrises.** protenix, of3 and if2
+compute `Linear(z) + Linear(z)^T` = W(z+z^T) + 2b; **rosettafold3 symmetrises
+BEFORE the linear**, `predictor(z + z^T)` = W(z+z^T) + b. Identical for the
+weight, off by a factor of two on the BIAS -- which is why
+`converters/rosettafold3.py` stores b/2, and this gate is what verifies that
+claim instead of trusting the comment beside it. Both sides come out exactly
+symmetric on every model.
 
 **The input embedder has one measurement, and it is not a gate.** Chasing the
 protenix2 5K9P question produced a real-input comparison of `s_inputs`:
@@ -960,9 +981,9 @@ protenix2 5K9P question produced a real-input comparison of `s_inputs`:
 harness, and it should become one -- along with the real-input TRUNK comparison
 from the same session (which is where the 6MRR pair-0.960 control came from).
 
-Two of these are cheap: the input embedder and the distogram head are single
-projections off tensors the existing harnesses already build. The template
-embedder is a real adapter per vendor, in the shape of `denoise_parity.py`.
+Left: the input embedder is cheap in the same way (a projection off tensors the
+harnesses already build). The template embedder is a real adapter per vendor,
+in the shape of `denoise_parity.py`.
 
 ## The gates, and where they live
 
@@ -978,6 +999,7 @@ it covers, because the file itself is the only other record:
 | `dev/oracles/atom_parity.py` | L2 | atom cross-attention encoder, real batch, windowed — protenix2/1, both of3, intellifold2, rosettafold3 |
 | `dev/oracles/diffusion_parity.py`, `l2_all.sh` | L2 | token diffusion transformer — 10 models |
 | `dev/oracles/denoise_parity.py` | L3 | one denoise step, whole diffusion module — protenix2/1, both of3, intellifold2, rosettafold3 |
+| `dev/oracles/dgram_parity.py` | L4 | distogram head — protenix2/1, both of3, intellifold2, rosettafold3 |
 | `dev/oracles/confidence_parity.py`, `l4_all.sh` | L4 | confidence head — every port |
 | `dev/oracles/fold_check.py` | L5 | one model, one target, CA-RMSD (`MODEL_DIR=` to compare blobs) |
 | `dev/oracles/modality_check.py` | L6 | RNA / DNA / ligand / complex folds scored against a reference, and `--write` validates the mmCIF the model emits |
