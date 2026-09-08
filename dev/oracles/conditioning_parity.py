@@ -163,8 +163,72 @@ def native_rf3(model, batch, rng, n, noise):
   return (np.asarray(pair).reshape(n, n, -1), single, s_inputs_ours, s, z)
 
 
+def native_esmfold2(model, batch, rng, n, noise):
+  """-> (pair_cond, single_cond, s_inputs(ours-layout), s, z) from the REFERENCE.
+
+  ESMFold2 has no importable vendor module -- its implementation is inside
+  `transformers`, in ~/venv_esm -- but `esmfold2_reference.py` is a complete
+  self-contained reimplementation the port was built against and which is itself
+  checked against native dumps. Its `diffusion_conditioning` is a plain function
+  of (s_inputs, z_trunk, rel_pos, t_hat, params), so it drops straight into this
+  gate's contract.
+
+  The s_inputs LAYOUT differs and that is the whole subtlety. ESMFold2's is 451
+  wide as [atom 384 | restype 33 | profile 33 | deletion 1]; ours is 447 as
+  [restype 31 | profile 31 | deletion 1 | atom 384], and ESM reserves two
+  restype classes AF3 does not (its block starts at +2). Both readings are
+  verified by the trunk gate, which reports the restype and profile blocks
+  EQUAL under exactly this mapping. So a random ESM-layout vector is built here
+  and the ours-layout VIEW of it is returned, the same trick native_protenix
+  uses for protenix's 449.
+  """
+  import esmfold2_dumps
+  import esmfold2_reference as R
+  from converters import esmfold2 as CV
+
+  sd = esmfold2_dumps.state_dict(model)
+  dims = CV.derive_dims(sd)
+  pref = {k: np.asarray(v) for k, v in CV.map_esmfold2_to_af3(sd).items()}
+  c_z = int(pref['conditioning/z_projection/weights'].shape[-1])
+  c_s = int(pref['conditioning/s_projection/weights'].shape[-1])
+  c_in_esm = int(pref['conditioning/s_input_norm/scale'].shape[0])
+  print('  reference: c_z %d, c_s %d, c_s_inputs %d (ESM layout)'
+        % (c_z, c_s, c_in_esm))
+
+  # ESM layout -> ours. 447 = [restype 31 | profile 31 | deletion 1 | atom 384].
+  n_rt = 31
+  idx = np.concatenate([
+      384 + 2 + np.arange(n_rt),               # restype, past ESM's two extras
+      384 + 33 + 2 + np.arange(n_rt),          # profile, same offset
+      [384 + 33 + 33],                         # deletion mean
+      np.arange(384)])                         # the atom block
+  s_inputs = (rng.normal(size=(n, c_in_esm)) * 0.5).astype(np.float32)
+  s_inputs[:, np.setdiff1d(np.arange(c_in_esm), idx)] = 0.0
+  s_inputs_ours = s_inputs[:, idx]
+  z = (rng.normal(size=(n, n, c_z)) * 0.5).astype(np.float32)
+  s = (rng.normal(size=(n, c_s)) * 0.5).astype(np.float32)   # unused: see below
+
+  tf = batch.token_features
+  rel = np.asarray(R.rel_pos_features(
+      np.asarray(tf.residue_index).astype(int), np.asarray(tf.asym_id).astype(int),
+      np.asarray(tf.sym_id).astype(int), np.asarray(tf.entity_id).astype(int),
+      np.asarray(tf.token_index).astype(int)))
+  rel = rel @ pref['rel_pos/weights']
+  single, pair = R.diffusion_conditioning(
+      jnp.asarray(s_inputs), jnp.asarray(z), jnp.asarray(rel), noise, pref)
+  # ESMFold2 conditions on s_inputs ALONE (451 channels, not 384 + 451), so
+  # there is no trunk single in its conditioning -- `s` above is returned only
+  # to satisfy the shared contract and our side must ignore it the same way.
+  return (np.asarray(pair), np.asarray(single), s_inputs_ours, s, z)
+
+
 NATIVES = {m: native_protenix for m in _PROTENIX_CKPT}
 NATIVES['rosettafold3'] = native_rf3
+# every ESMFold2 release, each against its OWN checkpoint
+NATIVES.update({m: native_esmfold2 for m in (
+    'esmfold2', 'esmfold2_fast', 'esmfold2_exp', 'esmfold2_exp_fast',
+    'esmfold2_exp_cutoff2025', 'esmfold2_exp_fast_cutoff2025',
+    'esmfold2_lm600m', 'esmfold2_lm300m')})
 
 
 def ours(model, cfg, model_dir, batch, s_inputs, s, z, noise):
