@@ -956,6 +956,39 @@ dims-from-constants fix as everything else here: `PairformerStack` builds
 the harness passed `hidden_scale_up=True` -- which trunk_parity.py had been
 passing all along.
 
+## The MSA module beyond protenix (2026-09-08)
+
+`prot_parity.py` gates the MSA module for protenix only -- which is what closes
+`CLAMPED_OPM_NORM` and `NO_MSA_ROW_UPDATE`, two of the four trunk conventions L1
+does NOT cover. `dev/oracles/msa_parity.py` starts on the rest:
+
+| model | msa -> pair | rms ours/native |
+|---|---|---|
+| `rosettafold3` | **0.999971** | 0.9976 |
+
+It compares the PAIR output, which is the half that survives into the trunk;
+comparing only the msa rows would miss a wrong outer-product normalisation
+entirely.
+
+**Two rf3 facts this pinned down.** Its MSA keys carry NO block index: the
+forward loops `n_block` times over ONE set of submodules, so the checkpoint
+holds a single copy and the depth cannot be derived from key names (it is 4, from
+rf3's own yaml). `converters/rosettafold3.py` already mirrors that sharing --
+`_rosettafold3_msa_block` ignores its block index and `_stack_blocks` replicates
+the one block across our four layers. And its signature is
+`forward(f, Z_II, S_inputs_I)`, pair BEFORE s_inputs; reversing them feeds the
+128-wide pair into a 449-wide projection and dies in the matmul, which is the
+good outcome.
+
+**A harness error worth recording, because I nearly published it.** The first
+run read corr 0.468. Our side had been fed a RANDOM c_m activation while native
+embedded the raw MSA rows itself -- two different inputs, so the number measured
+nothing. My own docstring had described that as "the comparison starts one
+projection later", which was hand-waving over an invalid comparison. Taking the
+embedded MSA from native's own `msa_subsampler` and feeding it to both sides
+gives 0.999971. **If a gate's two sides do not provably see the same input, its
+number is not a measurement.**
+
 ## The atom DECODER, gated directly for the first time (2026-09-08)
 
 `DECODER=1 python dev/oracles/atom_parity.py protenix2` runs protenix's own
@@ -993,7 +1026,7 @@ Enumerated against the graph's own module list rather than from memory:
 | module | models carrying it | gated on | note |
 |---|---|---|---|
 | ~~template embedder~~ | 9 | **8** | gated 2026-09-08, found TWO bugs; every model but chai1 |
-| **MSA module** | **10** | **2** | only `protenix2` and `protenix1`, via `prot_parity.py` (L1b) |
+| **MSA module** | 10 | **3** | `protenix2`/`protenix1` via `prot_parity.py`, `rosettafold3` via `msa_parity.py` |
 | ~~distogram head~~ | all | **8** | CLOSED 2026-09-08, `dgram_parity.py`; chai1 is n/a (no native head) |
 | ~~input embedder~~ | all | **2** | CLOSED 2026-09-08, `real_trunk_parity.py` |
 | ~~recycling loop~~ | all | **2** | same gate — it compares the trunk AFTER all recycles |
