@@ -934,7 +934,7 @@ Enumerated against the graph's own module list rather than from memory:
 
 | module | models carrying it | gated on | note |
 |---|---|---|---|
-| ~~template embedder~~ | 9 | **2** | gated 2026-09-08 and it found TWO bugs; protenix2/1 now **1.000000** |
+| ~~template embedder~~ | 9 | **3** | gated 2026-09-08, found TWO bugs; protenix2/1 and rosettafold3 all **1.000000** |
 | **MSA module** | **10** | **2** | only `protenix2` and `protenix1`, via `prot_parity.py` (L1b) |
 | ~~distogram head~~ | all | **6** | CLOSED 2026-09-08, `dgram_parity.py` — see below |
 | ~~input embedder~~ | all | **2** | CLOSED 2026-09-08, `real_trunk_parity.py` |
@@ -993,9 +993,27 @@ for the forward. The second was true for BOLTZ2 and was silently inherited by
 protenix and rf3, which is exactly how a shared forward hides a per-vendor
 convention. A docstring is not a gate.
 
-**rosettafold3 is still listed in `TEMPLATE_STACK_OUTER_RESIDUAL`** even though
-the native reading says it should not be. It has no template gate yet, and a
-behaviour change here waits for the measurement. That is the next job.
+**rosettafold3: gated, and it never had either bug.** corr **1.000000**
+(max|d| 1.5e-04). Its features are the 66-channel distance conditioning
+`[distogram_condition(64), has_condition(1), joint_noise_level(1)]`, all
+i/j-SYMMETRIC, so bug 1 cannot apply -- there are no restype blocks. And it
+escaped bug 2 because `RoseTTAFold3TemplateEmbedding` overrides `__call__`
+rather than only `_features`, and its own copy already does `v = stack(v)`.
+
+So listing it in `TEMPLATE_STACK_OUTER_RESIDUAL` was INERT, which the gate
+settled rather than the source reading: rf3 reads 1.000000 bit for bit with the
+name in the tuple or out of it. It is now correctly absent, and 6MRR is
+unchanged (0.976 against a 0.986 baseline).
+
+**The moral is not that duplication saved us.** protenix inherited the shared
+forward and got boltz2's convention; rf3 escaped only by not inheriting. Either
+the per-vendor convention is NAMED -- as it now is -- or the next subclass
+silently gets whatever its parent happened to do.
+
+One harness detail worth keeping: rf3 rebuilds the noise channel itself from a
+PER-TOKEN scale as `f(sqrt(ns_i^2 + ns_j^2))`, where ours uses a scalar eps as
+the JOINT level directly. The gate therefore passes `ns = eps/sqrt(2)`; getting
+that wrong shifts one of 66 channels and would read as a port difference.
 
 Templates do work end to end (boltz2 folds 5CAJ to 0.72 A with one,
 rosettafold3 to 1.56 A), which bounds how bad this can be -- and the one earlier
@@ -1075,7 +1093,7 @@ it covers, because the file itself is the only other record:
 | `dev/oracles/atom_parity.py` | L2 | atom cross-attention encoder, real batch, windowed — protenix2/1, both of3, intellifold2, rosettafold3 |
 | `dev/oracles/diffusion_parity.py`, `l2_all.sh` | L2 | token diffusion transformer — 10 models |
 | `dev/oracles/denoise_parity.py` | L3 | one denoise step, whole diffusion module — protenix2/1, both of3, intellifold2, rosettafold3 |
-| `dev/oracles/template_parity.py` | L1 | template embedder vs the vendor's own module — protenix2/1 at 1.000000; found 2 bugs |
+| `dev/oracles/template_parity.py` | L1 | template embedder vs the vendor's own module — protenix2/1, rosettafold3, all 1.000000; found 2 bugs |
 | `dev/oracles/real_trunk_parity.py` + `native_trunk_dump.sh` | L1 real-input | input embedder, trunk output and recycling, against native's own featurised run — protenix2/1 |
 | `dev/oracles/dgram_parity.py` | L4 | distogram head — protenix2/1, both of3, intellifold2, rosettafold3 |
 | `dev/oracles/confidence_parity.py`, `l4_all.sh` | L4 | confidence head — every port |

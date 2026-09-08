@@ -726,6 +726,13 @@ class RoseTTAFold3TemplateEmbedding(Boltz2TemplateEmbedding):
     # RF3's `for block in self.pairformer: _, v_II = block(None, v_II)` -- no `v + stack(v)`.
     # see the note above: layer_stack(0) still creates 0-leading-axis parameters
     if c.template_stack.num_layer:
+      # NO outer residual, matching rf3's own
+      #   `for block in self.pairformer: _, v_II = block(None, v_II)`.
+      # This class overrides __call__ instead of only _features, which is
+      # why it never picked up boltz2's `v = v + stack(v)` the way
+      # Protenix2TemplateEmbedding did -- see
+      # model_config.TEMPLATE_STACK_OUTER_RESIDUAL. Gated at corr
+      # 1.000000 (template_parity.py, 2026-09-08).
       v = hk.experimental.layer_stack(c.template_stack.num_layer)(block)(v)
     u = hm.LayerNorm(name='v_norm', use_fast_variance=False)(v)
     out = hm.Linear(z.shape[-1], use_bias=False, name='u_proj')(jax.nn.relu(u))

@@ -191,7 +191,7 @@ levels were organised around the diffusion path:
 
 | module | models carrying it | gated on |
 |---|---|---|
-| **template embedder** | 9 | **2** — gated 2026-09-08, found two bugs |
+| **template embedder** | 9 | **3** — gated 2026-09-08, found two bugs |
 | **MSA module** | 10 | **2** (protenix2, protenix1) |
 | ~~distogram head~~ | all | **6** — closed 2026-09-08 |
 | ~~input embedder~~ | all | **2** — closed 2026-09-08 |
@@ -210,7 +210,13 @@ At the fold level, a templated 5K9P went from **1.588 Å to 0.227 Å** best. Tha
 is why folds never caught it: a wrong-but-plausible template contribution still
 points a fold roughly the right way, and 1.588 Å looks like a working template
 until something compares the module. Untemplated folds and the other models
-sharing that code are unchanged. See `PARITY.md`.
+sharing that code are unchanged.
+
+`rosettafold3` is gated too and had neither bug — its features are i/j-symmetric
+distance conditioning, and it overrides the shared forward rather than
+inheriting it. Which is the real lesson: protenix inherited boltz2's convention
+and was wrong, rf3 escaped only by not inheriting, so the convention is now
+named in `model_config` instead of left to inheritance. See `PARITY.md`.
 
 The distogram head **was** on that list and is now gated on six models, all
 exact. It was worth doing first despite being one projection: it is the head

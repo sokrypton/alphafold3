@@ -393,10 +393,18 @@ TRANSPOSED_COLUMN_PAIR_BIAS = ('openfold3', 'openbind0', 'opendde', 'boltz2') + 
 # contribution is small next to the projections, which is also why it hid behind
 # a larger bug until that one was fixed.
 #
-# rosettafold3 is STILL LISTED HERE deliberately: the native reading says it
-# does not belong, but rf3 has no template gate yet, and this project's rule is
-# that a behaviour change waits for the measurement. Gate it, then remove it.
-TEMPLATE_STACK_OUTER_RESIDUAL = ('boltz2', 'rosettafold3')
+# rosettafold3 is deliberately ABSENT, and for a reason worth writing down: it
+# never had this bug, because `RoseTTAFold3TemplateEmbedding` overrides
+# `__call__` rather than only `_features`, and its own copy already does
+# `v = stack(v)`. So this flag never reaches it -- listing it here was inert,
+# which the gate proved: rf3 reads corr 1.000000 with the name in the tuple or
+# out of it, bit for bit. Gated 2026-09-08 (template_parity.py).
+#
+# The moral is not that duplication saved us. protenix inherited the shared
+# forward and got the wrong convention; rf3 escaped by not inheriting it. Either
+# a per-vendor convention is named -- as it now is here -- or the next subclass
+# gets whichever behaviour its parent happened to have.
+TEMPLATE_STACK_OUTER_RESIDUAL = ('boltz2',)
 
 
 # Models whose ATOM cross-attention transformer LayerNorms the atom-pair
