@@ -519,6 +519,40 @@ entirely, which is exactly why it was the one model that worked and why nothing
 had caught this. Two more call sites, `data/pipeline.py` and
 `data/msa_server.py`, pass the method through as a value.
 
+## The featurisation diff, and what it found (2026-09-08)
+
+Every gate above compares MODULES on identical inputs, or whole FOLDS. Nothing
+compared the INPUTS -- and for protenix2 every module is exact while the fold
+disagrees with native, so the inputs were the only place left. Native protenix's
+own featuriser output for the same JSON, dumped through its dataloader on the
+GPU venv and diffed field by field against our batch (5K9P + SEP-20, 85 tokens,
+606 atoms on both sides):
+
+| field | result |
+|---|---|
+| token count, atom count | identical (85 / 606) |
+| `restype`, `residue_index`, `ref_charge`, `ref_space_uid`, `ref_element`, MSA row 0 | **identical** |
+| `asym_id`, `entity_id`, `sym_id`, `token_index` | off by exactly 1 -- ours 1-based, protenix 0-based |
+| **`ref_pos`** | **every value differs, max 8.57 A** |
+
+**The off-by-one is benign, and worth knowing rather than fixing.** Those four
+features reach the model only through equality (`asym_i == asym_j`) and through
+differences (`token_index_i - token_index_j`), and a constant offset cancels in
+both.
+
+**The reference conformers are genuinely different molecules-in-space.** Not a
+frame convention: aligning our conformer onto native's per residue leaves a mean
+Kabsch RMSD of **0.90 A** (max 1.76) across all 76 residues, with the atom ORDER
+identical (`ref_element` and `ref_charge` match exactly, so the atoms correspond
+one to one). Both are valid ideal conformers; they are not the same one. This is
+an input difference in EVERY protenix fold, and `ref_pos` feeds the atom
+encoder's per-atom features and the windowed atom-pair distances.
+
+It does NOT obviously explain protenix2, and saying so is the point: protenix05
+carries the same conformer difference through the same code and matches native
+end to end (ours 1.569/1.465, native 1.552/1.332). So the conformer difference is
+real, is worth closing, and is not on its own the cause.
+
 **OPEN: protenix2 does not reproduce native on a MODIFIED residue.** The one
 place in this whole session where our port and native end-to-end disagree.
 Phospho-ubiquitin (5K9P, SEP-20), native seed 101, native settings (10 recycles
@@ -545,9 +579,17 @@ native, so this is specific to the modified-residue path. What has been excluded
     so it looked like the answer; enabling it moves nothing (7.584 -> 7.225,
     inside noise). Reverted rather than kept on a hunch.
 
-Next instrument, and the one that decided this for rf3: compare the token_bond
-COUNT and content against native's featuriser for this input, rather than
-comparing folds. Every protenix2 MODULE is exact against native (L1, L2
+RULED OUT SINCE, by the featurisation diff above: the token and atom counts,
+restype, residue_index, ref_charge, ref_space_uid, ref_element and the MSA row
+are all identical to native's own featuriser. Also ruled out: the template path
+(native's featuriser emits `template_aatype` with an ALL-EMPTY mask and runs its
+embedder on it exactly as we do -- forcing our contribution to zero changes
+nothing, 6MRR 0.700 vs 0.699), and protenix2's own modules, every one of which
+is now measured exact including the MSA stack at 1.00000000.
+
+What is left: the reference conformers (0.90 A per residue), and the recycling /
+sampler integration, which no gate covers -- L3 compares ONE denoise step at a
+fixed noise level with given conditioning. Every protenix2 MODULE is exact against native (L1, L2
 conditioning including 4-chain, L2 token transformer, L2 atom encoder, L3 a full
 denoise step at 0.0000 A, L4), so whatever this is, it is an input difference.
 
