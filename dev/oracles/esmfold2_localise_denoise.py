@@ -55,6 +55,27 @@ rmask = np.asarray(f['atom_attention_mask']).astype(bool)   # 576 slots, 573 rea
 x_real = np.asarray(jax.random.normal(jax.random.PRNGKey(7), (int(rmask.sum()), 3))) * T_HAT
 x_flat = np.zeros(rmask.shape + (3,), np.float32); x_flat[rmask] = x_real
 
+# ZERO_ATOM=1 makes the atom stacks EXACT IDENTITIES on both sides, by zeroing
+# the two output gates of every atom block (`x + g*f(x)` with g = 0). Any
+# residual then lives OUTSIDE the atom blocks -- in atom_linear, the
+# atom->token aggregation, the token transformer or the decoder projection --
+# which bisects the score network without writing a new harness. The gates are
+# chunks 2 and 5 of the fused adaln modulation on the reference side and the
+# `*adaptive_zero_cond` slots on ours.
+# ZERO_ATOM=1 kills both gates (identity stacks); =attn keeps only the
+# attention sublayer (kills the FFN gate); =ffn keeps only the FFN.
+ZERO_ATOM = os.environ.get('ZERO_ATOM', '')
+_CHUNKS = {'1': (2, 5), 'attn': (5,), 'ffn': (2,)}.get(ZERO_ATOM, ())
+if _CHUNKS:
+  for _which in ('atom_encoder', 'atom_decoder'):
+    _k = 'diffusion/%s/blocks/adaln/weights' % _which
+    _w = np.array(pref[_k])
+    for _c in _CHUNKS:
+      _w[:, :, _c * 128:(_c + 1) * 128] = 0.0
+    pref[_k] = jnp.asarray(_w)
+  print('   ZERO_ATOM=%s: zeroed adaln chunks %s (reference side)'
+        % (ZERO_ATOM, _CHUNKS))
+
 zr, s_in, _ = R.trunk(f, None, pref, dims, n_loops=3, key=jax.random.PRNGKey(0),
                       lm_dropout=0.0, msa=R.self_msa(f))
 rp = jnp.asarray(R.rel_pos_features(
@@ -158,6 +179,21 @@ def _strip(k):
     k = k[len('diffuser/'):]
   return k[len('~/'):] if k.startswith('~/') else k
 _p = {_strip(k): v for k, v in _p.items()}
+if _CHUNKS:
+  # the gate lives in the SCOPE name, not the leaf (haiku appends the module
+  # name, so the leaf is just 'weights'). 'adaptive_zero_cond' is a SUBSTRING of
+  # 'ffw_adaptive_zero_cond', so the attention gate has to be matched by its
+  # absence.
+  def _hit(k):
+    if 'diffusion_atom_transformer' not in k:
+      return False
+    ffn = 'ffw_adaptive_zero_cond' in k
+    attn = ('adaptive_zero_cond' in k) and not ffn
+    return (ffn and 5 in _CHUNKS) or (attn and 2 in _CHUNKS)
+  _p = {k: ({kk: (np.zeros_like(np.asarray(vv)) if _hit(k) else vv)
+             for kk, vv in v.items()}) for k, v in _p.items()}
+  _n = sum(1 for k in _p if _hit(k))
+  print('   ZERO_ATOM=1: zeroed %d atom-block gates (our side)' % _n)
 
 # TRUNCATE BOTH SIDES. NB shortens the atom stack, and the blob's params carry
 # the full 3 blocks -- asking the graph for 1 is a shape error, not a shorter

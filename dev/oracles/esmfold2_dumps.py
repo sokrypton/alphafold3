@@ -74,3 +74,37 @@ def native(model='esmfold2', target='6mrr68'):
       'no native dump at %s.\nProduce it with the vendor venv:\n'
       '    cd %s && ~/venv_esm/bin/python dev/oracles/esmfold2_oracle_6mrr.py'
       % (path, os.path.dirname(os.path.dirname(HERE))))
+
+
+def atom_map(fb, f):
+  """-> (ref_idx, our_flat): the same atoms, in each side's own flat indexing.
+
+  MATCH BY NAME, NEVER BY POSITION. Our featuriser emits 574 atoms for 6MRR and
+  ESMFold2's 573 -- ours carries the terminal OXT, whose PROTEIN_HEAVY_ATOMS
+  table does not -- so aligning by position puts every atom after that one
+  against its neighbour. `ref_idx` indexes the dump's flat (n_atoms,) layout and
+  `our_flat` the ravelled dense (num_token, max_atoms) one.
+  """
+  import numpy as np
+
+  def names(chars):
+    ch = np.asarray(chars).astype(int)
+    return ch.argmax(-1) if ch.ndim >= 3 and ch.shape[-1] > 8 else ch
+
+  gn, rn = names(fb.ref_structure.atom_name_chars), names(f['ref_atom_name_chars'])
+  gm = np.asarray(fb.ref_structure.mask).astype(bool)
+  rm = np.asarray(f['atom_attention_mask']).astype(bool)
+  r2t = np.asarray(f['atom_to_token']).astype(int)
+  nm = lambda v: ''.join(chr(c + 32) for c in v).strip()
+
+  by = {}
+  for t in range(gn.shape[0]):
+    for s in range(gn.shape[1]):
+      if gm[t, s]:
+        by.setdefault(t, {})[nm(gn[t, s])] = t * gn.shape[1] + s
+  ref_idx, our_flat = [], []
+  for i in np.flatnonzero(rm):
+    slot = by.get(int(r2t[i]), {}).get(nm(rn[i]))
+    if slot is not None:
+      ref_idx.append(int(i)); our_flat.append(int(slot))
+  return np.asarray(ref_idx), np.asarray(our_flat)

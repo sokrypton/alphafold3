@@ -511,10 +511,99 @@ def native_rf3(model, fb, feats, pos_noisy, s, z, n_tok):
   return (sq(a), sq(q_l), sq(c_l), None, None)
 
 
+def native_esmfold2(model, fb, feats, pos_noisy, s, z, n_tok):
+  """-> (a_token, enc_queries, c0, None, None) from ESMFold2's REFERENCE.
+
+  ESMFold2 has no importable vendor module, so the oracle is
+  `esmfold2_reference.py` -- the self-contained reimplementation the port was
+  built against, itself validated on native dumps. Its atom encoder is
+      c0 = LN(atom_features @ atom_linear)
+      q  = c0 + [r_noisy | 0] @ coords_linear
+      q  = atom_stack(q, c0, ...)                 # conditioned on c0 ALONE
+      a  = scatter_mean(relu(q @ atom_to_token))
+  which is exactly this gate's three tensors. There is no atom PAIR
+  representation -- its atom attention is positional through rotary alone --
+  hence the two Nones.
+
+  The noisy coordinates come from the HARNESS, in our dense layout, and are
+  scattered into the dump's flat layout through the name-based atom
+  correspondence (esmfold2_dumps.atom_map). Aligning those two by position
+  instead is what made the denoise localiser compare a permutation.
+  """
+  import jax
+  import jax.numpy as jnp
+
+  import esmfold2_dumps
+  import esmfold2_reference as R
+  from converters import esmfold2 as CV
+
+  sd = esmfold2_dumps.state_dict(model)
+  dims = CV.derive_dims(sd)
+  dims['n_input_atom'] = 3
+  # BLOCKS truncates the atom stack. TRUNCATE BOTH SIDES -- ours is sliced in
+  # `ours()` below; here it is just a smaller loop count.
+  if os.environ.get('BLOCKS'):
+    dims['n_diff_atom'] = int(os.environ['BLOCKS'])
+  pref = {k: jnp.asarray(v) for k, v in CV.map_esmfold2_to_af3(sd).items()}
+  ae = {k[len('diffusion/atom_encoder/'):]: v for k, v in pref.items()
+        if k.startswith('diffusion/atom_encoder/')}
+  nat = esmfold2_dumps.native(model)
+  f = {k[5:]: jnp.asarray(v[0]) for k, v in nat.items() if k.startswith('feat.')}
+  mask = f['atom_attention_mask']
+  ref_idx, our_flat = esmfold2_dumps.atom_map(fb, f)
+  print('  reference: %d atom blocks, %d atoms matched by name'
+        % (dims['n_diff_atom'], len(ref_idx)))
+
+  # our dense (num_token, max_atoms, 3) noise -> the dump's flat layout
+  dense = np.zeros(np.asarray(feats['mask']).shape + (3,), np.float32)
+  dense[np.asarray(feats['mask'])] = pos_noisy
+  x = np.zeros(np.asarray(mask).shape + (3,), np.float32)
+  x.reshape(-1, 3)[ref_idx] = dense.reshape(-1, 3)[our_flat]
+
+  c0 = R.layer_norm(R.atom_features(f, mask) @ ae['atom_linear/weights'],
+                    ae['atom_norm/scale'], ae['atom_norm/offset'])
+  cos, sin = R.build_rope(f['ref_pos'], f['ref_space_uid'], c0.shape[-1] // 4)
+  # NO c_in HERE. This gate's convention is that `pos_noisy` is ALREADY the
+  # scaled input -- `ours()` hands it to the encoder untouched, and every other
+  # adapter does the same. Dividing by sqrt(sigma^2 + sigma_data^2) again made
+  # the reference's coordinates 17.9x smaller than ours and read as a 3.1x
+  # magnitude blow-up in our atom stack (q_atom rms 3.1219, a_token 0.7497).
+  r_noisy = jnp.asarray(x)
+  q = c0 + jnp.concatenate([r_noisy, jnp.zeros_like(r_noisy)], -1) @ ae['coords_linear/weights']
+  q = R.atom_stack(q, c0, ae, 'blocks/', dims['n_diff_atom'], cos, sin, mask)
+  a2t = jnp.asarray(np.asarray(f['atom_to_token']).astype(int)
+                    * np.asarray(mask).astype(int))
+  a = R.scatter_mean(jax.nn.relu(q @ ae['atom_to_token/weights']), a2t,
+                     int(np.asarray(fb.token_features.mask).shape[0]), mask)
+  sel = lambda v: np.asarray(v).reshape(-1, np.asarray(v).shape[-1])[ref_idx]
+  return (np.asarray(a), sel(q), sel(c0), None, None)
+
+
 NATIVES = {m: native_protenix for m in _PROTENIX_CKPT}
 NATIVES.update({m: native_of3 for m in _OF3_CKPT})
 NATIVES['intellifold2'] = native_if2
 NATIVES['rosettafold3'] = native_rf3
+NATIVES.update({m: native_esmfold2 for m in (
+    'esmfold2', 'esmfold2_fast', 'esmfold2_exp', 'esmfold2_exp_fast',
+    'esmfold2_exp_cutoff2025', 'esmfold2_exp_fast_cutoff2025',
+    'esmfold2_lm600m', 'esmfold2_lm300m')})
+
+
+def _truncate_atom_blocks(p, nb, which='diffusion_atom_transformer'):
+  """Slice a stacked atom transformer to `nb` blocks. See the BLOCKS knob."""
+  out = {}
+  for k, v in p.items():
+    if which not in k:
+      out[k] = v; continue
+    out[k] = {}
+    for leaf, arr in v.items():
+      a_ = np.asarray(arr)
+      if 'pair_logits_projection' in k and a_.ndim == 3 and a_.shape[1] > nb:
+        a_ = a_[:, :nb]
+      elif '__layer_stack' in k and a_.ndim and a_.shape[0] > nb:
+        a_ = a_[:nb]
+      out[k][leaf] = a_
+  return out
 
 
 def ours(model, cfg, model_dir, fb, act_dense, s, z):
@@ -527,6 +616,14 @@ def ours(model, cfg, model_dir, fb, act_dense, s, z):
 
   cfg.global_config.bfloat16 = 'none'
   full = afp.get_model_haiku_params(model_dir=model_dir)
+  _nb = os.environ.get('BLOCKS')
+  if _nb:
+    # TRUNCATE BOTH SIDES: the loop count AND the stacked params. Truncating
+    # only the reference's loop reads 0.72 and means nothing -- it compares a
+    # 1-block stack against a 3-block one.
+    cfg.heads.diffusion.atom_transformer.num_blocks = int(_nb)
+    full = _truncate_atom_blocks(full, int(_nb))
+    print('  BLOCKS=%s: atom stack truncated on BOTH sides' % _nb)
 
   def fwd():
     enc = aca.atom_cross_att_encoder(
@@ -622,6 +719,20 @@ def main(argv=None):
   # directly would compare different tensors. a_token is per TOKEN on both
   # sides, and it is what the token transformer consumes, so the whole encoder
   # -- features, windows, local attention, pooling -- is behind it.
+  if os.environ.get('DIAG'):
+    # WHICH tokens disagree. corr 0.9999 with max|d| 2.7 and p99.9 1.08 is a
+    # small TAIL, not a uniform error -- so the question is whether the tail
+    # sits at chain termini, at 32-atom subset boundaries, or on particular
+    # residues. Each points somewhere different.
+    _a = np.asarray(a_got).reshape(np.asarray(a_ref).shape)
+    _e = np.abs(_a - np.asarray(a_ref)).max(-1)
+    _o = np.argsort(-_e)
+    print('  DIAG per-token max|d|: worst %s' % [(int(i), round(float(_e[i]), 3))
+                                                 for i in _o[:6]])
+    print('  DIAG            median %.4f  p90 %.4f  n tokens %d'
+          % (float(np.median(_e)), float(np.quantile(_e, 0.9)), len(_e)))
+    _na = np.asarray(feats['mask']).sum(-1)
+    print('  DIAG atoms per worst token: %s' % [int(_na[i]) for i in _o[:6]])
   print('  shapes: a ours %s native %s | skip ours %s native q_l %s'
         % (np.asarray(a_got).shape, a_ref.shape, np.asarray(skip).shape,
            q_ref.shape))

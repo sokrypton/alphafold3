@@ -1163,7 +1163,37 @@ outside the family.
 that. The flag is spelled identically in both places now, so a grep finds them
 together.
 
-### The residual, and everything it is NOT
+### The residual: localised to the atom stack, and mostly one atom
+
+Continued after the conditioning fix. `atom_parity.py` now has an esmfold2
+adapter driven by the reference, which closes L2's atom-encoder cell for the
+family and is a much faster handle than the denoise gate:
+
+| esmfold2 atom encoder | |
+|---|---|
+| `c_atom_cond` (the conditioning every adaLN reads) | **1.000000** |
+| `a_token` | 0.999756, rms ours/native 0.9990, max\|d\| 2.19 on rms 4.52 |
+| `q_atom` | 0.999805 |
+
+**And the max is one token.** `DIAG=1` gives per-token max\|d\|: token 67 --
+the LAST -- reads 2.189 where the next worst is 0.729 and the median is 0.244.
+That token has TEN atoms on our side and NINE on ESMFold2's: our featuriser
+emits the terminal **OXT** and its `PROTEIN_HEAVY_ATOMS` table does not. The
+encoder pools atoms to tokens with `scatter_mean`, so ten atoms against nine
+changes that token's mean outright. **That is an input difference, not a port
+bug** -- and arguably ours is the more correct input, since OXT is a real atom.
+
+It is also why the denoise gate's error is worst in the last 64 atoms (1.78
+against 1.08 in the middle): with a +/-64 rank window, our extra atom is a KEY
+for exactly that many.
+
+What remains after it is a broad ~5% (median 0.244 on rms 4.52) that appears
+**within a single atom block** and does not accumulate in the encoder --
+truncating both sides gives max\|d\| 2.72 / 2.22 / 2.19 at 1 / 2 / 3 blocks.
+Still open, and the next step is a single-block A/B on the reference's own
+tapped `enc_queries_in`.
+
+### Everything the residual is NOT
 
 The denoise step did NOT close: 1.3607 -> 1.3411 A per atom, corr 0.990764,
 against every other port's 0.0000-0.401 A. Recorded OPEN, with the exclusions,
@@ -1190,8 +1220,25 @@ because a list of what a gap is not is worth more than a guess at what it is:
     list; ours restricts it to AF3's query/key subsets, and the arithmetic looked
     fatal (32 queries x +/-64 spans 160 > 128 keys) -- but esmfold2's subset is
     192 keys and a direct count finds **0** in-window partners missing.
-  * **the discrete atom features**: `ref_element` and `ref_charge` identical
-    atom for atom.
+  * **the discrete atom features**: `ref_element`, `ref_charge` and
+    `ref_space_uid` identical atom for atom, and the fused 389-column
+    `atom_linear` splits into our per-feature slots in the reference's own order
+    `[ref_pos 3 | charge 1 | mask 1 | element 128 | atom_name 256]`.
+  * **the atom-level conditioning**: ours against the reference's
+    `c0 = LN(atom_features @ atom_linear)` reads **1.000000**.
+  * **the trunk-single term and the coords projection**: ESMFold2 conditions its
+    atom blocks on `c0` ALONE, and our `embed_trunk_single_cond` is exactly zero;
+    its `coords_linear` takes `[r_noisy | zeros]` and our converter maps only the
+    first three columns.
+  * **`ref_pos`, properly this time.** It DOES differ -- mean 3.31 A name-matched,
+    and it moves the rope table hard (cos corr 0.837, sin 0.610, entirely in the
+    6 spatial pairs; the 10 uid pairs are bit-identical). Yet the reference's
+    denoise barely moves: 0.0791 A. The reason is that **rotary encodes the phase
+    DIFFERENCE**, so what reaches attention is `pos_i - pos_j` -- local geometry,
+    which our CCD ideal conformer shares with ESMFold2's table even though the
+    frame does not. A large table difference and a tiny output difference are
+    consistent, and the check that says so was right where the intuition was
+    wrong.
   * **a frame**: the mean offset is 0.34 A and removing it leaves 1.295 A;
     rigid-body alignment leaves 1.287 A. Not a translation, not a rotation.
 
