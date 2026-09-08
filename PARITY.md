@@ -44,6 +44,22 @@ Re-adding a variant is still close to a one-liner: a `converters/sources.py`
 entry, a converter alias, a `MODELS` line and (if its widths differ) a widener.
 `PROTENIX_FAMILY` and every list keyed off it were left written as a family.
 
+Verified after the removal, because `PROTENIX_FAMILY` feeds six shared
+convention lists and a bad edit there would move models that were never touched:
+
+| model | 6MRR best, after | recorded baseline |
+|---|---|---|
+| `protenix2` | 0.703 | 0.702 |
+| `protenix1` | 1.701 | 1.694 |
+| `openfold3` | 1.544 | 1.541 |
+| `boltz2` | 0.430 | 0.434 |
+| `rosettafold3` | 0.956 | 0.986 |
+
+The published weights for the four removed models are still live at
+`sokrypton/af3-any-model/protenix/` and were deliberately NOT unpublished:
+someone may have pinned them, and deleting a published file is not a decision
+the removal itself implies.
+
 ## Current coverage
 
 `✓` gated, `~` partially gated (see the footnote), `·` not measured,
