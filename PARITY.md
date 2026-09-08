@@ -22,6 +22,27 @@ Read `README.md` for the numbers. This file is the plan.
 L0 and L5–L6 need no vendor code, which is why they cover every model. L1–L4
 need the vendor's forward pass, so coverage tracks which natives are installed.
 
+## Regression check after 2026-09-08's changes
+
+Two forward-graph fixes landed today (both in the protenix template path) plus
+one model removal, so every model was re-folded on 6MRR afterwards. All nine
+sit on their recorded baselines:
+
+| model | after | baseline |
+|---|---|---|
+| `protenix2` | 0.705 | 0.702 |
+| `protenix1` | 1.695 | 1.694 |
+| `openfold3` | 1.545 | 1.541 |
+| `openbind0` | 1.648 | 1.649 |
+| `intellifold2` | 1.517 | 1.514 |
+| `boltz2` | 0.431 | 0.434 |
+| `opendde` | 0.771 | 0.767 |
+| `rosettafold3` | 0.977 | 0.986 |
+| `chai1` | 1.718 | 1.719 |
+
+The templated path is where the fixes bite, and there the change is large and
+intended: protenix2 on a templated 5K9P goes 1.588 -> 0.227 A.
+
 ## Four protenix models were removed (2026-09-08)
 
 `protenix05`, `protenix1_20250630`, `protenix_mini` and `protenix_tiny` are gone;
