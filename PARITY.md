@@ -934,7 +934,7 @@ Enumerated against the graph's own module list rather than from memory:
 
 | module | models carrying it | gated on | note |
 |---|---|---|---|
-| ~~template embedder~~ | 9 | **3** | gated 2026-09-08, found TWO bugs; protenix2/1 and rosettafold3 all **1.000000** |
+| ~~template embedder~~ | 9 | **4** | gated 2026-09-08, found TWO bugs; protenix2/1, rosettafold3, boltz2 all **1.000000** |
 | **MSA module** | **10** | **2** | only `protenix2` and `protenix1`, via `prot_parity.py` (L1b) |
 | ~~distogram head~~ | all | **6** | CLOSED 2026-09-08, `dgram_parity.py` — see below |
 | ~~input embedder~~ | all | **2** | CLOSED 2026-09-08, `real_trunk_parity.py` |
@@ -1004,6 +1004,23 @@ So listing it in `TEMPLATE_STACK_OUTER_RESIDUAL` was INERT, which the gate
 settled rather than the source reading: rf3 reads 1.000000 bit for bit with the
 name in the tuple or out of it. It is now correctly absent, and 6MRR is
 unchanged (0.976 against a 0.986 baseline).
+
+**boltz2: gated, exact, and it CONFIRMS the outer residual.** corr **1.000000**
+(max|d| 3e-05) -- and this is the strongest of the three adapters, because boltz
+takes the RAW geometry (`template_frame_rot`, `template_frame_t`, ca/cb and
+their masks) and builds its own 109 channels, so the gate tests our feature
+DERIVATION as well as the forward. The protenix adapter feeds native our own
+108-d features and therefore tests only the forward.
+
+It also settles the one reading nothing had checked: ours keeps
+`v = v + stack(v)` for boltz2 and matches native exactly, so boltz2 really is
+the sole member of `TEMPLATE_STACK_OUTER_RESIDUAL` -- verified from both sides
+now, not inferred from one.
+
+`compute_frame` is transcribed verbatim into the harness rather than imported:
+`boltz.data.tokenize.boltz2` pulls `boltz.data.types`, which needs mashumaro,
+which is not in this venv and must not be installed into it. The model module
+itself imports fine.
 
 **The moral is not that duplication saved us.** protenix inherited the shared
 forward and got boltz2's convention; rf3 escaped only by not inheriting. Either
@@ -1093,7 +1110,7 @@ it covers, because the file itself is the only other record:
 | `dev/oracles/atom_parity.py` | L2 | atom cross-attention encoder, real batch, windowed — protenix2/1, both of3, intellifold2, rosettafold3 |
 | `dev/oracles/diffusion_parity.py`, `l2_all.sh` | L2 | token diffusion transformer — 10 models |
 | `dev/oracles/denoise_parity.py` | L3 | one denoise step, whole diffusion module — protenix2/1, both of3, intellifold2, rosettafold3 |
-| `dev/oracles/template_parity.py` | L1 | template embedder vs the vendor's own module — protenix2/1, rosettafold3, all 1.000000; found 2 bugs |
+| `dev/oracles/template_parity.py` | L1 | template embedder vs the vendor's own module — protenix2/1, rosettafold3, boltz2, all 1.000000; found 2 bugs |
 | `dev/oracles/real_trunk_parity.py` + `native_trunk_dump.sh` | L1 real-input | input embedder, trunk output and recycling, against native's own featurised run — protenix2/1 |
 | `dev/oracles/dgram_parity.py` | L4 | distogram head — protenix2/1, both of3, intellifold2, rosettafold3 |
 | `dev/oracles/confidence_parity.py`, `l4_all.sh` | L4 | confidence head — every port |
