@@ -329,6 +329,12 @@ def create_target_feat_embedding(
       # return is `TupleConstruct(%s_trunk, %s_structure, %z_init)`.
       trunk = hm.Linear(config.seq_channel, use_bias=False,
                         name='chai1_single_proj_in_trunk')(s_cat).astype(dtype)
+      # WHICH CONSUMER GETS WHICH, verified against chai's own captures rather
+      # than inferred: the trunk and the CONFIDENCE head both take the trunk
+      # projection (the confidence input's per-channel std correlates +0.744
+      # with `proj_in_trunk`'s row norms and -0.07 with the structure one), and
+      # the diffusion module takes the structure projection (+0.682 against ours
+      # vs -0.013 for the trunk). So only the diffusion path is switched below.
       if global_config.model in model_config.SEPARATE_STRUCTURE_TARGET_FEAT:
         return trunk, hm.Linear(
             config.seq_channel, use_bias=False,
@@ -854,10 +860,10 @@ class Model(hk.Module):
       diff_batch = batch
       diff_emb = embeddings
       if target_feat_structure is not None:
-        # The diffusion module's own s_inputs. Not a copy of the dict: the
-        # confidence head below reads `embeddings['target_feat']`, and chai's
-        # confidence head is fed the TRUNK projection (its own graph takes the
-        # trunk single), so only the diffusion path is switched.
+        # The diffusion module's own s_inputs, and ONLY the diffusion module's:
+        # the confidence head below reads `embeddings['target_feat']`, and chai
+        # feeds its confidence head the TRUNK projection (measured; see
+        # create_target_feat_embedding).
         diff_emb = dict(embeddings)
         diff_emb['target_feat'] = target_feat_structure
 

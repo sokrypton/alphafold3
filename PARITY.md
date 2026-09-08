@@ -1296,13 +1296,38 @@ explicitly -- `TupleConstruct(%s_trunk, %s_structure, %z_init)`:
     s_structure = token_single_proj_in_structure(input13)             # 384
     s_trunk     = token_single_proj_in_trunk(input13)                 # 384
 
-Two independently trained projections of the same input: the trunk gets the
-first, the DIFFUSION module the second. AF3 computes one `s_inputs` and hands it
-to both, so the port fed the diffusion conditioning the trunk's vector. The two
-matrices are effectively ORTHOGONAL -- cosine -0.0024, rms 0.107 against 0.182 --
-so this was not a near-miss, it was an unrelated 384-d vector. Gated by
+Two independently trained projections of the same input. AF3 computes one
+`s_inputs` and hands it to both consumers, so the port fed the diffusion
+conditioning the trunk's vector. The two matrices are effectively ORTHOGONAL --
+cosine -0.0024, rms 0.107 against 0.182 -- so this was not a near-miss, it was
+an unrelated 384-d vector. Gated by
 `model_config.SEPARATE_STRUCTURE_TARGET_FEAT`; `diff_emb['target_feat']` was
 already a seam, since opendde's structural path replaces it.
+
+**Which consumer gets which was MEASURED, not inferred, and the first attempt at
+inferring it failed.** chai has three consumers of a token single and three
+differently-named inputs -- the trunk's `token_single_trunk_initial_repr`, the
+diffusion module's `token_single_initial_repr`, and the confidence head's
+`token_single_input_repr` -- and on 6MRR those last two are mutually
+uncorrelated (corr -0.009, rms 0.805 vs 1.512), so they are not the same
+tensor. Elimination said "the diffusion module must take the structure one",
+but the diffusion capture's per-channel profile tracked NEITHER weight's row
+norms (-0.02 / +0.01), which is not what a plain projection looks like. Both
+weights' row norms have a comparable coefficient of variation (0.12 / 0.15), so
+that null was real rather than a dead statistic.
+
+Settled by building our own `s_cat` for the same target (our input embedder
+reproduces chai's s_init at corr 0.99999280) and projecting it both ways:
+
+| chai consumer | vs trunk projection | vs structure projection |
+|---|---|---|
+| confidence head (per-channel std vs row norms) | **+0.744** | -0.075 |
+| diffusion module (activation, 6MRR) | -0.013 | **+0.682** |
+
+So: trunk <- trunk, confidence <- trunk, diffusion <- structure. The 0.682
+rather than 0.999 is our `s_cat` not being chai's `input13` byte for byte
+(different ESM2 source, our featurisation, 68 tokens against a padded 256); the
+DISCRIMINATION is what the test needed, and -0.013 against +0.682 is not close.
 
 **And its fold-level effect is nearly nil, which is worth stating plainly.**
 6MRR 1.721 -> 1.704, 1STP+BTN (with ESM) 0.467/0.534 -> 0.456/0.535 -- and
