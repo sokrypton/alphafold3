@@ -540,13 +540,25 @@ features reach the model only through equality (`asym_i == asym_j`) and through
 differences (`token_index_i - token_index_j`), and a constant offset cancels in
 both.
 
-**The reference conformers are genuinely different molecules-in-space.** Not a
-frame convention: aligning our conformer onto native's per residue leaves a mean
-Kabsch RMSD of **0.90 A** (max 1.76) across all 76 residues, with the atom ORDER
-identical (`ref_element` and `ref_charge` match exactly, so the atoms correspond
-one to one). Both are valid ideal conformers; they are not the same one. This is
-an input difference in EVERY protenix fold, and `ref_pos` feeds the atom
-encoder's per-atom features and the windowed atom-pair distances.
+**The reference conformers differ by their TORSIONS.** The correspondence is
+proven, not assumed: `ref_atom_name_chars` decodes to the same atom names in the
+same order on both sides (as do `ref_element`, `ref_charge` and `ref_space_uid`),
+so atom k on our side is atom k on theirs. Aligning per residue then leaves:
+
+| aligned set | ours vs native | ours vs CCD ideal | native vs CCD ideal |
+|---|---|---|---|
+| whole residue | **0.90 A** (max 1.76, n=76) | 0.90 | 0.79 |
+| backbone only (N,CA,C,O,CB) | 0.31 | 0.34 | 0.26 |
+| side chain only | 0.17 | 0.14 | 0.15 |
+
+Each rigid fragment agrees to ~0.2-0.3 A; only their RELATIVE ORIENTATION does
+not. That is a chi-torsion difference -- two different conformers of the same
+molecule, which is also why NEITHER side reproduces the CCD ideal coordinates
+(0.90 and 0.79): both are generated, not read off the ideal columns. So neither
+is wrong; they are not the same draw. `ref_pos` feeds the atom encoder's per-atom
+features and its windowed atom-pair distances, so this is a real input difference
+in every protenix fold -- of the same class as the boltz2 atom-encoder conformer
+gap, and equally not a port bug.
 
 It does NOT obviously explain protenix2, and saying so is the point: protenix05
 carries the same conformer difference through the same code and matches native
