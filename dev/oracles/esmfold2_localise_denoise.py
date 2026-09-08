@@ -9,6 +9,7 @@ sys.path.insert(0, '/home/ubuntu/alphafold3'); sys.path.insert(0, '/home/ubuntu/
 sys.argv = sys.argv[:1]
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from esmfold2_dumps import state_dict as _sd_of, native as _native_of
+import esmfold2_dumps as _native_dumps
 # MODEL picks the release: every ESMFold2 variant has its own weights AND
 # its own shim, and crossing them reads corr 0.026 against native.
 MODEL = os.environ.get('MODEL', 'esmfold2')
@@ -64,10 +65,17 @@ x_flat = np.zeros(rmask.shape + (3,), np.float32); x_flat[rmask] = x_real
 # `*adaptive_zero_cond` slots on ours.
 # ZERO_ATOM=1 kills both gates (identity stacks); =attn keeps only the
 # attention sublayer (kills the FFN gate); =ffn keeps only the FFN.
+# ZERO_ATOM also selects WHICH stack: `enc` / `dec` zero one of the two, which
+# is what separates the encoder from the decoder. The encoder is exact on its
+# own gate (atom_parity.py esmfold2, SAME_ATOM_SET + NATIVE_REF_POS -> 1.000000),
+# so a residual that survives here has to come from the decoder.
 ZERO_ATOM = os.environ.get('ZERO_ATOM', '')
-_CHUNKS = {'1': (2, 5), 'attn': (5,), 'ffn': (2,)}.get(ZERO_ATOM, ())
+_CHUNKS = {'1': (2, 5), 'attn': (5,), 'ffn': (2,),
+           'enc': (2, 5), 'dec': (2, 5)}.get(ZERO_ATOM, ())
+_STACKS = {'enc': ('atom_encoder',), 'dec': ('atom_decoder',)}.get(
+    ZERO_ATOM, ('atom_encoder', 'atom_decoder'))
 if _CHUNKS:
-  for _which in ('atom_encoder', 'atom_decoder'):
+  for _which in _STACKS:
     _k = 'diffusion/%s/blocks/adaln/weights' % _which
     _w = np.array(pref[_k])
     for _c in _CHUNKS:
@@ -85,6 +93,37 @@ if NB:
     dims = dict(dims); dims['n_diff_atom'] = NB
 
 N_PASSES = 4
+# SAME_INPUTS=1 removes the two FEATURISATION differences this gate otherwise
+# measures, so what is left is the port:
+#   * our terminal OXT, which ESMFold2's PROTEIN_HEAVY_ATOMS table does not have
+#     (574 atoms against 573), and which the encoder's scatter_mean pooling
+#     turns into a whole-token difference;
+#   * our CCD ideal ref_pos against its PROTEIN_REF_POS table -- mean 3.31 A
+#     apart in local frame, and it feeds the rotary embedding.
+# With both removed the atom ENCODER reads exactly 1.000000
+# (atom_parity.py esmfold2 SAME_ATOM_SET=1 NATIVE_REF_POS=1), so this says
+# whether the whole denoise step follows.
+SAME_INPUTS = os.environ.get('SAME_INPUTS') == '1'
+if SAME_INPUTS:
+  import dataclasses
+  _fb_tmp = feat_batch.Batch.from_data_dict(
+      jax.tree_util.tree_map(jnp.asarray, utils.remove_invalidly_typed_feats(batch)))
+  _ri, _oi = _native_dumps.atom_map(_fb_tmp, f)
+  _m = np.zeros(np.asarray(_fb_tmp.ref_structure.mask).shape, bool).reshape(-1)
+  _m[_oi] = True
+  _m = _m.reshape(np.asarray(_fb_tmp.ref_structure.mask).shape)
+  _pos = np.array(np.asarray(_fb_tmp.ref_structure.positions), copy=True)
+  _pos.reshape(-1, 3)[_oi] = np.asarray(f['ref_pos']).reshape(-1, 3)[_ri]
+  batch = dict(batch)
+  # `pred_dense_atom_mask` is the predicted-structure mask the encoder pools
+  # over; `ref_mask` the reference-structure one. Both have to lose the atom.
+  for _k2, _v2 in (('ref_pos', _pos), ('ref_mask', _m.astype(np.float32)),
+                   ('pred_dense_atom_mask', _m.astype(np.float32))):
+    if _k2 in batch:
+      batch[_k2] = _v2
+  print('   SAME_INPUTS=1: %d atoms kept, ref_pos taken from the dump'
+        % int(_m.sum()))
+
 b = jax.tree_util.tree_map(jnp.asarray, utils.remove_invalidly_typed_feats(batch))
 fb0 = feat_batch.Batch.from_data_dict(b)
 gmask = np.asarray(fb0.predicted_structure_info.atom_mask).astype(bool)
@@ -179,6 +218,7 @@ def _strip(k):
     k = k[len('diffuser/'):]
   return k[len('~/'):] if k.startswith('~/') else k
 _p = {_strip(k): v for k, v in _p.items()}
+_STACKS_SEL = ZERO_ATOM if ZERO_ATOM in ('enc', 'dec') else ''
 if _CHUNKS:
   # the gate lives in the SCOPE name, not the leaf (haiku appends the module
   # name, so the leaf is just 'weights'). 'adaptive_zero_cond' is a SUBSTRING of
@@ -186,6 +226,10 @@ if _CHUNKS:
   # absence.
   def _hit(k):
     if 'diffusion_atom_transformer' not in k:
+      return False
+    if 'enc' in _STACKS_SEL and 'encoder' not in k:
+      return False
+    if 'dec' in _STACKS_SEL and 'decoder' not in k:
       return False
     ffn = 'ffw_adaptive_zero_cond' in k
     attn = ('adaptive_zero_cond' in k) and not ffn

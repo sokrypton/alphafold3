@@ -1163,7 +1163,45 @@ outside the family.
 that. The flag is spelled identically in both places now, so a grep finds them
 together.
 
-### The residual: localised to the atom stack, and mostly one atom
+### THE RESIDUAL WAS A REAL BUG: the atom DECODER had no window and no rotary
+
+ESMFold2's decoder is the SAME STACK as its encoder -- the reference calls
+`atom_stack(qd, c0, ad, 'blocks/', n, cos, sin, mask)` with the encoder's own
+cos/sin and the encoder's mask. Ours ran it with AF3's `same_token_mask` and
+**no rotary at all**, so its atom attention was restricted to atoms of the SAME
+RESIDUE and carried no positional signal.
+
+Found by bisection rather than by reading. `ZERO_ATOM=enc|dec` makes one of the
+two stacks an identity:
+
+| | corr | rms |
+|---|---|---|
+| decoder made an identity (encoder active) | **1.000000** | **0.0000 A** |
+| encoder made an identity (decoder active) | 0.991137 | 1.2753 A |
+
+The whole residual was the decoder, and the encoder was already exact on its own
+gate. Fixed by carrying `swa_mask` / `rope_q` / `rope_k` on
+`AtomCrossAttEncoderOutput` and handing them to the decoder's transformer --
+they are gathers of the same flat atom list, so rebuilding them in the decoder
+is exactly where a subtle mismatch would go. `enc.swa_mask is None` for every
+other model, which falls back to `same_token_mask` and no rope, so nothing else
+moves (protenix2's denoise re-checked at 0.0000 A).
+
+| esmfold2 | before | after |
+|---|---|---|
+| denoise, same inputs | 1.3941 A | **0.0000 A** (corr 1.000000, max 0.0001) |
+| denoise, real featurisation | 1.3411 A | **0.2524 A** (corr 0.999720) |
+| 6MRR fold | 1.493 best / 1.732 mean | **1.393 / 1.607** (native 1.739) |
+
+Graph-only: no parameters change, so no blob and no republish.
+
+That the model folded at all -- indeed better than native -- with its decoder
+attending only within residues is worth pausing on. The encoder does the
+long-range work and the decoder only has to turn atom features into a position
+update, so a wrong mask there degrades rather than destroys. It is exactly the
+kind of error a fold gate cannot find and an activation gate finds in one bisect.
+
+### What the remaining 0.2524 A is: two featurisation differences
 
 Continued after the conditioning fix. `atom_parity.py` now has an esmfold2
 adapter driven by the reference, which closes L2's atom-encoder cell for the

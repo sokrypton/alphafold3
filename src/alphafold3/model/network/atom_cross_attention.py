@@ -183,6 +183,15 @@ class AtomCrossAttEncoderOutput:
   # decoder's atom stack reuses the encoder's mask instead of rebuilding it.
   # Defaulted, so it must stay last in the dataclass.
   same_token_mask: jnp.ndarray | None = None
+  # ESMFold2 only: the +/-64 sliding window and the 3D rotary tables. Its
+  # DECODER's atom stack is the same stack as the encoder's -- same window, same
+  # rotary, same conditioning (`atom_stack(qd, c0, ad, ...)` with the very cos
+  # and sin the encoder used) -- so the decoder has to be handed both. Carried
+  # here rather than rebuilt because the queries/keys rotations are gathers of
+  # the same flat list and rebuilding them is where a subtle mismatch would go.
+  swa_mask: jnp.ndarray | None = None
+  rope_q: tuple[jnp.ndarray, jnp.ndarray] | None = None
+  rope_k: tuple[jnp.ndarray, jnp.ndarray] | None = None
 
 
 jax.tree_util.register_dataclass(
@@ -699,6 +708,9 @@ def atom_cross_att_encoder(
       pair_cond=pair_act,
       query_base=query_base,
       same_token_mask=same_token_mask,
+      swa_mask=swa_mask,
+      rope_q=rope_q,
+      rope_k=rope_k,
   )
 
 
@@ -759,7 +771,17 @@ def atom_cross_att_decoder(
       queries_single_cond=q_cond,
       keys_single_cond=k_cond,
       pair_cond=enc.pair_cond,
-      pair_mask=enc.same_token_mask,
+      # THE DECODER IS THE SAME STACK AS THE ENCODER for ESMFold2, and it was
+      # not being told so: it ran with AF3's same-token mask and NO rotary at
+      # all, where the reference calls `atom_stack(qd, c0, ad, ..., cos, sin,
+      # mask)` -- the encoder's window and the encoder's rotary. Worth the whole
+      # of that model's denoise residual: with the decoder's stack made an
+      # identity the step was exact (0.0000 A) while the encoder alone left
+      # 1.2753 A, and the encoder's own gate reads 1.000000.
+      pair_mask=(enc.swa_mask if enc.swa_mask is not None
+                 else enc.same_token_mask),
+      rope_q=enc.rope_q,
+      rope_k=enc.rope_k,
   )
   queries_act *= enc.queries_mask[..., None]
   queries_act = hm.LayerNorm(
