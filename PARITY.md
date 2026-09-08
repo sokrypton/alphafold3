@@ -1135,6 +1135,61 @@ embedded MSA from native's own `msa_subsampler` and feeding it to both sides
 gives 0.999971. **If a gate's two sides do not provably see the same input, its
 number is not a measurement.**
 
+## L5 for all 18, in one driver run, with the language models attached (2026-09-08)
+
+`bash dev/oracles/run_all_parity.sh L5`. Every row 6MRR, 5 samples from seed 0,
+CA-RMSD, and -- this is the part that had never been true of an in-repo sweep --
+each model given the language-model input it actually needs.
+
+| model | best | mean | native, same target |
+|---|---|---|---|
+| `boltz2` | **0.423** | 0.529 | |
+| `alphafold3` | 0.628 | 0.688 | |
+| `protenix2` | 0.691 | 1.330 | |
+| `esmfold2_exp` | 0.727 | 1.051 | 0.736 |
+| `opendde` | 0.772 | 0.859 | |
+| `esmfold2_lm600m` | 0.788 | 1.428 | 0.794 |
+| `rosettafold3` | 0.942 | 1.514 | |
+| `esmfold2_fast` | 1.243 | 1.699 | 1.646 |
+| `esmfold2_exp_fast` | 1.264 | 1.529 | 1.546 |
+| `esmfold2_exp_fast_cutoff2025` | 1.424 | 1.638 | 1.629 |
+| `esmfold2` | 1.494 | 1.742 | 1.739 |
+| `intellifold2` | 1.513 | 1.610 | |
+| `openfold3` | 1.541 | 1.718 | |
+| `esmfold2_exp_cutoff2025` | 1.609 | 1.673 | 1.607 |
+| `openbind0` | 1.648 | 1.825 | |
+| `protenix1` | 1.694 | 1.836 | |
+| `chai1` | 1.723 | 1.789 | |
+| `esmfold2_lm300m` | 1.752 | 1.763 | 1.687 |
+
+**Ours matches or beats native on 7 of the 8 ESMFold2 releases** (the exception
+is lm300m, 1.752 against 1.687), which is the strongest end-to-end statement in
+this file: eight releases, each against its own weights, its own shim and its
+own ESM-C tower. The native column comes from
+`dev/oracles/esmfold2_oracle_6mrr.py`, which now takes MODEL and dumps per
+variant.
+
+**The language-model inputs are the reason this sweep means anything.** chai-1's
+token stream is mostly ESM2 and ESMFold2 has no MSA at all, so without them nine
+of the eighteen rows are a different model: chai1 reads 3.9 A on 1STP+BTN
+without embeddings against 0.456 with them. `dev/oracles/lm_inputs.py` generates
+them per (tower, case) -- sequences taken from `modality_check.py --dump_seqs`,
+so they come from the same chain construction the fold uses, in chain order --
+and the driver records in each log WHICH file it used, or that none was found.
+A number measured without one must not be mistakable for a number measured with
+one, and that mistake had already cost an hour chasing a phantom chai1
+regression.
+
+Two calibration notes for reading any of this:
+
+  * **6MRR is insensitive to chai-1's ESM2** (1.712 with, 1.704 without) while
+    1STP is transformed by it (0.456 against 3.9). A designed helical bundle
+    carries little evolutionary signal; a natural protein does. So the 6MRR
+    column understates what the LM is worth.
+  * the spread within one model across 5 samples is often larger than the
+    spread between models -- `protenix2` runs 0.691 to 1.641 -- so `best` and
+    `mean` are both given and neither alone should be quoted.
+
 ## ESMFold2 is NOT protein-only, and this document said it was (2026-09-08)
 
 Both tables here read `n/a -- protein only` for the esmfold2 family at L6. That
