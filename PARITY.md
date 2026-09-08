@@ -115,11 +115,12 @@ L2 was gated a different way when they were ported (whole-module injection),
 while the AF3-family rows read `~` because this document's three-part L2 is the
 stricter standard and their conditioning or atom encoder is not all measured.
 
-**The atom DECODER has no gate of its own, on any model.** It is covered only in
-composition, by the models whose whole denoise step (L3) is exact -- `protenix2`
-at 0.0000 A per atom, `openfold3` at 0.0001, `openbind0` at 0.0021. That is real
-evidence, but it cannot localise a decoder-only fault, and it is the largest
-remaining structural hole here.
+**The atom DECODER now has a gate of its own** -- `DECODER=1
+dev/oracles/atom_parity.py`, added 2026-09-08 and written up below. Before that
+it was covered only in composition, by the models whose whole denoise step (L3)
+is exact (`protenix2` 0.0000 A per atom, `openfold3` 0.0001, `openbind0`
+0.0021): real evidence, but unable to localise a decoder-only fault. It was the
+largest remaining structural hole in this document and it is closed.
 
 `alphafold3` and the AF2 pair are `n/a` at L0–L4 by construction: the first IS
 the reference implementation, and the second runs DeepMind's own network
@@ -160,8 +161,10 @@ diffusion path alone -- `PER_BLOCK_PAIR_LAYER_NORM`,
 the confidence head. The six confidence tables are now covered for ten models
 (L4, plan items 2b/2c), and the token transformer for the same ten (L2, 2a).
 **What is left with no activation-level check anywhere is the diffusion
-CONDITIONING and the ATOM encoder/decoder** -- nine tables, four model families.
-That is now the whole of the named exposure, down from fifteen tables.
+CONDITIONING and the ATOM ENCODER** -- and only for the models `conditioning_parity.py`
+and `atom_parity.py` do not yet reach (boltz2, opendde, chai1, esmfold2). The
+atom DECODER left this list on 2026-09-08 (`DECODER=1 atom_parity.py`). Down
+from fifteen tables to a per-model remainder rather than a whole-stage hole.
 
 **This is the real exposure, and openbind0 showed why it matters.** A membership
 decision that changes no weight is invisible to L0 by construction, and folding
@@ -451,10 +454,9 @@ confidence heads (2b/2c); what remains is the diffusion CONDITIONING, the atom
 encoder/decoder, and then the denoise step. DONE since: the atom encoder for
 both of3 releases, `protenix2` and now `intellifold2`; L3 for all six protenix
 releases; the atom encoder for `rosettafold3`; **L3 for every remaining port**
-(of3, openbind0, intellifold2, rosettafold3). LEFT: the atom DECODER has no gate
-of its own -- it is covered only in composition, by the three models whose
-denoise step is exact -- and the window-edge residual that if2 and rf3 both show
-is the padded-key mask item. `opendde` is the one model with no
+(of3, openbind0, intellifold2, rosettafold3); and the atom DECODER, gated
+directly since 2026-09-08 (`DECODER=1 atom_parity.py`). LEFT: the window-edge
+residual that if2 and rf3 both show, which is the padded-key mask item. `opendde` is the one model with no
 L4 -- it has its own head. These
 need new oracles, and they are the four whose ports predate the injection-ladder
 method (dump native's own tensors, inject them, compare our module's output).
@@ -869,10 +871,12 @@ step, so L3 covers every port that has a native:
 | `intellifold2` | 706 | 0 / 0 | 0.999950 | **0.075 A** | 1.59 | 19.3 |
 | `rosettafold3` | 879 | 0 / 0 | 0.999948 | **0.401 A** | 14.7 | 130.2 |
 
-**of3 joins protenix2 as exact**, on both releases -- and that matters beyond
-of3, because a denoise step runs the atom DECODER, which no gate reaches on its
-own. An exact step is the only evidence the decoder is right, and there are now
-three models carrying it.
+**of3 joins protenix2 as exact**, on both releases -- and at the time that
+mattered beyond of3, because a denoise step runs the atom DECODER and no gate
+then reached it on its own. An exact step was the only evidence the decoder was
+right, and there are now three models carrying it. (The decoder has since been
+gated directly; the composition evidence is what made that gate's own first
+number, 0.976, recognisable as a harness fault rather than a finding.)
 
 **rf3 read 2.79 A until the harness handed it the right alphabet.** The first
 run's error was flat across window positions (edge/interior 1.02) but varied
@@ -908,10 +912,13 @@ that still correlates well while being wrong.
 **rf3 is the loose one, and its own parts are tighter than the whole.** Its
 conditioning is 1.000000, its token transformer is gated, its atom encoder is
 0.999870 -- yet the composed step is 2.79 A per atom (2% of a 130 A coordinate
-spread). The one piece under it that NO gate reaches is the atom DECODER, which
-makes it the first suspect; the second is `process_ch`, the chiral term the port
-does not implement, dropped on the native side here so that both sides omit it.
-Recorded as measured, not explained.
+spread). At the time the one piece under it that no gate reached was the atom
+DECODER, which made it the first suspect; the second is `process_ch`, the chiral
+term the port does not implement, dropped on the native side here so that both
+sides omit it. Recorded as measured, not explained. **Resolved since**: the
+harness was handing rf3 native OF3's alphabet permutation, and with our
+447-vector scattered into rf3's own positions the step reads 0.401 A -- so
+neither suspect was the cause.
 
 `force_bfloat16 = True` on all 30 of rf3's attention blocks has to be switched
 off for this to run at all (a hard dtype error on CPU), the same surgery
