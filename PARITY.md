@@ -1196,10 +1196,34 @@ splits the residual cleanly:
 | same atom set | **0.643** | **0.142** | 39 |
 
 So the terminal OXT is the single largest term, and it is an INPUT difference.
-What remains is a broad ~5% -- median 0.234 per token on rms 4.52 -- which
-appears **within a single atom block** and does not accumulate in the encoder:
-truncating both sides gives max\|d\| 2.72 / 2.22 / 2.19 at 1 / 2 / 3 blocks.
-Still open.
+
+**And `NATIVE_REF_POS=1` closes the rest: the atom encoder is EXACT.**
+
+| esmfold2 atom encoder | a_token | max\|d\| |
+|---|---|---|
+| as featurised | 0.999756 | 2.189 |
+| same atom set | 0.999898 | 0.643 |
+| same atom set + ESMFold2's own `ref_pos` | **1.000000** | **0.00003** |
+
+Per-token median 0.0000. `q_atom` and `c_atom_cond` likewise 1.000000. So the
+whole residual was TWO FEATURISATION DIFFERENCES and no port bug at all:
+
+  1. the terminal **OXT**, which we emit and its `PROTEIN_HEAVY_ATOMS` table
+     does not;
+  2. **`ref_pos`** -- our CCD/RDKit ideal conformer against its
+     `PROTEIN_REF_POS` table, differing by mean 3.31 A in local FRAME. It feeds
+     the rotary embedding, which is why it reaches attention at all.
+
+Note (2) sits oddly beside the earlier finding that the reference's DENOISE
+moves only 0.0791 A when its conformer is swapped: both are true, because a 14%
+difference at `a_token` (max 0.64 on rms 4.52) is worth little by the time the
+whole score network has run. The encoder is where it is visible.
+
+**Neither is a bug to fix blind.** ESMFold2's weights were trained against its
+own conformer table, so feeding the CCD ideal is out-of-distribution positional
+information -- but our folds MATCH OR BEAT native on 7 of its 8 releases, so the
+practical cost is nil or negative. Adopting its table for esmfold2 would be a
+featurisation gate; it is recorded here as a decision, not taken silently.
 
 **A single-block A/B is the obvious next step and my first attempt at one was a
 broken harness** -- assembling CrossAttTransformer's ten arguments by hand

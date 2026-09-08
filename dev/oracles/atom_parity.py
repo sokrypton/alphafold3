@@ -738,6 +738,29 @@ def main(argv=None):
     act_dense = act_dense * _m[..., None]
     pos_noisy = act_dense[_m]
     print('  SAME_ATOM_SET: dropped %d atom(s) ours-only' % _dropped)
+
+  if os.environ.get('NATIVE_REF_POS') and args.model.startswith('esmfold2'):
+    # Give OUR side ESMFold2's own reference conformer, so both sides build the
+    # SAME rotary tables. ref_pos differs by mean 3.31 A name-matched (a
+    # local-FRAME difference: our CCD ideal against its PROTEIN_REF_POS table)
+    # and it moves the rope hard -- cos corr 0.837 -- while feeding rotary,
+    # whose phase DIFFERENCE is what reaches attention. This says whether the
+    # broad residual is that or not.
+    import dataclasses
+
+    import jax.numpy as jnp
+
+    import esmfold2_dumps
+    _nat2 = esmfold2_dumps.native(args.model)
+    _f2 = {k[5:]: v[0] for k, v in _nat2.items() if k.startswith('feat.')}
+    _ri, _oi = esmfold2_dumps.atom_map(fb, _f2)
+    _pos = np.array(np.asarray(fb.ref_structure.positions), copy=True)
+    _pos.reshape(-1, 3)[_oi] = np.asarray(_f2['ref_pos']).reshape(-1, 3)[_ri]
+    fb = dataclasses.replace(
+        fb, ref_structure=dataclasses.replace(
+            fb.ref_structure, positions=jnp.asarray(_pos)))
+    print('  NATIVE_REF_POS: our ref_pos replaced by the dump\'s at %d atoms'
+          % len(_ri))
   a_ref, q_ref, c_ref, p_ref, pad_mask = NATIVES[args.model](
       args.model, fb, feats, pos_noisy, s, z, n_tok)
   a_got, skip, c_got, p_got = ours(args.model, cfg, model_dir, fb, act_dense,
