@@ -160,7 +160,7 @@ against.
 | `intellifold2` | ✓ | ✓ | ~ | ✓ | ✓ | ✓ | ✓ |
 | `protenix2` | ✓ | ✓ | ~ | ✓ | ✓ | ✓ | ✓ |
 | `protenix1` | ✓ | ✓ | ~ | ~ | ✓ | ✓ | · |
-| `boltz2` | ✓ | ✓ | ✓ | · | ✓ | ✓ | ✓ |
+| `boltz2` | ✓ | ✓ | ✓ | ~ | ✓ | ✓ | ✓ |
 | `opendde` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `rosettafold3` | ✓ | ✓ | ~ | ✓ | ✓ | ✓ | ✓ |
 | `chai1` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
@@ -174,8 +174,6 @@ agreeing to 0.0006 Å).
 
 **What the gaps are, stated plainly rather than left as symbols:**
 
-* **`boltz2` has no L3.** The only model missing a whole level; no adapter for
-  its diffusion module has been written.
 * **`~` at L2 means fewer than three of its parts are measured.** The token
   transformer is gated on ten models at corr 1.000000; the diffusion
   conditioning on `protenix2`, `protenix1` and `rosettafold3`; the atom encoder
@@ -261,6 +259,7 @@ decoder is right**, since nothing gates it directly.
 | `rosettafold3` | 0.999948 | 0.401 Å | 879, 0 / 0 |
 | `protenix1` | 0.999428 | 0.207 Å | 0 / 0 |
 | `chai1` | 1.000000 | 0.012 Å | injected |
+| `boltz2` | 0.999900 | 0.203 Å | injected from a captured boltz run |
 | `opendde` | — | at parity across every sigma from 4608 down to 1 | |
 | `esmfold2` family | 0.99999765 | — | `r_update` / `x_denoised` |
 

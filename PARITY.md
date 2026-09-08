@@ -73,7 +73,7 @@ the removal itself implies.
 | `intellifold2` | ✓ | ✓ | ~ | ✓ | ✓ | ✓ | ✓ |
 | `protenix2` | ✓ | ✓ | ~ | ✓ | ✓ | ✓ | ✓ |
 | `protenix1` | ✓ | ✓ | ~ | ~ | ✓ | ✓ | · |
-| `boltz2` | ✓ | ✓ | ✓ | · | ✓ | ✓ | ✓ |
+| `boltz2` | ✓ | ✓ | ✓ | ~ | ✓ | ✓ | ✓ |
 | `opendde` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `rosettafold3` | ✓ | ✓ | ~ | ✓ | ✓ | ✓ | ✓ |
 | `chai1` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
@@ -893,6 +893,37 @@ Recorded as measured, not explained.
 off for this to run at all (a hard dtype error on CPU), the same surgery
 `diffusion_parity.py` does for the token stack alone.
 
+### boltz2's L3, by injection -- the last missing LEVEL (2026-09-08)
+
+boltz2 was the only model carrying a `.` for a whole level. It cannot be gated
+the way the others are: its atom path wants boltz's own feature layout (flat
+atoms plus `atom_to_token`, its own `ref_*` names), which is why the port
+deferred this. `dev/oracles/boltz2_denoise_parity.py` uses the tensors captured
+from a real boltz run instead (`~/boltz2_6mrr/diff_dump.npz`, `score.in.*` ->
+`score.out.r_update`) and feeds OUR head the same inputs.
+
+| | corr | per-atom mean | per-atom max | native rms |
+|---|---|---|---|---|
+| `boltz2` (sigma 4608) | 0.999900 | **0.203 A** | 0.425 | 16.9 |
+
+The EDM algebra makes this comparable at all, and it is boltz's own -- identical
+to AF3's, `sigma_data` 16 with the same c_skip/c_out/c_in and
+`c_noise(sigma) = log(sigma/16) * 0.25`. So the dump inverts:
+`sigma = 16 e^(4t)`, `noised = r_noisy / c_in`, and the reference is rebuilt as
+`c_skip * noised + c_out * r_update`. **`score.out.r_update` is the RAW network
+output, pre-EDM, where our head returns denoised coordinates** -- comparing
+those two directly is a units mismatch that still correlates well, which is
+exactly the sort of thing that passes for a gate and is not one.
+
+**It also found a featurisation difference: we give the C-terminal residue an
+OXT and boltz does not.** Token 67 (GLU) carries 10 atoms our side and 9 in
+boltz, so we hand boltz's weights an atom boltz never sees. One atom in 574 --
+small, and permanent for every boltz2 fold. The gate aligns the two lists per
+token and compares the 573 that correspond, rather than assuming they match:
+boltz's flat axis is 576 = 573 real + 3 PADDING rows, whose all-zero
+`atom_to_token` rows make `argmax` attribute them to token 0, which is why a
+naive per-token count reads 4-vs-7 there and means nothing.
+
 ### L3 across the whole protenix family (2026-09-08)
 
 With the atom encoder/decoder block counts now READ off the checkpoint rather
@@ -1109,6 +1140,7 @@ it covers, because the file itself is the only other record:
 | `dev/oracles/conditioning_parity.py` | L2 | diffusion pair + single conditioning — protenix2, protenix1, rf3 |
 | `dev/oracles/atom_parity.py` | L2 | atom cross-attention encoder, real batch, windowed — protenix2/1, both of3, intellifold2, rosettafold3 |
 | `dev/oracles/diffusion_parity.py`, `l2_all.sh` | L2 | token diffusion transformer — 10 models |
+| `dev/oracles/boltz2_denoise_parity.py` | L3 | boltz2's denoise step by INJECTION from a captured boltz run |
 | `dev/oracles/denoise_parity.py` | L3 | one denoise step, whole diffusion module — protenix2/1, both of3, intellifold2, rosettafold3 |
 | `dev/oracles/template_parity.py` | L1 | template embedder vs the vendor's own module — protenix2/1, rosettafold3, boltz2, all 1.000000; found 2 bugs |
 | `dev/oracles/real_trunk_parity.py` + `native_trunk_dump.sh` | L1 real-input | input embedder, trunk output and recycling, against native's own featurised run — protenix2/1 |
