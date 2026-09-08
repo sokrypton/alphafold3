@@ -15,7 +15,10 @@ from alphafold3.data import featurisation
 from alphafold3.model.pipeline import model_features
 from dev.oracles.fold_check import parse_ca
 from converters import esmfold2 as CV
-from converters.oracles import esmfold2_reference as R
+# the reference moved from converters/oracles/ to dev/oracles/ when the
+# repo split what SHIPS from what only verifies; this import had not
+# followed it, so every harness below had been unrunnable since.
+import esmfold2_reference as R
 
 seq,_ = parse_ca(os.path.expanduser('~/6MRR.pdb'))
 d = os.path.expanduser('~/ported/esmfold2')

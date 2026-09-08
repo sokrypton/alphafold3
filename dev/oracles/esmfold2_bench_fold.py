@@ -4,7 +4,10 @@ os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
 import sys, json, numpy as np, jax, jax.numpy as jnp
 sys.path.insert(0, '/home/ubuntu/alphafold3')
 from converters import esmfold2 as E
-from converters.oracles import esmfold2_reference as R
+# the reference moved from converters/oracles/ to dev/oracles/ when the
+# repo split what SHIPS from what only verifies; this import had not
+# followed it, so every harness below had been unrunnable since.
+import esmfold2_reference as R
 assert jax.devices()[0].platform == 'gpu'
 tag = sys.argv[1]
 meta = json.load(open('bench_meta.json'))

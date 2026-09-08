@@ -23,7 +23,10 @@ from alphafold3.model import feat_batch
 from alphafold3.model.network import evoformer as ev
 from dev.oracles.fold_check import parse_ca
 from converters import esmfold2 as CV
-from converters.oracles import esmfold2_reference as R
+# the reference moved from converters/oracles/ to dev/oracles/ when the
+# repo split what SHIPS from what only verifies; this import had not
+# followed it, so every harness below had been unrunnable since.
+import esmfold2_reference as R
 
 seq, xyz_true = parse_ca(os.path.expanduser('~/6MRR.pdb'))
 d = os.path.expanduser('~/ported/esmfold2')

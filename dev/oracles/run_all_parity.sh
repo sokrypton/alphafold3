@@ -76,7 +76,7 @@ classify () {  # classify <log> -> status on stdout
   local rc; rc=$(sed -n 's/^__GATE_EXIT //p' "$log" | tail -1)
   if [ "$rc" = 0 ]; then echo OK; return; fi
   if [ "$rc" = 124 ]; then echo TIMEOUT; return; fi
-  if grep -qi 'no native adapter\|no converter registered\|nothing to audit\|has no msa_encoder\|has no final-block\|no weights for\|run first:\|No module named\|KeyError' "$log"; then
+  if grep -qi 'no native adapter\|no converter registered\|nothing to audit\|has no msa_encoder\|has no final-block\|no weights for\|no native dump at\|run first:\|No module named\|KeyError' "$log"; then
     echo SKIP; return
   fi
   if grep -qi 'unaccounted for\|unmapped' "$log"; then echo WARN; return; fi
@@ -161,6 +161,19 @@ fi
 if want L1; then
   echo "== L1 trunk pairformer"
   for m in $MODELS; do gate L1.trunk "$m" '^  (single|pair) ' dev/oracles/trunk_parity.py "$m"; done
+  # ESMFold2 has no vendor MODULE to import -- its implementation is inside
+  # `transformers`, which lives in ~/venv_esm. What it has instead is
+  # `esmfold2_reference.py`, a complete self-contained JAX reimplementation that
+  # the port was built against and that is itself validated on native's dumps.
+  # So the reference IS the oracle here, and these two harnesses ARE the gates;
+  # they were simply never wired in. Family-scoped on purpose: they import
+  # esmfold2's converter and reference directly, so running them for another
+  # model would compare the wrong things rather than say it cannot.
+  for m in $MODELS; do
+    case $m in esmfold2*)
+      MODEL=$m gate L1.trunk_ref "$m" 'corr' dev/oracles/esmfold2_localise_trunk.py ;;
+    esac
+  done
 fi
 if want L1b; then
   # protenix's MSA module (and its trunk) go through prot_parity, which takes
@@ -224,6 +237,12 @@ if want L3; then
   # boltz2 has no standalone-constructible diffusion module; its L3 is by
   # injection from a captured native run (~/boltz2_6mrr/diff_dump.npz).
   gate L3.denoise_inject boltz2 'corr|per-atom' dev/oracles/boltz2_denoise_parity.py
+  # ESMFold2's denoise step against the reference -- see the L1 note above.
+  for m in $MODELS; do
+    case $m in esmfold2*)
+      MODEL=$m gate L3.denoise_ref "$m" 'corr' dev/oracles/esmfold2_localise_denoise.py ;;
+    esac
+  done
 fi
 
 # --- L4: the confidence head --------------------------------------------
