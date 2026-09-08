@@ -69,10 +69,10 @@ the removal itself implies.
 |---|---|---|---|---|---|---|---|
 | `alphafold3` | n/a | n/a | n/a | n/a | n/a | ✓ | · |
 | `openfold3` | ✓ | ✓ | ~ | ✓ | ✓ | ✓ | ✓ |
-| `openbind0` | ✓ | ✓ | ~ | ✓ | ✓ | ✓ | · |
+| `openbind0` | ✓ | ✓ | ~ | ✓ | ✓ | ✓ | ✓ |
 | `intellifold2` | ✓ | ✓ | ~ | ✓ | ✓ | ✓ | ✓ |
 | `protenix2` | ✓ | ✓ | ~ | ✓ | ✓ | ✓ | ✓ |
-| `protenix1` | ✓ | ✓ | ~ | ~ | ✓ | ✓ | · |
+| `protenix1` | ✓ | ✓ | ~ | ~ | ✓ | ✓ | ✓ |
 | `boltz2` | ✓ | ✓ | ✓ | ~ | ✓ | ✓ | ✓ |
 | `opendde` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `rosettafold3` | ✓ | ✓ | ~ | ✓ | ✓ | ✓ | ✓ |
@@ -956,6 +956,33 @@ dims-from-constants fix as everything else here: `PairformerStack` builds
 the harness passed `hidden_scale_up=True` -- which trunk_parity.py had been
 passing all along.
 
+## The atom DECODER, gated directly for the first time (2026-09-08)
+
+`DECODER=1 python dev/oracles/atom_parity.py protenix2` runs protenix's own
+`AtomAttentionDecoder` beside ours on one shared token activation, each side
+using its OWN encoder output -- legitimate precisely because the encoder is
+already exact for this model (1.000000), so the two sets of skips agree to
+~1e-5 and anything larger in the output is the decoder.
+
+| | corr | per-atom \|dr\| mean | max |
+|---|---|---|---|
+| `protenix2` | **1.000000** | **0.000002 A** | 0.000013 |
+
+Until now the decoder was covered only in COMPOSITION, by the models whose whole
+denoise step is exact. That was real evidence but could not localise a
+decoder-only fault; now it can.
+
+**A harness fault worth recording, because the number looked like a finding.**
+The first run read `r_update` 0.976. Our side had been built by splicing three
+fields (skip, queries_single_cond, pair_cond) into an encoder output computed
+from ZERO inputs -- so `keys_single_cond`, which the decoder's cross-attention
+consumes, came from a different invocation than the rest. Running the encoder
+and decoder in ONE transform on the real inputs gives 1.000000. The tell was
+available before any debugging: **protenix2's whole denoise step is exact at
+0.0000 A/atom, and L3 runs this decoder, so a genuinely 0.976 decoder was
+arithmetically impossible.** When a new gate disagrees with an established one,
+suspect the new gate.
+
 ## What has NO gate at all (2026-09-08)
 
 The L0-L6 table answers "how far down does each model's coverage go" and hides
@@ -970,7 +997,7 @@ Enumerated against the graph's own module list rather than from memory:
 | ~~distogram head~~ | all | **8** | CLOSED 2026-09-08, `dgram_parity.py`; chai1 is n/a (no native head) |
 | ~~input embedder~~ | all | **2** | CLOSED 2026-09-08, `real_trunk_parity.py` |
 | ~~recycling loop~~ | all | **2** | same gate — it compares the trunk AFTER all recycles |
-| atom decoder | all | 0 direct | covered in composition by the three exact L3 steps |
+| ~~atom decoder~~ | all | **1** | CLOSED 2026-09-08, `atom_parity.py DECODER=1` — protenix2 exact |
 
 ### The template embedder: gated for the first time, and it found TWO bugs (2026-09-08)
 
@@ -1071,6 +1098,15 @@ pair reads 0.998994 for the same reason). Its template stack is the widened
 "full_fat" tree -- c_t 256, 8 heads, c_hidden 32/256, NOT AF3's 64/16/4 -- so
 every width is read off the checkpoint; hardcoding AF3's numbers fails in
 load_state_dict with eight size mismatches rather than comparing quietly.
+
+**chai1 cannot be gated here, and the reason is structural.** chai ships
+TorchScript (`models_v2/trunk.pt`), and while `template_embedder` IS reachable as
+a child module with its parameters, it has **no callable `forward`** -- the
+computation exists only inline in the trunk's traced graph
+(`AttributeError: Method 'forward' is not defined`). So its weights are covered
+at L0 and its behaviour end to end, but the module cannot be invoked in
+isolation from the shipped artifacts. That is 8 of 9, with the ninth blocked by
+packaging rather than by effort.
 
 **opendde: gated at 1.000000, and its converter was the one that had this
 right.** opendde is protenix-lineage, so its template embedder takes ONE fused

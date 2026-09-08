@@ -156,10 +156,10 @@ against.
 |---|---|---|---|---|---|---|---|
 | `alphafold3` | n/a | n/a | n/a | n/a | n/a | ✓ | · |
 | `openfold3` | ✓ | ✓ | ~ | ✓ | ✓ | ✓ | ✓ |
-| `openbind0` | ✓ | ✓ | ~ | ✓ | ✓ | ✓ | · |
+| `openbind0` | ✓ | ✓ | ~ | ✓ | ✓ | ✓ | ✓ |
 | `intellifold2` | ✓ | ✓ | ~ | ✓ | ✓ | ✓ | ✓ |
 | `protenix2` | ✓ | ✓ | ~ | ✓ | ✓ | ✓ | ✓ |
-| `protenix1` | ✓ | ✓ | ~ | ~ | ✓ | ✓ | · |
+| `protenix1` | ✓ | ✓ | ~ | ~ | ✓ | ✓ | ✓ |
 | `boltz2` | ✓ | ✓ | ✓ | ~ | ✓ | ✓ | ✓ |
 | `opendde` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `rosettafold3` | ✓ | ✓ | ~ | ✓ | ✓ | ✓ | ✓ |
@@ -180,9 +180,10 @@ agreeing to 0.0006 Å).
   on those plus both OpenFold3 releases and `intellifold2`. The `✓` rows
   (`boltz2`, `opendde`, `chai1`, `esmfold2`) were gated by whole-module
   injection when they were ported, which is a different and coarser standard.
-* **The atom DECODER has no gate on any model.** It is covered only in
-  composition, by the three models whose whole denoise step is exact.
-* **L6 is unrun for `openbind0` and `protenix1`**, not known to be broken.
+* **The atom DECODER is gated on `protenix2`** (exact, 0.000002 Å/atom) and
+  covered in composition elsewhere by the exact denoise steps.
+* **`chai1`'s template embedder cannot be gated** from its shipped TorchScript:
+  the submodule's parameters are reachable but it has no callable `forward`.
 
 And the table hides four modules that nothing has ever compared, because the
 levels were organised around the diffusion path:
