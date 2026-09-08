@@ -965,7 +965,7 @@ Enumerated against the graph's own module list rather than from memory:
 
 | module | models carrying it | gated on | note |
 |---|---|---|---|
-| ~~template embedder~~ | 9 | **4** | gated 2026-09-08, found TWO bugs; protenix2/1, rosettafold3, boltz2 all **1.000000** |
+| ~~template embedder~~ | 9 | **6** | gated 2026-09-08, found TWO bugs; protenix2/1, rf3, boltz2, of3, openbind0 all **1.000000** |
 | **MSA module** | **10** | **2** | only `protenix2` and `protenix1`, via `prot_parity.py` (L1b) |
 | ~~distogram head~~ | all | **8** | CLOSED 2026-09-08, `dgram_parity.py`; chai1 is n/a (no native head) |
 | ~~input embedder~~ | all | **2** | CLOSED 2026-09-08, `real_trunk_parity.py` |
@@ -1052,6 +1052,22 @@ now, not inferred from one.
 `boltz.data.tokenize.boltz2` pulls `boltz.data.types`, which needs mashumaro,
 which is not in this venv and must not be installed into it. The model module
 itself imports fine.
+
+**openfold3 and openbind0: gated, both 1.000000.** They matter because of3 is
+on AF3's template design -- one Linear PER FEATURE rather than one fused
+`a_proj` -- which is precisely where protenix's restype bug would have lived if
+the converter had mapped positionally: of3's `aatype_linear_1` takes the
+**i**-varying block and `aatype_linear_2` the j-varying, while AF3's `to_concat`
+puts the **j**-varying block FIRST. `converters/openfold3.py` already crosses
+them (`[(3, 'aatype_linear_1'), (2, 'aatype_linear_2')]`) with a comment naming
+the trap, and this gate is what turns that comment into a measurement.
+
+Two harness notes from these two. of3's config subtree is
+`architecture/template`, not `template_embedder` -- that is the CHECKPOINT
+prefix, and searching the config for it finds nothing. And the `Templates` we
+hand our own module must be WRITABLE copies: `construct_input` does
+`dense_atom_positions *= dense_atom_mask[..., None]` in place, which numpy
+refuses on a read-only view and jax tracing hides.
 
 **The moral is not that duplication saved us.** protenix inherited the shared
 forward and got boltz2's convention; rf3 escaped only by not inheriting. Either
@@ -1155,7 +1171,7 @@ it covers, because the file itself is the only other record:
 | `dev/oracles/diffusion_parity.py`, `l2_all.sh` | L2 | token diffusion transformer — 10 models |
 | `dev/oracles/boltz2_denoise_parity.py` | L3 | boltz2's denoise step by INJECTION from a captured boltz run |
 | `dev/oracles/denoise_parity.py` | L3 | one denoise step, whole diffusion module — protenix2/1, both of3, intellifold2, rosettafold3 |
-| `dev/oracles/template_parity.py` | L1 | template embedder vs the vendor's own module — protenix2/1, rosettafold3, boltz2, all 1.000000; found 2 bugs |
+| `dev/oracles/template_parity.py` | L1 | template embedder vs the vendor's own module — protenix2/1, rf3, boltz2, both of3, all 1.000000; found 2 bugs |
 | `dev/oracles/real_trunk_parity.py` + `native_trunk_dump.sh` | L1 real-input | input embedder, trunk output and recycling, against native's own featurised run — protenix2/1 |
 | `dev/oracles/dgram_parity.py` | L4 | distogram head — protenix2/1, both of3, intellifold2, rosettafold3, boltz2, opendde |
 | `dev/oracles/confidence_parity.py`, `l4_all.sh` | L4 | confidence head — every port |
