@@ -7,6 +7,11 @@ the sampler and not the trunk.
 import sys, os, numpy as np, jax, jax.numpy as jnp, haiku as hk
 sys.path.insert(0, '/home/ubuntu/alphafold3'); sys.path.insert(0, '/home/ubuntu/alphafold3/src')
 sys.argv = sys.argv[:1]
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from esmfold2_dumps import state_dict as _sd_of, native as _native_of
+# MODEL picks the release: every ESMFold2 variant has its own weights AND
+# its own shim, and crossing them reads corr 0.026 against native.
+MODEL = os.environ.get('MODEL', 'esmfold2')
 from alphafold3.model import model as af3_model, model_registry, params as afp
 from alphafold3.model.components import utils
 from alphafold3.common import folding_input
@@ -39,9 +44,8 @@ NB = int(os.environ.get('NB', '0'))
 if NB:
     cfg.heads.diffusion.atom_transformer.num_blocks = NB
 
-S = '/tmp/claude-1000/-home-ubuntu-ColabDesign2/77aa66c7-a908-4cb6-bf0e-1ff700d68150/scratchpad/'
-sd = dict(np.load(S + 'esmfold2_sd.npz')); dims = CV.derive_dims(sd); dims['n_input_atom'] = 3
-dd = dict(np.load(S + 'esmfold2_6mrr68.npz'))
+sd = _sd_of(MODEL); dims = CV.derive_dims(sd); dims['n_input_atom'] = 3
+dd = _native_of(MODEL)
 f = {k[5:]: jnp.asarray(v[0]) for k, v in dd.items() if k.startswith('feat.')}
 pref = {k: jnp.asarray(v) for k, v in CV.map_esmfold2_to_af3(sd).items()}
 rmask = np.asarray(f['atom_attention_mask']).astype(bool)   # 576 slots, 573 real

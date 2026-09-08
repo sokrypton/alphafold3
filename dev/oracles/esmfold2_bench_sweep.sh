@@ -1,5 +1,8 @@
 #!/bin/bash
-cd /tmp/claude-1000/-home-ubuntu-ColabDesign2/77aa66c7-a908-4cb6-bf0e-1ff700d68150/scratchpad
+# WORKDIR must hold q_hidden.py and the hidden-state npz this sweeps over.
+# It used to cd into a session scratchpad, which is why this could not be
+# re-run: pass WORKDIR explicitly.
+cd "${WORKDIR:?set WORKDIR to the directory holding q_hidden.py}"
 set -e
 for spec in "fp32 32 0" "int8-g128 8 128" "int4-g128 4 128" "int3-g64 3 64" "int2-g64 2 64" "int2-g32 2 32"; do
   set -- $spec

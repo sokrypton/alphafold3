@@ -15,14 +15,18 @@ import jax
 sys.path.insert(0, '/home/ubuntu/alphafold3')
 sys.path.insert(0, '/home/ubuntu/alphafold3/src')
 sys.argv = sys.argv[:1]
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from esmfold2_dumps import state_dict as _sd_of, native as _native_of
+# MODEL picks the release: every ESMFold2 variant has its own weights AND
+# its own shim, and crossing them reads corr 0.026 against native.
+MODEL = os.environ.get('MODEL', 'esmfold2')
 assert jax.devices()[0].platform == 'gpu', 'this must run on the GPU'
 
 from alphafold3.model import esm as E
 from dev.oracles.fold_check import parse_ca
 
-S = '/tmp/claude-1000/-home-ubuntu-ColabDesign2/77aa66c7-a908-4cb6-bf0e-1ff700d68150/scratchpad/'
 seq, _ = parse_ca(os.path.expanduser('~/6MRR.pdb'))
-nat = np.load(S + 'esmfold2_6mrr68.npz')['lm_hidden'][0]      # (L, 81, D) torch, fp32
+nat = _native_of(MODEL)['lm_hidden'][0]      # (L, 81, D) torch, fp32
 
 t0 = time.time()
 ours = E.embed(seq)                                            # (L, 81, D)

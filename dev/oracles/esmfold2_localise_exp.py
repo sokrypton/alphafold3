@@ -33,8 +33,9 @@ from dev.oracles.fold_check import parse_ca
 
 MODEL = os.environ.get('MODEL', 'esmfold2_exp_fast')
 NATIVE = os.environ.get(
-    'NATIVE', '/tmp/claude-1000/-home-ubuntu-ColabDesign2/'
-    '77aa66c7-a908-4cb6-bf0e-1ff700d68150/scratchpad/exp_fast_native.npz')
+    'NATIVE', os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), 'dumps',
+        'exp_fast_native.npz'))
 
 nat = dict(np.load(NATIVE))
 lm_z = nat['lm_z'][0]

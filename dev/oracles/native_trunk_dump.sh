@@ -73,11 +73,12 @@ def _pc_hook(self, relp, z, *a, **kw):
     print('RAW z_trunk captured', z.shape, flush=True)
     return _pc(self, relp, z, *a, **kw)
 _DC.prepare_cache = _pc_hook
+import os
 def _hook(self, **kw):
     out = {k: v.detach().float().cpu().numpy()
            for k, v in kw.items() if hasattr(v, 'detach')}
     out.update(_saved)
-    np.savez('/tmp/claude-1000/-home-ubuntu-ColabDesign2/77aa66c7-a908-4cb6-bf0e-1ff700d68150/scratchpad/native_trunk_plain.npz', **out)
+    np.savez(os.environ.get('DUMP_OUT', 'native_trunk_plain.npz'), **out)
     print('TRUNK DUMPED', sorted(out), flush=True)
     raise SystemExit(0)
 _P.Protenix.sample_diffusion = _hook

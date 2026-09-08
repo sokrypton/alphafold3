@@ -28,7 +28,10 @@ d['lm_hidden'] = cap['lm_hidden']
 d['native_ca'] = NAT
 d['out.sample_atom_coords'] = o['sample_atom_coords'].float().cpu().numpy()
 d['out.plddt'] = o['plddt'].float().cpu().numpy()
-np.savez_compressed('esmfold2_6mrr68.npz', **d)
+import os as _os
+_D = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), 'dumps')
+_os.makedirs(_D, exist_ok=True)
+np.savez_compressed(_os.path.join(_D, 'esmfold2_6mrr68.npz'), **d)
 
 ch = feats['ref_atom_name_chars'][0].cpu().numpy().astype(int)
 a2t = feats['atom_to_token'][0].cpu().numpy().astype(int)
@@ -37,7 +40,7 @@ nm = lambda i: ''.join(chr(c+32) for c in ch[i]).strip()
 rep = np.full(int(a2t[msk].max())+1, -1)
 for i in range(len(a2t)):
     if msk[i] and nm(i) == 'CA': rep[a2t[i]] = i
-np.save('ca_idx68.npy', rep)
+np.save(_os.path.join(_D, 'ca_idx68.npy'), rep)
 def rmsd(a, b):
     n = min(len(a), len(b)); a, b = a[:n]-a[:n].mean(0), b[:n]-b[:n].mean(0)
     u, _, vt = np.linalg.svd(a.T@b); s = np.sign(np.linalg.det(u@vt))

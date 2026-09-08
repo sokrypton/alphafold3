@@ -318,6 +318,8 @@ def run_multi(args, case):
            ', '.join('%s=%s(%d)' % (cid, k, len(sq))
                      for cid, (_c, k, sq, _x) in zip(ids, ents))))
 
+  if args.dump_seqs:
+    return _dump_seqs(chains, None)
   out, batch = fold_check.fold(args.model, '', model_dir=args.model_dir,
                                seed=args.seed, chains=chains)
   pos = np.asarray(out['diffusion_samples']['atom_positions'])
@@ -398,12 +400,35 @@ def run_multi(args, case):
   return 0
 
 
+def _dump_seqs(chains, seq):
+  """Print the PROTEIN sequences of a case, one per line, in chain order."""
+  from alphafold3.common import folding_input
+  if chains is None:                      # protein_6mrr: one chain from `seq`
+    out = [seq]
+  else:
+    out = [c.sequence for c in chains
+           if isinstance(c, folding_input.ProteinChain)]
+  for x in out:
+    print('SEQ\t%s' % x)
+  if not out:
+    print('SEQ_NONE')                     # rna_1ehz, dna_1lmb: no protein
+  return 0
+
+
 def main(argv=None):
   ap = argparse.ArgumentParser()
   ap.add_argument('model')
   ap.add_argument('case', choices=sorted(CASES))
   ap.add_argument('--model_dir', default=None)
   ap.add_argument('--seed', type=int, default=0)
+  # --dump_seqs prints this case's PROTEIN sequences, in chain order, and folds
+  # nothing. It exists so the language-model inputs (chai-1's ESM2 embeddings,
+  # ESMFold2's ESM-C hidden states) are generated from the SAME chain
+  # construction a fold uses, rather than from a second copy of it that can
+  # drift. Order matters: `esm.embed` concatenates chains and the rows land on
+  # the batch's protein tokens in order.
+  ap.add_argument('--dump_seqs', action='store_true',
+                  help='print this case\'s protein sequences in chain order')
   ap.add_argument('--write', metavar='DIR', default=None,
                   help="also write the model's own mmCIF and validate it")
   args = ap.parse_args(argv)
@@ -472,6 +497,8 @@ def main(argv=None):
     else:
       raise SystemExit('unknown kind %r' % kind)
 
+  if args.dump_seqs:
+    return _dump_seqs(chains, seq)
   print('%s / %s: %d residues' % (args.model, args.case, len(ref_seq)))
   out, batch = fold_check.fold(args.model, seq, model_dir=args.model_dir,
                                seed=args.seed, chains=chains)

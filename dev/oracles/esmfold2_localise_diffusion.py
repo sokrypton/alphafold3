@@ -8,6 +8,11 @@ a ~1.7 A fold means the trunk is fine and the graph's diffusion is wrong.
 import sys, os, numpy as np, jax, jax.numpy as jnp, haiku as hk
 sys.path.insert(0, '/home/ubuntu/alphafold3'); sys.path.insert(0, '/home/ubuntu/alphafold3/src')
 sys.argv = sys.argv[:1]
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from esmfold2_dumps import state_dict as _sd_of, native as _native_of
+# MODEL picks the release: every ESMFold2 variant has its own weights AND
+# its own shim, and crossing them reads corr 0.026 against native.
+MODEL = os.environ.get('MODEL', 'esmfold2')
 from alphafold3.model import model as af3_model, model_registry, params as afp
 from alphafold3.model.components import utils
 from alphafold3.common import folding_input
@@ -58,9 +63,8 @@ _p = afp.get_model_haiku_params(model_dir=d)
 _p = {(k[len('diffuser/'):] if k.startswith('diffuser/') else k): v for k, v in _p.items()}
 g = fwd.apply(_p, jax.random.PRNGKey(0), b)
 
-S = '/tmp/claude-1000/-home-ubuntu-ColabDesign2/77aa66c7-a908-4cb6-bf0e-1ff700d68150/scratchpad/'
-sd = dict(np.load(S + 'esmfold2_sd.npz')); dims = CV.derive_dims(sd); dims['n_input_atom'] = 3
-dd = dict(np.load(S + 'esmfold2_6mrr68.npz'))
+sd = _sd_of(MODEL); dims = CV.derive_dims(sd); dims['n_input_atom'] = 3
+dd = _native_of(MODEL)
 f = {k[5:]: jnp.asarray(v[0]) for k, v in dd.items() if k.startswith('feat.')}
 pref = {k: jnp.asarray(v) for k, v in CV.map_esmfold2_to_af3(sd).items()}
 

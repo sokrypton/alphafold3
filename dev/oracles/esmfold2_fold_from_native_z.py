@@ -32,9 +32,11 @@ from alphafold3.model.network import diffusion_head
 from dev.oracles.fold_check import parse_ca, kabsch_rmsd
 
 MODEL = os.environ.get('MODEL', 'esmfold2_exp_fast')
-S = ('/tmp/claude-1000/-home-ubuntu-ColabDesign2/'
-     '77aa66c7-a908-4cb6-bf0e-1ff700d68150/scratchpad/')
-NATIVE = os.environ.get('NATIVE', S + 'exp_fast_native.npz')
+# NATIVE names the per-pass trunk dump `esmfold2_oracle_exp_trunk.py` writes.
+# Defaulted into dev/oracles/dumps/ rather than a scratchpad literal: this used
+# to point at a path that stopped existing when its session ended.
+_D = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dumps')
+NATIVE = os.environ.get('NATIVE', os.path.join(_D, 'exp_fast_native.npz'))
 
 nat = dict(np.load(NATIVE))
 z_native = nat['trunk_out'][0].astype(np.float32)

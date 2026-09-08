@@ -90,7 +90,12 @@ gate () {
     local overlay; overlay=$(vendor "$model")
     local pp=src:.
     [ -n "$overlay" ] && pp=$pp:$overlay
-    ( JAX_DEFAULT_MATMUL_PRECISION=highest PYTHONPATH=$pp \
+    # LM_CASE is set by the L5/L6 loops; the module gates feed their own inputs
+    # and want none of this.
+    local lm=; [ -n "${LM_CASE:-}" ] && lm=$(lm_env "$model" "$LM_CASE")
+    ( echo "__LM ${lm:-none}"
+      JAX_DEFAULT_MATMUL_PRECISION=highest PYTHONPATH=$pp \
+        env ${lm#__LM_MISSING=*} \
         timeout "${GATE_TIMEOUT:-3600}" $PY "$@" 2>&1
       echo "__GATE_EXIT $?" ) > "$log"
   fi
@@ -98,6 +103,35 @@ gate () {
   local head; head=$(grep -E "$pat" "$log" | tail -1)
   printf '  %-24s %-30s %-8s %s\n' "$tag" "$model" "$status" "${head:0:88}"
   printf '%s\t%s\t%s\t%s\n' "$tag" "$model" "$status" "$head" >> "$SUMMARY"
+}
+
+# --- language-model inputs, per (model family, case) ---------------------
+# chai-1 folds a DIFFERENT MODEL without its ESM2 embeddings (5.70 A where chai
+# reaches 0.642), and ESMFold2 has no MSA at all -- it folds from ESM-C hidden
+# states, and each release is trained against its own tower AND its own shim
+# (crossing them reads corr 0.026). A fold-level sweep that omits these is not
+# measuring these two families; it is measuring nine other models.
+#
+# dev/oracles/lm_inputs.py writes lm_inputs/<tower>.<case>.npz. This wires them
+# in, and the log records which file was used -- or that none was found, because
+# a no-LM number must not be mistakable for a real one.
+LM_DIR=$ROOT/dev/oracles/lm_inputs
+
+lm_env () {  # lm_env <model> <case> -> prints VAR=path, or a note, or nothing
+  local model=$1 case=$2 tower= var=
+  case "$model" in
+    chai1)                      tower=esm2;      var=ESM_EMB ;;
+    esmfold2_lm600m)            tower=esmc_600m; var=ESMC_HIDDEN ;;
+    esmfold2_lm300m)            tower=esmc_300m; var=ESMC_HIDDEN ;;
+    esmfold2*)                  tower=esmc;      var=ESMC_HIDDEN ;;
+    *)                          return 0 ;;
+  esac
+  local f=$LM_DIR/$tower.$case.npz
+  if [ -f "$f" ]; then
+    echo "$var=$f"
+  else
+    echo "__LM_MISSING=$tower.$case.npz"
+  fi
 }
 
 want () {  # is this level selected?
@@ -198,13 +232,20 @@ fi
 # --- L5 / L6: folds. Much slower, and opt-in for that reason -------------
 if want L5; then
   echo "== L5 fold (6MRR)"
-  for m in $MODELS; do gate L5.fold "$m" 'CA-RMSD' dev/oracles/fold_check.py "$m"; done
+  for m in $MODELS; do
+    LM_CASE=protein_6mrr gate L5.fold "$m" 'CA-RMSD' \
+      dev/oracles/fold_check.py "$m"
+  done
 fi
 if want L6; then
   echo "== L6 modality screens"
   for m in $MODELS; do
     for case in rna_1ehz dna_1lmb complex_1lmb ligand_1stp ptm_5k9p plain_5k9p protein_6mrr; do
-      gate "L6.$case" "$m" 'RMSD|best' dev/oracles/modality_check.py "$m" "$case"
+      # ptm_5k9p reuses plain_5k9p's LM input: SEP is a modification of a
+      # residue already in that sequence, so the two share it exactly.
+      lmcase=$case; [ "$case" = ptm_5k9p ] && lmcase=plain_5k9p
+      LM_CASE=$lmcase gate "L6.$case" "$m" 'RMSD|best' \
+        dev/oracles/modality_check.py "$m" "$case"
     done
   done
 fi

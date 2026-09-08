@@ -9,8 +9,7 @@ import sys, numpy as np
 sys.path.insert(0, '/home/ubuntu/alphafold3'); sys.path.insert(0, '/home/ubuntu/alphafold3/src')
 from converters import esmfold2 as CV
 
-S = '/tmp/claude-1000/-home-ubuntu-ColabDesign2/77aa66c7-a908-4cb6-bf0e-1ff700d68150/scratchpad/'
-sd = dict(np.load(S + 'esmfold2_sd.npz'))
+sd = _sd_of(MODEL)
 flat = CV.map_esmfold2_to_af3_graph(sd)
 have = [np.asarray(v).ravel() for v in flat.values()]
 
