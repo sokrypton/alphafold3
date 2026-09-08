@@ -245,6 +245,17 @@ def create_target_feat_embedding(
                             name='boltz2_mol_type_conditioning')(
           jax.nn.one_hot(mol_type, 4).astype(dtype))
       n_tok = s_inputs.shape[0]
+      # boltz's cyclic flag: `cyclic_period.clamp(max=1.0)` -- present/absent,
+      # NOT the period. Zero when nothing is cyclic, so this term vanishes on
+      # every ordinary input and the trained weight only ever acts on a cyclic
+      # one. Our cyclic support had gone into the relative-position wrap alone
+      # (featurization._relative_encoding), which is AF3's mechanism; boltz2
+      # carries BOTH, and this was the half we did not port.
+      cyc = batch.token_features.cyclic_period
+      cyc = (jnp.zeros((n_tok,), dtype) if cyc is None
+             else jnp.clip(cyc.astype(dtype), 0.0, 1.0))
+      s_inputs += hm.Linear(config.seq_channel, use_bias=False,
+                            name='boltz2_cyclic_conditioning')(cyc[..., None])
       method = jnp.full((n_tok,), 1, dtype=jnp.int32)   # x-ray diffraction
       s_inputs += hm.Linear(config.seq_channel, use_bias=False,
                             name='boltz2_method_conditioning')(

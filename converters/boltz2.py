@@ -188,6 +188,33 @@ def map_diffusion_conditioners(sd, params):
   return params
 
 
+# What boltz2 ships that this converter deliberately does not map. Each was
+# checked rather than assumed, after `dev/audit_coverage.py boltz2` reported 35
+# unaccounted tensors -- one of which (cyclic_conditioning_init) was a real
+# omission and is now mapped above.
+DEAD_TENSORS = (
+    # 31 of the 35. `*_proj_z.{i}` is Sequential(LayerNorm, Linear) feeding the
+    # per-block pair BIAS, so the LayerNorm's offset contributes one constant per
+    # head to every logit of that head, and softmax is invariant to a constant
+    # per row. Verified in float64 on token_trans_proj_z.0 (offset absmax
+    # 0.0172): logit shift std across (i, j) 1.3e-15, softmax max|d| 1.1e-15.
+    # Same position and proof as rosettafold3's attention_pair_bias.ln_0.bias.
+    (r'proj_z\.\d+\.0\.bias$',
+     'a per-head constant on every logit of that head; cancels in the softmax '
+     'over j (float64 max|d| 1.1e-15)'),
+    (r'^input_embedder\.atom_enc_proj_z\.0\.bias$',
+     'the same LayerNorm offset, on the input embedder\'s atom encoder'),
+    # boltz2 predicts per-token B-factors from the trunk single. It is a
+    # separate head, not part of the structure or confidence path this port
+    # runs, and nothing downstream of it is consumed.
+    (r'^bfactor_module\.',
+     'the B-factor head, which this port does not run'),
+    (r'^confidence_module\.boundaries$',
+     'PAE/PDE bin edges (a buffer, not a weight); our confidence head derives '
+     'the same edges from the configured bin count'),
+)
+
+
 def convert_boltz2_weights(checkpoint, output_dir):
   """Convert a Boltz-2 .ckpt to an AF3-haiku dir (boltz2.bin.zst). Writes the full structure
   path (map_boltz2_to_af3); the affinity head is not ported and stays at the
@@ -225,6 +252,17 @@ def map_input_embedder(sd, params):
     C._arr(sd['input_embedder.method_conditioning_init.weight']))      # (12,384)
   S('diffuser/boltz2_modified_conditioning', 'weights',
     C._arr(sd['input_embedder.modified_conditioning_init.weight']))    # (2,384)
+  # The fourth sibling, and the one that was missing. boltz adds
+  #     cyclic = feats['cyclic_period'].clamp(max=1.0).unsqueeze(-1)
+  #     s = s + self.cyclic_conditioning_init(cyclic)
+  # (trunkv2.py:202) -- a Linear(1 -> 384) over a 0/1 FLAG, not over the period.
+  # It is trained (absmax 0.446), and our cyclic support went only into the
+  # relative-position wrap that AF3's own mechanism provides, so a cyclic input
+  # reached boltz2's relpos and never its single track. Found by L0.
+  # Transposed, unlike the three above: this is a real nn.Linear, not an
+  # nn.Embedding, so its weight is (out, in) = (384, 1).
+  S('diffuser/boltz2_cyclic_conditioning', 'weights',
+    C.t(sd['input_embedder.cyclic_conditioning_init.weight']))         # (1,384)
   # trunk single/pair init from s_inputs (Boltz s_init / z_init_1 / z_init_2)
   S(f'{EVO}/single_activations', 'weights', C.t(sd['s_init.weight']))                  # (384,384)
   S(f'{EVO}/left_single', 'weights', C.t(sd['z_init_1.weight']))                       # (384,128)

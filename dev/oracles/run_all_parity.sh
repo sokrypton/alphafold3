@@ -76,7 +76,7 @@ classify () {  # classify <log> -> status on stdout
   local rc; rc=$(sed -n 's/^__GATE_EXIT //p' "$log" | tail -1)
   if [ "$rc" = 0 ]; then echo OK; return; fi
   if [ "$rc" = 124 ]; then echo TIMEOUT; return; fi
-  if grep -qi 'no native adapter\|has no msa_encoder\|has no final-block\|run first:\|No module named\|KeyError' "$log"; then
+  if grep -qi 'no native adapter\|no converter registered\|nothing to audit\|has no msa_encoder\|has no final-block\|no weights for\|run first:\|No module named\|KeyError' "$log"; then
     echo SKIP; return
   fi
   if grep -qi 'unaccounted for\|unmapped' "$log"; then echo WARN; return; fi

@@ -459,6 +459,28 @@ def convert_structural_token_expander(ck, scope='structural_token_expander',
   }
 
 
+# Two of these are genuinely dead; the other two are a BLIND SPOT in the audit
+# rather than a fact about the conversion, and saying so is the point of listing
+# them with reasons.
+DEAD_TENSORS = (
+    (r'confidence_head\.(lower|upper)_bins$',
+     'PAE/PDE bin edges (a registered buffer, not a weight); our head derives '
+     'the same edges from the configured bin count'),
+    # `linear_no_bias_f` (128, 385) IS consumed -- `atom_encoder` splits it by
+    # column into embed_ref_mask (1), embed_ref_element (128) and
+    # embed_ref_atom_name (256), and folds the element index shift into the
+    # middle slice. dev/audit_coverage.py cannot see that: this converter builds
+    # a stripped sub-dict (so `.items()` bypasses the name watcher) and the
+    # value fallback compares whole leaves of the same SIZE, which a
+    # fused-then-split tensor never matches -- doubly so where one slice is
+    # transformed. Both encoders, hence two entries' worth in one pattern.
+    (r'atom_attention_encoder\.linear_no_bias_f\.weight$',
+     'consumed as a fused tensor split across three leaves (ref_mask / '
+     'ref_element / ref_atom_name), which the audit\'s whole-leaf value match '
+     'cannot detect'),
+)
+
+
 def convert_opendde_confidence(ck, scope='confidence_head', n_blocks=4):
   """OpenDDE confidence head -> our haiku params (flat {scope: {name: arr}}).
 

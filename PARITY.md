@@ -1135,6 +1135,58 @@ embedded MSA from native's own `msa_subsampler` and feeding it to both sides
 gives 0.999971. **If a gate's two sides do not provably see the same input, its
 number is not a measurement.**
 
+## L0 across all 18: two more real omissions, and the audit's own blind spots
+
+Running L0 for every model (rather than the ones someone thought to check)
+turned up 4 unaccounted tensors for opendde and 35 for boltz2. Most were dead,
+but **one of boltz2's was a feature we had half-ported**:
+
+**boltz2's cyclic conditioning.** boltz adds a fourth term to its single track
+beside method / modified / mol_type (`trunkv2.py:202`):
+
+    cyclic = feats['cyclic_period'].clamp(max=1.0).unsqueeze(-1)
+    s = s + self.cyclic_conditioning_init(cyclic)
+
+a trained `Linear(1 -> 384)` (absmax 0.446) over a 0/1 FLAG, not over the
+period. Our cyclic support had gone into the relative-position WRAP alone --
+which is AF3's own mechanism and shared by every model -- so a cyclic input
+reached boltz2's relpos and never its single track. boltz2 carries both, and we
+had one.
+
+Verified both directions. With nothing cyclic the term is exactly zero and the
+folds are bit-identical (6MRR best 0.424 / mean 0.537; `ligand_1stp` 0.277
+protein / 0.458 BTN -- the same digits as before the change). With a cyclic
+chain, `s_inputs` moves by **max|d| 0.44617**, which is the weight's own absmax
+to five decimals -- exactly what a unit flag times W must give -- and its rms
+goes 0.300 -> 0.342.
+
+**The dead ones, each checked rather than waved through.** 31 of boltz2's 35 are
+`*_proj_z.{i}.0.bias`: `Sequential(LayerNorm, Linear)` feeding a per-block pair
+BIAS, so the offset is one constant per head on every logit and softmax is
+invariant to it -- float64 softmax max|d| 1.1e-15. Plus the B-factor head (which
+this port does not run) and PAE/PDE bin edges. opendde's are bin edges too.
+
+**And two of opendde's four are a blind spot in the AUDIT, not a fact about the
+conversion** -- worth writing down because the audit is now a gate:
+
+`linear_no_bias_f` (128, 385) IS consumed: `atom_encoder` splits it by column
+into `embed_ref_mask` (1), `embed_ref_element` (128) and `embed_ref_atom_name`
+(256), folding the element index shift into the middle slice.
+`dev/audit_coverage.py` cannot see that, for two independent reasons:
+
+  * **a scanned dict.** The watcher records `sd[key]` and `key in sd`; this
+    converter builds a stripped sub-dict, so `.items()` bypasses name tracking
+    entirely. Only 4 of opendde's 4482 tensors report unaccounted because the
+    VALUE fallback catches the rest.
+  * **a fused tensor split across leaves.** The value fallback compares whole
+    leaves of the same SIZE, which a 385-column tensor split into 1/128/256
+    never matches -- doubly so where one slice is transformed.
+
+Both are declared in `DEAD_TENSORS` with that reason, so the gate reads clean
+and the limitation is recorded where the next reader will meet it. **All 18
+models now either audit clean or say why they cannot** -- `alphafold3` is the
+reference implementation and has no conversion to audit.
+
 ## The driver paid for itself on its first full run: protenix1 (2026-09-08)
 
 `run_all_parity.sh` asks every gate about every model. That is how protenix1's
