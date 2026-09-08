@@ -98,7 +98,7 @@ the removal itself implies.
 | `opendde` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `rosettafold3` | ✓ | ✓ | ~ | ✓ | ✓ | ✓ | ✓ |
 | `chai1` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `esmfold2` family | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a — protein only |
+| `esmfold2` family | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ~ — ligands 0.645 Å, DNA 2.9 Å, RNA 25 Å |
 | `af2_ptm` / `af2_multimer` | n/a | n/a | n/a | n/a | n/a | ✓ | n/a — protein only |
 
 **What `~` at L2 means, model by model.** L2 has three parts, and the column is
@@ -1134,6 +1134,47 @@ projection later", which was hand-waving over an invalid comparison. Taking the
 embedded MSA from native's own `msa_subsampler` and feeding it to both sides
 gives 0.999971. **If a gate's two sides do not provably see the same input, its
 number is not a measurement.**
+
+## ESMFold2 is NOT protein-only, and this document said it was (2026-09-08)
+
+Both tables here read `n/a -- protein only` for the esmfold2 family at L6. That
+is wrong, and it was never measured -- it was inferred from `prepare_protein_features`,
+the HF helper that takes a sequence, and from ESMFold2 having no MSA.
+
+The model itself is not protein-only. Its `s_inputs` is 451 wide with a 33-class
+restype block (nucleotides included), and `modeling_esmfold2` carries a
+`_NONPOLYMER_ID = 4` branch on `mol_type`. What is absent from the shipped
+`transformers` release is `ESMFold2InputBuilder`, the vendor's own featuriser for
+"multi-chain / ligand / MSA inputs" -- its own docstring points at it. Our
+featuriser supplies those atom features anyway, so the model can be fed them.
+
+Measured, on the same cases every other port runs:
+
+| esmfold2 | result |
+|---|---|
+| `ligand_1stp` BTN | **0.645 Å** |
+| `dna_1lmb` duplex (both strands, one frame) | **2.908 Å** best / 3.221 mean |
+| `plain_5k9p` protein | 1.233 best / 1.516 mean |
+| `protein_6mrr` | 1.482 best |
+| `rna_1ehz` (tRNA) | **25.008 Å** |
+
+**Ligands are good** -- 0.645 Å on BTN beats several AF3-family ports -- and a
+DNA duplex folds. **tRNA does not**, and the DNA result is what makes that
+interpretable: the nucleic path works, so 25 Å is not a dead feature. A B-form
+duplex is nearly a fixed local geometry; tRNA is a tertiary fold, and ESMFold2
+has no MSA and a protein-trained language model, so it has no evolutionary
+signal for RNA tertiary structure at all. Recorded as a competence limit rather
+than a port bug -- and explicitly NOT settled, because settling it needs native
+ESMFold2 on the same input and the vendor's non-protein featuriser is not in
+this release.
+
+**And it could not be given its language model on ANY modified residue.**
+`_attach_lm_pair` keyed the pair rep on the count of protein TOKENS, but a
+language model reads a sequence, so its rows are RESIDUES -- and AF3 atomises a
+modified residue into one token per atom, all protein. `ptm_5k9p` raised
+`lm_pair is (76, 76) but the batch has 85 tokens (85 of them protein)`. Now
+mapped by residue, the same parent-residue convention AF3 uses for an atomised
+residue's restype.
 
 ## The matrix, as the driver reports it (2026-09-08)
 

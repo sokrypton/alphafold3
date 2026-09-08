@@ -164,7 +164,7 @@ against.
 | `opendde` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `rosettafold3` | ✓ | ✓ | ~ | ✓ | ✓ | ✓ | ✓ |
 | `chai1` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `esmfold2` family (8) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a — protein only |
+| `esmfold2` family (8) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ~ — ligands 0.645 Å, DNA 2.9 Å, RNA 25 Å |
 | `af2_ptm` / `af2_multimer` | n/a | n/a | n/a | n/a | n/a | ✓ | n/a — protein only |
 
 `alphafold3` and the AF2 pair are `n/a` by construction: the first IS the
