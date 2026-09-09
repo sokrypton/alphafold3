@@ -55,6 +55,8 @@ vendor () {
   esac
 }
 
+# Per DATE by default, which means a run spanning midnight writes into two
+# directories -- set LOGDIR explicitly to keep one run together.
 LOGDIR=${LOGDIR:-$ROOT/dev/oracles/parity_runs/$(date +%Y-%m-%d)}
 mkdir -p "$LOGDIR"
 SUMMARY=$LOGDIR/summary.tsv
@@ -79,7 +81,18 @@ classify () {  # classify <log> -> status on stdout
   if grep -qi 'no native adapter\|no converter registered\|nothing to audit\|has no msa_encoder\|has no final-block\|no weights for\|no native dump at\|run first:\|No module named\|KeyError' "$log"; then
     echo SKIP; return
   fi
-  if grep -qi 'unaccounted for\|unmapped' "$log"; then echo WARN; return; fi
+  # A RESOURCE failure is not a result. Two gates sharing a 23 GB card is the
+  # usual cause and it says nothing about the port, so it gets its own status
+  # rather than being counted as a failure.
+  if grep -qi 'RESOURCE_EXHAUSTED\|CUDA_ERROR_OUT_OF_MEMORY\|Out of memory' "$log"; then
+    echo OOM; return
+  fi
+  # NONZERO counts only. `[1-9][0-9]*` matters: every trunk gate prints
+  # "0 unmapped" on success, and matching a bare 'unmapped' made opendde's L1
+  # read WARN off a success line.
+  if grep -qEi '[1-9][0-9]* (unaccounted for|unmapped)' "$log"; then
+    echo WARN; return
+  fi
   echo FAIL
 }
 
