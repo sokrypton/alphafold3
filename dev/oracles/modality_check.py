@@ -487,8 +487,21 @@ def main(argv=None):
         if not any(isinstance(c, folding_input.Ligand) for c in chains):
           chains.append(folding_input.Ligand(id='B',
                                              ccd_ids=[case['ligand']]))
-        print('  input from %s: %d chains %s'
-              % (os.path.basename(case['json']), len(chains), sorted(have)))
+        if os.environ.get('NO_MSA'):
+          # NO_MSA applies to EVERY case, not just the PTM one. This case reads
+          # its MSA from the JSON, so the knob silently did nothing here -- and
+          # a test that removes nothing looks like a hypothesis disproved.
+          # ProteinChain is not a dataclass here, so rebuild rather than
+          # dataclasses.replace.
+          chains = [folding_input.ProteinChain(
+              id=c.id, sequence=c.sequence, ptms=list(getattr(c, 'ptms', [])),
+              unpaired_msa='', paired_msa='',
+              templates=list(getattr(c, 'templates', []) or []))
+              if isinstance(c, folding_input.ProteinChain) else c
+              for c in chains]
+        print('  input from %s: %d chains %s (msa: %s)'
+              % (os.path.basename(case['json']), len(chains), sorted(have),
+                 'none' if os.environ.get('NO_MSA') else 'from json'))
       else:
         chains = [folding_input.ProteinChain(id='A', sequence=seq, ptms=[],
                                              unpaired_msa='', paired_msa='',
