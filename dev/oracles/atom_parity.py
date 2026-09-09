@@ -573,7 +573,10 @@ def native_rf3(model, fb, feats, pos_noisy, s, z, n_tok):
     # missing) but unsqueezes the pair tensor unconditionally, `Z_II[None]`, so
     # a batched z arrives 5-D and the windowed gather indexes the batch axis
     # ("index 249 is out of bounds for dimension 0 with size 1").
-    a, q_l, c_l, _ = net(f, t(pos_noisy)[None], t(s), t(z))
+    a, q_l, c_l, p_lm = net(f, t(pos_noisy)[None], t(s), t(z))
+  # rf3's pair tensor is not comparable to ours (dense L*L against our windows)
+  # but the DECODER consumes it, so it is parked rather than dropped.
+  _RAW['rf3'] = dict(p=p_lm, f=f, q=q_l, c=c_l)
   # rf3 keeps the atom pair tensor dense over all L*L, ours is windowed --
   # not comparable, so it is not compared.
   sq = lambda x: np.asarray(x).reshape(np.asarray(x).shape[-2:])
@@ -1455,7 +1458,76 @@ def _native_decoder_if2(model, feats, a, q_ref, c_ref, p_ref, n_atom, c_token):
             inplace_safe=False)
   return _np.asarray(r).reshape(-1, 3)[:n_atom]
 
+def _native_decoder_rf3(model, feats, a, q_ref, c_ref, p_ref, n_atom, c_token):
+  """-> r_ref from RoseTTAFold3's own AtomAttentionDecoder.
+
+  rf3 is the single worst-covered model in the panel, and this is the last of
+  its missing module adapters.
+
+  It cannot be a `_DECODER_SRC` row: the class lives in `RF3_structure`, not a
+  transformer module; the leaves are `linear_1` / `to_r_update`; and the
+  forward takes rf3's feature dict `f` positionally. The atom transformer is
+  configured from rf3_net.yaml (`n_queries` 32 / `n_keys` 128, 3 blocks, 4
+  heads, `kq_norm` true and the residual-connection switch that is NOT
+  derivable from the weights) with the widths read off the checkpoint.
+
+  The atom path does not go through `force_bfloat16`: `AttentionPairBiasDiffusion.
+  forward` returns `self.atom_attention(...)` as soon as `Beta_II is not None`,
+  which is BEFORE the bfloat16 cast. So unlike the token transformer, nothing
+  has to be switched off here -- worth stating, because the same class is the
+  one the diffusion gate had to disarm.
+  """
+  import numpy as _np
+  import torch
+
+  from rf3.model.RF3_structure import AtomAttentionDecoder
+
+  if _RAW.get('rf3') is None:
+    raise SystemExit('the rf3 decoder needs the encoder\'s pair tensor and '
+                     'feature dict; native_rf3 did not park them in _RAW')
+  R = _RAW['rf3']
+  ckpt = os.path.expanduser(
+      '~/rf3_weights/rf3_foundry_01_24_latest_remapped.ckpt')
+  sd = torch.load(ckpt, map_location='cpu', weights_only=False)
+  sd = sd.get('state_dict', sd.get('model', sd))
+  pre = 'shadow.diffusion_module.atom_attention_decoder.'
+  sub = {k[len(pre):]: v for k, v in sd.items() if k.startswith(pre)}
+  if not sub:
+    raise SystemExit('no %r keys in %s' % (pre, ckpt))
+  c_atom, c_tok_ck = sub['linear_1.weight'].shape
+  bpre = 'atom_transformer.diffusion_transformer.blocks.'
+  n_blocks = 1 + max(int(k[len(bpre):].split('.')[0]) for k in sub
+                     if k.startswith(bpre))
+  heads = sub[bpre + '0.attention_pair_bias.to_b.weight'].shape[0]
+  c_atompair = sub[bpre + '0.attention_pair_bias.to_b.weight'].shape[1]
+  kq_norm = bpre + '0.attention_pair_bias.key_layer_norm.weight' in sub
+  print('  decoder checkpoint: c_atom %d, c_atompair %d, c_token %d, %d '
+        'blocks, %d heads, kq_norm %s'
+        % (c_atom, c_atompair, c_tok_ck, n_blocks, heads, kq_norm))
+  assert c_tok_ck == c_token, (c_tok_ck, c_token)
+  net = AtomAttentionDecoder(
+      c_token=c_token, c_atom=c_atom, c_atompair=c_atompair,
+      atom_transformer=dict(
+          n_queries=32, n_keys=128,
+          diffusion_transformer=dict(
+              n_block=n_blocks,
+              diffusion_transformer_block=dict(
+                  n_head=heads, kq_norm=kq_norm,
+                  no_residual_connection_between_attention_and_transition=True
+              ))))
+  missing, unexpected = net.load_state_dict(sub, strict=False)
+  print('  native: %d tensors, %d missing, %d unexpected'
+        % (len(sub), len(missing), len(unexpected)))
+  assert not missing, 'native decoder is missing %d tensors' % len(missing)
+  net.eval()
+  t = lambda x: torch.tensor(_np.asarray(x, _np.float32))
+  with torch.no_grad():
+    r = net(R['f'], t(a), R['q'], R['c'], R['p'])
+  return _np.asarray(r).reshape(-1, 3)[:n_atom]
+
+
 _DECODER_FN = {'boltz2': _native_decoder_boltz2,
+               'rosettafold3': _native_decoder_rf3,
                'openfold3': _native_decoder_of3,
                'openbind0': _native_decoder_of3,
                'intellifold2': _native_decoder_if2}
