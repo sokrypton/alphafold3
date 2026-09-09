@@ -112,6 +112,13 @@ def _fold_setup(model_name, seq, model_dir=None, templates=None, seed=0,
   # esmfold2_native_variants.py runs native at num_sampling_steps=200 whatever
   # the release's config says, so a fold at the config's own count is not the
   # same experiment.
+  # NUM_MSA caps the MSA depth the trunk consumes (evoformer truncates to
+  # config.num_msa, default 1024). A knob because depth is a real variable for
+  # the models that HAVE an MSA encoder: esmfold2_exp folds 1STP at 14.4 A on a
+  # 2145-row MSA and 0.476 A on none, so the response to depth is the
+  # measurement that localises it.
+  if os.environ.get('NUM_MSA'):
+    cfg.evoformer.num_msa = int(os.environ['NUM_MSA'])
   if os.environ.get('STEPS'):
     cfg.heads.diffusion.eval.steps = int(os.environ['STEPS'])
 

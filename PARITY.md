@@ -1929,6 +1929,52 @@ Both adapters truncate the NATIVE stack when `--blocks` is given, which is the
 rule this file keeps re-learning: dropping it once made a 1-block comparison run
 against native's full 48 and read corr -0.019.
 
+## OPEN: the experimental line's MSA path is INVERTED against native (2026-09-09)
+
+The L6 sweep put `esmfold2_exp` and `esmfold2_exp_cutoff2025` at 13.7-14.4 A on
+1STP while every other release in the family sits at 0.45-1.53. Those two are
+exactly the releases that are EXPERIMENTAL and carry `msa=4`. Chasing it gave a
+clean, inverted comparison:
+
+| `esmfold2_exp` on 1STP | no MSA | with MSA |
+|---|---|---|
+| **native** | 18.728 A | **3.184 A** (improves) |
+| **ours** | **0.476 A** | 14.364 A (degrades) |
+
+**Native uses the MSA to fix a bad fold; we use it to break a good one.** That
+is a port bug, and it is the first one in this file whose direction is the
+evidence.
+
+What is already excluded, each measured:
+
+  * **the combination rule.** Native's experimental code adds
+    (`z = z + msa_encoder(x_pair=z, ...)`, no flag consulted) and so do we; the
+    RELEASED line's config sets `msa_encoder_overwrite = True` and both
+    implementations overwrite there. Forcing overwrite on our experimental path
+    gives 14.222 A -- unchanged. Not the rule.
+  * **the depth.** `NUM_MSA=8/64/256/1024` all read 13.5-17.0 A, so it is not a
+    cap, not the row SUBSAMPLING native does per iteration (max_depth 1024,
+    which never binds at 2145 rows), and not the 10% column mask.
+  * **the MSA features being meaningless.** The RELEASED line consumes the SAME
+    features productively: 1STP 1.699 A without the MSA, 0.774 A with it.
+  * **the target.** Both models fold 6MRR well (`esmfold2_exp` 0.761 A), so it
+    takes an MSA to appear.
+
+**And the gate that should have caught it cannot.** `msa_parity.py` takes the
+EMBEDDED msa from native's own embedder, so both sides enter the stack on an
+identical activation -- which is what makes it a clean module gate and also what
+makes it blind to our RAW msa features and their depth handling. Its 1.000000
+for esmfold2 is true and does not cover this.
+
+The next step is that gate with REAL features: drive
+`esmfold2_reference.msa_encoder` from OUR msa features (inverting
+`converters/esmfold2.remap_msa_feat` to get back to ESM's 33-class layout) and
+compare against our msa_stack on the same z.
+
+**Not fixed, and deliberately not guessed at.** Our no-MSA fold being 39x better
+than native's on this target is a second oddity in the same place, and changing
+the MSA path while that is unexplained risks trading one for the other.
+
 ## chai1's first in-repo module gate: L4 by injection (2026-09-09)
 
 chai1 had L0, L5 and L6 and nothing in between -- every module cell a SKIP,
