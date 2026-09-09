@@ -454,8 +454,37 @@ def native_if2(model, fb, feats, pos_noisy, s, z, n_tok):
   # None rather than compared misleadingly.
   keep = np.ones(q_l.shape[-2], bool) if packed else mask.reshape(-1)
   _RAW['if2_p'] = np.asarray(p_lm)
+  # IN PACKED MODE THE PAIR IS COMPARABLE, and it used to be returned as None
+  # unconditionally with the note "if2 windows the DENSE atom axis, so its
+  # windows hold different atoms than ours". That is true of the DENSE layout
+  # and false of the packed one, which is the default and what this checkpoint
+  # runs -- so the one tensor that localised boltz2's offset sign was being
+  # thrown away for if2. Returned with a pad mask so `p_pair_valid` compares
+  # only slots both models attend over.
+  p_ret = pm = None
+  if packed and p_lm is not None:
+    p_ret = np.asarray(p_lm).reshape(*np.asarray(p_lm).shape[-4:])
+    nw, wq, wk = p_ret.shape[:3]
+    n_real = int(mask.sum())
+    # if2 pads the packed axis up to a whole window and its windows are
+    # DUPLICATED at both ends (first two share window 1's keys, last two share
+    # window n-2's), so the slot -> atom map is read off its own indexing
+    # rather than assumed: `concat_previous_and_later_windows` on an index
+    # vector is the cheapest way to get it exactly right.
+    import torch as _t
+    import einops as _e
+    from intellifold.openfold.utils.atom_token_conversion import (
+        concat_previous_and_later_windows)
+    n_pad = nw * wq
+    col = _e.rearrange(_t.arange(n_pad).float()[None], 'b (n w) -> b n w',
+                       w=wk // 8)
+    col = concat_previous_and_later_windows(col, dim_seq=-2, dim_window=-1)
+    kidx = col[0].long().numpy()
+    mq = (np.arange(n_pad).reshape(nw, wq) < n_real)[:, :, None]
+    mk = (kidx < n_real)[:, None, :]
+    pm = (mq & mk).astype(np.float32)
   return (np.asarray(a)[0], q_l.reshape(-1, q_l.shape[-1])[keep],
-          c_l.reshape(-1, c_l.shape[-1])[keep], None, None)
+          c_l.reshape(-1, c_l.shape[-1])[keep], p_ret, pm)
 
 
 def native_rf3(model, fb, feats, pos_noisy, s, z, n_tok):

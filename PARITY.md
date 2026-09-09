@@ -1,33 +1,63 @@
-# STATE OF PLAY -- 2026-09-09 (overnight session)
+# STATE OF PLAY -- 2026-09-09
 
-## IN FLIGHT at the time of writing -- where to look
+## IN FLIGHT: the authoritative module matrix
 
-One job is still running, and its log is in a SESSION SCRATCHPAD, which is
-exactly the trap [[harness-rot]] describes. Path, marker and what it answers:
+`dev/oracles/parity_runs/2026-09-09-authoritative/`, marker `AUTHDONE` in the
+session scratchpad's `auth.log`. It is the FIRST run that can answer "are we at
+parity", because the previous one was stale twice over: it was stopped at 95 of
+~236 cells to do the debugging below, and six port fixes plus two GATE fixes
+have landed since -- one of which (`trunk_parity`'s `_cmp`) changes how every
+L1 row is graded. Read it with BOTH tools: `gate_applies.py` for holes and
+`parity_audit.py` for whether the OK cells agree.
 
-  * the `lm600m` A/B is **RESOLVED** -- see "The lm600m A/B" below. It cost
-    +0.017 A on the 15-sample mean and flips sign by seed; the change stays.
-  * `.../scratchpad/final.log` -- marker `FINALDONE`. Queued behind it: the
-    authoritative pass over the purged 14-model project, `FORCE=1`, into
-    `dev/oracles/parity_runs/2026-09-09-final/`, then
-    `dev/oracles/diagnose_bad_cells.sh`.
+## The eleven drafted adapters are all APPLIED and measured
 
-## Eleven module adapters are DRAFTED but not yet applied
+opendde x4 (atom encoder, atom decoder, diffusion, denoise), boltz2 x5, rf3 x3
+(trunk, atom decoder, and its encoder was already there), of3/openbind0/if2
+decoders. Every one produced a number; six produced a BUG.
 
-They live in the session scratchpad next to `final.log`, with
-`PATCH_ORDER.md` naming the order and `after_matrix.sh` running the whole
-sequence (apply, exercise every newly enabled cell, re-run L0, regenerate the
-four ESMFold2 dumps, then audit). Every NATIVE half was verified on CPU first
--- each vendor module built from its own config, loaded from its own
-checkpoint, asserted to have nothing missing -- so what is unverified is only
-the comparison, never the reference.
+## Six port bugs, all in cells that had no gate before
 
-They close: `L2.atom_decoder` for openfold3, openbind0, intellifold2, opendde,
-boltz2 and rosettafold3; `L2.atom_encoder` for opendde and boltz2;
-`L2.diffusion` for opendde and boltz2; `L3.denoise` for opendde and boltz2;
-`L1.trunk` for rosettafold3. If the scratchpad is gone, `HOLES.md` carries the
-recipe for each -- the checkpoint prefix, the widths, and the convention that
-had to be derived rather than inherited.
+| model | bug | after |
+|---|---|---|
+| opendde | the diffusion atom pair ran on ZERO weights -- 4 of 5 terms, because the converter asserted which of a `X`/`X_1` haiku pair was live and the forward changed | denoise 0.464 -> 0.0054 A/atom |
+| boltz2 | `arcsinh(charge)` where it takes the RAW formal charge | c_atom_cond exact |
+| boltz2 | slid the atom key window where it CLIPS AND PADS | a_token -> 1.000000 |
+| boltz2 | padded keys not masked from real queries (caught by a registry TEST, not a number) | edge window 1.78 -> 0.18 |
+| boltz2 | relative-CHAIN bucket keyed on entity, not chain | trunk loop exact through 4 passes |
+| boltz2 | atom-pair offset is KEYS minus QUERIES, uniquely | whole atom path -> 1.000000, denoise -> 0.0269 A/atom, RNA 1.419 -> 1.191 |
+
+## Two gate bugs, which is the other half of the work
+
+  * `trunk_parity` had its own `_cmp` printing no `rms(native)`, so
+    `parity_audit` graded L1.trunk -- the gate that runs for the most models --
+    on correlation alone, the one number [[correlation-hides-bias]] warns about.
+  * every L0 cell read FAIL from a syntax-level regression the ESMFold2 purge
+    left behind (four dangling one-element tuples in `dev/audit_coverage.py`).
+
+## Two new gates for tensors nothing measured
+
+`dev/oracles/trunk_init_parity.py`: the trunk z-INIT, and with `PASSES=n` the
+whole recycled loop. `trunk_parity` feeds the pairformer synthetic s and z, so
+nothing had ever measured the tensor those blocks start from. It settled
+boltz2's chain bucket (loop exact through 4 passes with its own convention,
+s 1.02 / z 3.42 with AF3's) at the cost of 0.16 A on 6MRR, which is recorded
+rather than obeyed -- see `model_config.CHAIN_BUCKET_ON_SAME_CHAIN`.
+
+## What is still open, in order of size
+
+  1. rf3's atom encoder (q_atom 0.84, a_token 0.57). A source-derived
+     hypothesis is written down in HOLES.md: its key window is CLAMP+MASK where
+     ours slides, i.e. it needs `padded_keys=True`. Not yet tested.
+  2. if2's atom encoder, loose on its LAST TWO windows only -- its edge windows
+     are DUPLICATED (`concat_previous_and_later_windows`), which is a third
+     convention next to slide and pad. Aligning them is 14x better at one block
+     and worse by block two, so something else is there too.
+  3. the esmfold2 atom decoder (x4) and confidence head (x2): the dumps now
+     carry the module I/O, the gate is not written.
+  4. boltz2's confidence head: forward branches, not an adapter.
+  5. with boltz2's trunk provably exact, something DOWNSTREAM turns a correct
+     pair representation into a worse structure on 6MRR ~10% of the time.
 
 If those logs are gone, the matrix is re-runnable from the repo:
 `FORCE=1 LOGDIR=... bash dev/oracles/run_all_parity.sh L0 L1 L1b L1t L1d L2 L3 L4`
