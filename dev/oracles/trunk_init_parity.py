@@ -161,8 +161,15 @@ def native_boltz2_loop(model, batch, s_inputs, bonds, bond_types, n, passes):
   miss, _ = msa_net.load_state_dict(msub, strict=False)
   assert not miss, list(miss)[:3]
   zero_msa = np.zeros((n_seq, n), np.float32)
+  # THE QUERY ROW IS MARKED PAIRED. boltz sets `is_paired` = 1 on row 0 and 0
+  # elsewhere for an unpaired MSA, which our graph reproduces
+  # (evoformer.py: `query_paired = 1.0` for boltz2, 0.0 for rf3, and the two
+  # vendors genuinely disagree on what the flag means). Feeding zeros gives
+  # native a different embedding for its query row than ours has.
+  is_paired = np.zeros((n_seq, n), np.float32)
+  is_paired[0] = 1.0
   feats = {'msa': t(onehot)[None], 'has_deletion': t(has_del)[None],
-           'deletion_value': t(del_val)[None], 'msa_paired': t(zero_msa)[None],
+           'deletion_value': t(del_val)[None], 'msa_paired': t(is_paired)[None],
            'msa_mask': torch.ones(1, n_seq, n),
            'token_pad_mask': torch.ones(1, n),
            'target_pair_mask': None}

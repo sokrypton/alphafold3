@@ -92,119 +92,31 @@ checkpoint and feed them OUR features.
 
 `PASSES=n` turns the same gate into the FULL TRUNK LOOP -- boltz's own
 `s/z recycle -> msa_module -> pairformer`, n times, against our own
-`Evoformer.__call__` carrying `prev`. That is the measurement the chain-bucket
-question needed, because every constituent is exact on its own (z-init
-2.77e-06, MSA module 7.62e-05, pairformer 1.000000, and the diffusion
-conditioner and atom path too) and the COMPOSED fold still prefers a z-init
-that is not.
+`Evoformer.__call__` carrying `prev`. CLOSED, and it settled the chain-bucket
+question:
 
-It reports a real divergence at ONE pass: **s corr 0.963092, z corr 0.914937**.
-Two things to know before chasing it:
+  convention     z-init      loop, 1 pass         loop, 4 passes
+  same-chain     2.77e-06    s 1.9e-05 z 3.5e-05  s 1.5e-05 z 1.9e-05
+  same-entity    6.49e-01    s 1.49    z 9.71     s 1.02    z 3.42
 
-  * the gate's own oracle is young, and two bugs have already come out of it --
-    boltz2's pairformer needs `v2=True` (its layers carry `pre_norm_s` where the
-    default builds `attention.norm_s`, 128 tensors missing), and the MSA one-hot
-    has to be built in BOLTZ's class order, not ours, because our converter
-    permutes those 33 columns into our 31. So treat the number as a lead.
-  * the MSA double-add is NOT it. `AF3_NO_MSA_DOUBLE_ADD=1` moves the pass by
-    nothing (z 0.914937 -> 0.914679).
+Our recycled trunk is bit-faithful to boltz2 with its own convention, which is
+now the shipped default.
 
-The next thing to check is what each side feeds the MSA module: this gate hands
-native exactly the 2 real rows of a 6MRR batch, and our graph pads and
-subsamples to `num_msa` with the row-count outer-product norm. If those differ,
-the divergence is the harness and the chain-bucket anomaly is still open.
+THREE oracle bugs came out of this gate before it was trustworthy, and they are
+the reason its first reading (s 0.963 / z 0.915) was a lead and not a verdict:
 
-# Category 1: the holes, from the AUTHORITATIVE run (2026-09-09-full)
+  * boltz2's pairformer needs `v2=True` -- its layers carry `pre_norm_s` where
+    the default builds `attention.norm_s`, 128 tensors missing, and the
+    checkpoint's hparams do not mention the flag.
+  * the MSA one-hot has to be built in BOLTZ's 33-class order, because our
+    converter permutes those columns into our 31.
+  * `is_paired` is 1 ON THE QUERY ROW for boltz2 (0 everywhere for rf3 -- the
+    two vendors disagree about what the flag means). Feeding zeros was the last
+    of the three and worth s 0.974 -> 1.000000 on its own.
 
-Module levels L0-L4, every model: **236 cells -- 116 OK, 79 N/A, 39 HOLE,
-2 FAIL** (holes were 66 before the day's converter/reference fixes).
-
-## Already addressed in code, awaiting a re-run (13 of the 39)
-
-| gate | models | what closed it |
-|---|---|---|
-| `L1.trunk_ref`, `L3.denoise_ref`, `L2.conditioning`, `L2.atom_encoder` | esmfold2_lm600m, esmfold2_lm300m | one guard: the reference map built a confidence head those structure-only releases do not have. 8 cells. |
-| `L2.conditioning` | openfold3, openbind0, intellifold2 | three new adapters |
-| `L2.conditioning` (FAIL, not SKIP) | boltz2, opendde | new adapters; both errors since fixed |
-| `L2.atom_decoder` | opendde | the decoder gate is no longer protenix-only |
-
-## Genuinely open (26)
-
-| gate | models | what it needs |
-|---|---|---|
-| `L2.atom_decoder` | esmfold2 x4 | the dump NOW CARRIES the decoder I/O (`dec.in.*` / `dec.out.0`, hooked with `with_kwargs=True`), so what is left is a gate that runs OUR decoder on the RECORDED inputs. That is a different shape from `_decoder`, which feeds both sides a synthetic token activation: native's recorded output belongs to the dump's own `a_i`, so for esmfold2 every input has to come from the dump. Deferred until a dump exists to read the atom ordering off, rather than guessing it. |
-| `L2.atom_decoder` | openfold3, openbind0 | ADAPTER WRITTEN (`_native_decoder_of3`), awaiting a GPU slot to verify. The one thing to watch: of3 does not gather through an index, it broadcasts by per-token atom COUNTS (`broadcast_token_feat_to_atoms`), which assumes each token's atoms are contiguous -- ours are, and the adapter asserts the lens sum to the atom axis. |
-| `L2.atom_decoder` | intellifold2 | ADAPTER WRITTEN (`_native_decoder_if2`), awaiting a GPU slot. Needed one new mechanism: `native_if2` returns `p_lm` as None because its windows hold different atoms than ours, but the decoder CONSUMES that tensor, so the encoder now parks the raw one in `_RAW`. |
-| `L2.atom_decoder` | rosettafold3, boltz2 | ADAPTERS WRITTEN, awaiting a GPU slot. rf3's decoder is 85 tensors and a plain gather; its atom path does NOT go through `force_bfloat16` (the forward returns `atom_attention(...)` before the cast), so unlike the token transformer nothing has to be disarmed. boltz2's is 73 tensors and windows the DENSE atom axis -- which is OUR layout, so its `p_atom_pair` is the one in the family that is directly comparable window-for-window. |
-| `L4.confidence` | esmfold2 x2 (the two with a confidence head) | the dump now carries `conf.in.*` and one `conf.out.<name>` per output; same remaining step as the decoder above. |
-| `L4.confidence` | boltz2 | converter is done (66 -> 11); the rest is forward branches, recipe in `boltz2-confidence-port` |
-| `L2.atom_encoder` | opendde | ADAPTER WRITTEN, and it is one table row: opendde's atom encoder IS protenix's -- 98 tensors on both, identical leaf names, identical shape signature except c_z (128 against 256), which is read off the checkpoint. `_ENC_SRC` now drives `native_protenix` the way `_DECODER_SRC` drives the decoder. |
-| `L2.atom_encoder` | boltz2 | no adapter |
-| `L2.diffusion`, `L3.denoise` | opendde | ADAPTERS WRITTEN: opendde's whole diffusion is protenix's with the package renamed, so both gates gain a `_DIFF_SRC` row. One convention had to be derived rather than inherited -- opendde COMPRESSES the trunk pair (c_z 384) to 128 for the diffusion, and reading c_z from `relpe` the way protenix does leaves `layernorm_z_trunk` and `linear_no_bias_z_trunk` as "unexpected" tensors the vendor class silently declines to build. |
-| `L2.diffusion` | boltz2 | ADAPTER WRITTEN (552 + 72 tensors, 24 blocks, 16 heads). boltz2 does not project the pair inside the block: `token_trans_proj_z` is a ModuleList of (LayerNorm, Linear->heads) whose outputs are concatenated and sliced per block. Both sides are handed `z` so each does its own projection. |
-| `L3.denoise` | boltz2 | ADAPTER WRITTEN. Three things it had to get right that no other model in the panel needs: `DiffusionModule.forward` takes no z at all, it takes the `diffusion_conditioning` DICT that a separate module produced; the EDM preconditioning lives outside the score model in `AtomDiffusion.preconditioned_network_forward` (same constants, sigma_data 16, written out rather than importing a sampler that wants a schedule and a device); and s_inputs is token_s wide, not 449 -- `norm_single` is 768 = 2 * token_s, so boltz concatenates s_trunk with an s_inputs the width of its own single track. |
-| `L1.trunk` | rosettafold3 | ADAPTER WRITTEN. There is no `PairformerStack` class -- rf3 builds an `nn.ModuleList` of 48 blocks inline -- and the blocks take NO MASK, which is sound only because the gate feeds all ones (asserted in the adapter). `use_cuequivariance=True` is hardcoded in the block but already inert on this card; disarmed explicitly rather than relied on. |
-
-**boltz2 (7) and opendde (5) are still half the open work**, and both import
-cleanly beside jax.
-
-
-
-Generated from the adapter map (`NATIVES` in each gate module) crossed against
-the last full matrix. The esmfold2 holes are not listed: 44 of them, all
-targeted by the converter/reference fixes of 2026-09-09, and the authoritative
-run is what says how many closed.
-
-Read `dev/oracles/gate_applies.py` first -- a cell is only a hole if the model
-HAS that module and no other cell covers it. 79 cells are n/a for reasons that
-are properties of the model, not gaps in the work.
-
-## Adapters that do not exist (the real work)
-
-| gate | models | note |
-|---|---|---|
-| `L2.conditioning` | boltz2, opendde, openfold3, openbind0, intellifold2 | 5. `conditioning_parity` has protenix1/2, rosettafold3 and all eight esmfold2; these five need a `native_*` that runs the vendor's own DiffusionConditioning on our batch. The protenix adapter is the closest template. |
-| `L2.atom_decoder` | boltz2, opendde, openfold3, openbind0, intellifold2, rosettafold3 | 6. `atom_parity` has 14 models for the ENCODER half; `DECODER=1` reaches `_decoder`, which needs the vendor's decoder called on native's own `q`/`c`/`p`. |
-| `L2.diffusion` | boltz2, opendde | 2. `diffusion_parity` has if2/of3/openbind0/protenix/rf3. |
-| `L3.denoise` | boltz2, opendde | 2. Same two, same shape. |
-| `L2.atom_encoder` | boltz2, opendde | 2. Everything else in the panel has one. |
-| `L4.confidence` | boltz2 | 1. The converter is done (66 -> 11); what is left is forward branches, and `boltz2-confidence-port` has the oracle recipe. |
-| `L1.trunk` | rosettafold3 | 1. `trunk_parity` has the other six in-process vendors. |
-
-## Cells whose adapter EXISTS but which skipped anyway
-
-`L1.trunk` for boltz2, opendde and intellifold2 -- `trunk_parity.NATIVES` has
-all three. The 2026-09-08 logs for those three are absent while the summary
-carries SKIP rows, which is stale-log archaeology rather than evidence; the
-authoritative run settles it. If they still skip, the reason is in the log and
-is likely cheap -- the esmfold2 equivalents turned out to be two crashes
-(`stack_blocks(0)` and the released-only confidence head), not missing work.
-
-## Priority
-
-boltz2 (7 holes) and opendde (6) are half the remaining work and both vendors
-import cleanly beside jax, so neither needs the npz-dump machinery esmfold2
-does. Start with `L2.conditioning` for those two: it is the same module for
-both, `native_protenix` is a working template, and it unblocks the reasoning for
-`L2.diffusion`/`L3.denoise`, which consume its output.
-
-
-## Gate BLINDNESS, separate from holes and from disagreements
-
-Cases where a gate is exact because of what it injects, not because the port is
-right. These are not counted anywhere and each needs its own answer:
-
-  * **`atom_parity` feeds the vendor OUR features.** So it cannot see a
-    featurisation difference at all: the conformer-centering A/B came back
-    byte-identical for all six vendors. Only a fold, or a comparison against
-    the vendor's own featuriser, can judge that class of change. ESMFold2's
-    atom cells are the exception because `native_esmfold2` reads a DUMP.
-  * **rf3's `ref_pos_ground_truth` (3 cols) and `has_atom_level_embedding`
-    (1 col)** are fed as ZEROS on both sides, "the same thing the port does".
-    Consistent, therefore exact -- but `has_atom_level_embedding` is 1 in
-    native whenever a residue descriptor cache is present, so if rf3's shipped
-    inference provides one, our port drops a learned per-atom term and the gate
-    cannot tell. Worth answering by running rf3's own featuriser.
-  * **`p_lm` is "not compared" for esmfold2** (native windows the dense atom
-    axis, ours the packed one), so the atom PAIR conditioning has no gate at all
-    for that family.
+What remains is DOWNSTREAM of the trunk and is a real question rather than a
+hole: with the trunk provably exact, something in the diffusion or the sampler
+turns a correct pair representation into a worse structure on 6MRR about 10% of
+the time (mean 0.700 against 0.540, four samples of 40 at 0.84-1.5, while at
+zero recycles the two conventions are level). The loop gate is the tool for the
+next model that shows this.

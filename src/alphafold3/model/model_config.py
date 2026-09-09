@@ -306,55 +306,43 @@ RAW_REF_CHARGE = ('chai1', 'boltz2') + ESMFOLD2_FAMILY
 # gates the trunk's z-INIT (trunk_parity feeds the pairformer stack synthetic
 # s/z, so it never sees relpos at all), which is the missing measurement and
 # the next step; until it exists, the trunk keeps the convention that folds.
-# boltz2 is DELIBERATELY ABSENT from the trunk list and present in the diffusion
-# one, and `dev/oracles/trunk_init_parity.py` is what makes that a decision
-# rather than an oversight. That gate compares our trunk z-init against boltz2's
-# own five terms assembled from its own checkpoint, and it says the same-chain
-# convention is RIGHT:
+# boltz2 is in BOTH lists, and the second list exists only because it took two
+# gates to establish that. `dev/oracles/trunk_init_parity.py` measures the trunk
+# z-init against boltz2's own five terms, and with `PASSES=n` the whole recycled
+# loop (`s/z recycle -> msa_module -> pairformer`) against boltz's own:
 #
-#   same-chain    z_init corr 1.000000, max|d|/rms 2.77e-06
-#   same-entity   z_init corr 0.954268, max|d|/rms 6.49e-01 -- and the per-pair
-#                 max|d| is IDENTICAL for all 68x68 pairs (median = p90 = max =
-#                 2.23553), i.e. exactly one constant vector on every pair,
-#                 which is what a single wrong one-hot column looks like.
+#   convention     z-init      loop, 1 pass        loop, 4 passes
+#   same-chain     2.77e-06    s 1.9e-05 z 3.5e-05  s 1.5e-05 z 1.9e-05
+#   same-entity    6.49e-01    s 1.49    z 9.71     s 1.02    z 3.42
 #
-# The FOLD disagrees, and only when recycling. 8 seeds x 5 samples per arm:
+# So our recycled trunk is bit-faithful to boltz2 with the same-chain
+# convention and badly wrong with AF3's. That is what settles it. Everything
+# else agrees: boltz2's own `RelativePositionEncoder` keys the bucket on
+# same-CHAIN and sends the MATCH to the pad class, and esmfold2 -- the other
+# model that does -- was worth 1.522 -> 0.719 A when this was first found.
 #
-#   recycles  0   mean 0.536 (entity) vs 0.570 (chain) -- neutral, no outliers
-#   recycles  3   mean 0.519 vs 0.666
-#   recycles 10   mean 0.540 vs 0.700, and the SHAPE is the finding: the entity
-#                 arm has no sample above 0.66 in 40, the chain arm has 4 at
-#                 ~0.84-1.5. Stable across two disjoint seed sets, so not luck.
+# THE FOLD STILL PREFERS THE WRONG ONE on 6MRR, and that is recorded rather
+# than obeyed. 8 seeds x 5 samples per arm at 10 recycles: same-entity mean
+# 0.540 with nothing above 0.66, same-chain mean 0.700 with four samples at
+# 0.84-1.5; at zero recycles the two are level (0.536 vs 0.570). A 0.16 A mean
+# on one 68-residue target does not outweigh a trunk that is provably exact
+# through four passes, so the certified convention ships and
+# AF3_BOLTZ2_TRUNK_ENTITY_BUCKET restores the other for anyone comparing.
 #
-# So a bit-exact z-init makes ~10% of samples collapse once it is recycled.
-# EVERY PIECE OF THAT LOOP IS INDIVIDUALLY EXACT, which is what makes this
-# worth writing down rather than fixing blind:
+# On other targets the change is mixed and small, which is the other half of
+# the reason it is not worth trading the trunk for:
 #
-#   z-init                trunk_init_parity   1.000000 / 2.77e-06
-#   MSA module            L1b.msa             1.000000 / 7.62e-05
-#   pairformer stack      L1.trunk            1.000000
-#   diffusion conditioner L2.conditioning     1.000000 on both halves
-#   atom encoder/decoder  L2.atom_*           1.000000
+#   1STP protein   0.276 -> 0.266 best      1STP BTN  0.458 -> 0.895
+#   1EHZ RNA       1.191 -> 1.198 best      6MRR      0.540 -> 0.700 mean
 #
-# Also ruled out by reading the vendor and checking the blob: the recycle
-# LayerNorms' OFFSETS are mapped on both tracks (boltz's z_norm and s_norm have
-# them, so its first pass adds recycle(offset) to a zero carry, and ours does
-# too), both recycle projections are mapped, z_init's five terms are all present,
-# and the MSA double-add is in the right place -- boltz's MSAModule returns the
-# updated z and its caller adds z again, so `msa_stack_out + z_pre` IS
-# `z + msa_module(z)`.
-#
-# What remains un-gated is the COMPOSITION: the loop as a whole, over passes.
-# The decisive measurement is a full-trunk gate -- our recycled trunk output
-# after N passes against boltz's own loop -- which is the only thing that can
-# separate "our wiring" from "boltz2 is genuinely this sensitive and the entity
-# arm is lucky on this target". Until that exists the trunk keeps the convention
-# that folds, and AF3_BOLTZ2_TRUNK_SAME_CHAIN opts into the certified one.
+# What that leaves open is a real question, and it is DOWNSTREAM of the trunk:
+# with the trunk exact, something in the diffusion or the sampler turns a
+# correct pair representation into a worse structure on this target ~10% of the
+# time. The loop gate is the tool for the next model that shows this.
 CHAIN_BUCKET_ON_SAME_CHAIN = (
-    (('boltz2',)
-     if __import__('os').environ.get('AF3_BOLTZ2_TRUNK_SAME_CHAIN') else ())
-    + ESMFOLD2_FAMILY)
-CHAIN_BUCKET_ON_SAME_CHAIN_DIFFUSION = ('boltz2',) + CHAIN_BUCKET_ON_SAME_CHAIN
+    (() if __import__('os').environ.get('AF3_BOLTZ2_TRUNK_ENTITY_BUCKET')
+     else ('boltz2',)) + ESMFOLD2_FAMILY)
+CHAIN_BUCKET_ON_SAME_CHAIN_DIFFUSION = ('boltz2',) + ESMFOLD2_FAMILY
 
 
 # boltz2's atom cross-attention builds its keys by gathering the ALREADY
