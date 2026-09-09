@@ -29,6 +29,12 @@ import sys
 
 import numpy as np
 
+# This directory on the path, so the shared comparison below imports whether the
+# gate is run from the repo root or anywhere else -- the same line atom_parity.py
+# carries, and without it `from confidence_parity import _cmp` depends on the
+# caller's cwd.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 # A scope that exists exactly once inside the trunk pairformer, used to FIND
 # the blob's prefix rather than hardcode haiku's layer_stack numbering -- that
 # numbering differs between models, and guessing it silently leaves parameters
@@ -42,13 +48,15 @@ _PROTENIX_CKPT = {
 }
 
 
-def _cmp(tag, got, ref):
-  a = np.asarray(got, np.float64).ravel()
-  b = np.asarray(ref, np.float64).ravel()
-  print('  %-4s corr %.6f  rms ours/native %.4f  max|d| %.5f'
-        % (tag, np.corrcoef(a, b)[0, 1],
-           np.sqrt((a ** 2).mean()) / np.sqrt((b ** 2).mean()),
-           np.abs(a - b).max()))
+# THE SHARED COMPARISON, not a local one. This file used to print corr, the rms
+# ratio and max|d| -- and no rms(native), so no max|d|/rms. `parity_audit.py`
+# grades on corr AND that ratio, and falls back to corr alone when the ratio is
+# absent: L1.trunk runs for more models than any other gate, and every one of
+# its rows was being graded on the one number [[correlation-hides-bias]] says is
+# blind to a per-channel constant. A 48-block stack makes that worse, not
+# better, because the magnitudes grow with depth -- of3's z reads max|d| 75.6 at
+# corr 1.000000, which says nothing without the scale beside it.
+from confidence_parity import _cmp                      # noqa: E402
 
 
 def _stub_protenix_ext():
@@ -396,11 +404,105 @@ def native_of3(model, n, mask, blocks=None):
   return s, z, s_ref[0].numpy(), z_ref[0].numpy(), n_blocks
 
 
+def native_rf3(model, n, mask, blocks=None):
+  """-> (s, z, s_ref, z_ref, n_blocks) from RosettaFold3's own pairformer.
+
+  rf3 was the single worst-covered model in the panel -- four of the twelve
+  disagreeing cells plus no trunk adapter at all -- and the trunk was the
+  biggest missing piece.
+
+  Three rf3 facts shape this, and each of the first two is the same switch the
+  diffusion adapter already had to throw:
+
+    * `force_bfloat16 = True` on every AttentionPairBiasPairformerDeepspeed.
+      Left on, the comparison measures bf16 rounding, not the port.
+    * `use_cuequivariance=True` is hardcoded in `PairformerBlock.__init__` for
+      both triangle multiplications and both triangle attentions. It is
+      already inert on this card (`attention.SHOULD_USE_CUEQUIVARIANCE` is
+      False), but "inert today" is not a property of the port, so it is turned
+      off explicitly rather than relied upon.
+    * THERE IS NO MASK. rf3's pairformer block takes only (S_I, Z_II) -- no
+      pair mask, no seq mask -- so this adapter ignores the `mask` argument.
+      That is sound only because the gate feeds an all-ones mask; a partial
+      mask would compare a masked stack against an unmasked one and the number
+      would be meaningless. Asserted below rather than left to a reader.
+
+  There is also no `PairformerStack` class: rf3 builds an `nn.ModuleList` of 48
+  blocks inline in `RF3_structure.py`, so the stack is assembled here the same
+  way and every width is read off the checkpoint.
+  """
+  import numpy as _np
+  import torch
+
+  from rf3.model.layers import attention as _att
+  from rf3.model.layers.pairformer_layers import PairformerBlock
+
+  assert _np.all(_np.asarray(mask) == 1), (
+      'rf3 pairformer blocks take no mask; this adapter is only valid for the '
+      'all-ones mask the gate feeds')
+
+  ckpt = os.path.expanduser(
+      '~/rf3_weights/rf3_foundry_01_24_latest_remapped.ckpt')
+  raw = torch.load(ckpt, map_location='cpu', weights_only=False)['model']
+  # `shadow.*` is the EMA copy, which is what converters/rosettafold3.py ports.
+  pre = 'shadow.recycler.pairformer_stack.'
+  sub = {k[len(pre):]: v for k, v in raw.items() if k.startswith(pre)}
+  if not sub:
+    raise SystemExit('no %r keys in %s' % (pre, ckpt))
+
+  n_blocks = 1 + max(int(k.split('.')[0]) for k in sub)
+  c_s = sub['0.attention_pair_bias.ln_1.weight'].shape[0]
+  c_z = sub['0.tri_mul_outgoing.norm_in.weight'].shape[0]
+  # `p_in` projects to BOTH triangle branches at once, so the hidden width is
+  # half of it -- 128 here, which happens to equal c_z; reading it off the
+  # tensor keeps that coincidence from being load-bearing.
+  d_hidden = sub['0.tri_mul_outgoing.p_in.weight'].shape[0] // 2
+  ta_heads = sub['0.tri_attn_start.to_b.weight'].shape[0]
+  ta_hidden = sub['0.tri_attn_start.to_q.weight'].shape[0] // ta_heads
+  apb_heads = sub['0.attention_pair_bias.to_b.weight'].shape[0]
+  n_transition = sub['0.z_transition.linear_1.weight'].shape[0] // c_z
+  print('  checkpoint: %d blocks, c_s %d, c_z %d, tri hidden %d, tri_attn '
+        '%dx%d, apb %d heads, n_transition %d, cuEq available %s'
+        % (n_blocks, c_s, c_z, d_hidden, ta_heads, ta_hidden, apb_heads,
+           n_transition, getattr(_att, 'SHOULD_USE_CUEQUIVARIANCE', None)))
+
+  keep = n_blocks if blocks is None else min(blocks, n_blocks)
+  net = torch.nn.ModuleList([
+      PairformerBlock(c_s=c_s, c_z=c_z, p_drop=0.25,
+                      triangle_multiplication=dict(d_hidden=d_hidden),
+                      triangle_attention=dict(n_head=ta_heads,
+                                              d_hidden=ta_hidden),
+                      attention_pair_bias=dict(n_head=apb_heads),
+                      n_transition=n_transition)
+      for _ in range(keep)])
+  sub = {k: v for k, v in sub.items() if int(k.split('.')[0]) < keep}
+  missing, unexpected = net.load_state_dict(sub, strict=False)
+  print('  native: %d tensors, %d missing, %d unexpected'
+        % (len(sub), len(missing), len(unexpected)))
+  assert not missing, 'native is missing %d tensors' % len(missing)
+  for b in net:
+    b.attention_pair_bias.force_bfloat16 = False
+    for m in (b.tri_mul_outgoing, b.tri_mul_incoming,
+              b.tri_attn_start, b.tri_attn_end):
+      m.use_cuequivariance = False
+  net.eval()
+
+  rng = _np.random.default_rng(0)
+  s = (rng.normal(size=(n, c_s)) * 0.5).astype(_np.float32)
+  z = (rng.normal(size=(n, n, c_z)) * 0.5).astype(_np.float32)
+  with torch.no_grad():
+    S, Z = torch.tensor(s)[None], torch.tensor(z)[None]
+    for b in net:
+      S, Z = b(S, Z)
+  return s, z, S[0].numpy(), Z[0].numpy(), keep
+
+
 NATIVES = {m: native_protenix for m in _PROTENIX_CKPT}
 NATIVES.update({m: native_of3 for m in _OF3_CKPT})
 NATIVES['opendde'] = native_opendde
 NATIVES['boltz2'] = native_boltz2
 NATIVES['intellifold2'] = native_if2
+NATIVES['rosettafold3'] = native_rf3
 
 
 def ours(model, s, z, mask, n_blocks, model_dir=None):
@@ -472,7 +574,15 @@ def main(argv=None):
   ap.add_argument('--blocks', type=int, default=None,
                   help='compare only the first N blocks; 48 of them compound '
                        'any per-block difference, so a low stack number means '
-                       'little until ONE block is measured')
+                       'little until ONE block is measured. AND THE FULL DEPTH '
+                       'MEANS LITTLE EITHER, on synthetic input: rosettafold3 '
+                       'reads max|d|/rms 5.8e-04 on z at 1 block, 5.0e-04 at 4 '
+                       '-- flat, so not compounding -- and 1.2e-01 at 48, where '
+                       'the single track has grown to rms 2.7e4 and the pair '
+                       'track has FALLEN to 24. A stack driven that far outside '
+                       'its trained input distribution is an amplifier being '
+                       'measured, not a port. Read 1-4 blocks for the port and '
+                       'the full depth only as a smoke test.')
   ap.add_argument('--model_dir', default=None)
   args = ap.parse_args(argv)
   # Clear argv before anything imports tokamax: it parses sys.argv LAZILY
