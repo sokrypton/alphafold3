@@ -42,6 +42,50 @@ entirely.
 
 ---
 
+## The esmfold2 family is FOUR releases (2026-09-09)
+
+`esmfold2`, `esmfold2_fast`, `esmfold2_lm600m`, `esmfold2_lm300m`. The
+ESMFold2-Experimental and -Experimental-Cutoff2025 lines and their -Fast
+siblings were removed from the project -- registry, converters, oracles, README
+-- along with every exception that existed only for them.
+
+What the four still cover: both trunk lines (esmfold2/_fast recycle through the
+parcae SSM with a coda; the lm pair recycle through `pair_loop_proj` with
+none), the released MSA encoder (`esmfold2`, msa 4), and all three ESM-C tower
+sizes.
+
+**What lost its only user**, so it is not rediscovered as a gap: the
+EXPERIMENTAL MSA encoder. `MSA_UPDATE_BEFORE_OPM`'s esmfold2 half, the
+experimental `OPM_BIAS_AFTER_NORM` half, `MSA_AFTER_RECYCLE` and its arm in
+`evoformer`, `NO_PDE_HEAD` and its branches in `confidence_head` -- all deleted,
+because the two experimental-line survivors set msa=0 and build no confidence
+head, which makes every one of them unreachable rather than merely unused. Two
+of the day's fixes went with them (the experimental block order, worth
+14.364 A -> 0.477 A on 1STP, and its outer-product bias). git history has both.
+
+Folds after the purge, 6MRR, against what was on record:
+
+| | recorded best | now | recorded mean | now |
+|---|---|---|---|---|
+| `esmfold2` | 1.387 | **1.352** | 1.548 | 1.597 |
+| `esmfold2_fast` | 1.200 | **1.181** | 1.593 | 1.593 |
+| `esmfold2_lm600m` | 0.937 | 1.506 | 1.450 | 1.556 |
+| `esmfold2_lm300m` | 1.688 | 1.687 | 1.710 | 1.706 |
+
+`lm600m` reads as a 0.57 A regression on best-of-5 and probably is not one: its
+other four samples match to ~0.03 (1.581/1.568, 1.528/1.538, 1.592/1.556,
+1.614/1.612) and only the first moved, so the mean shifts by 0.106. This file
+has retracted exactly that inference before -- protenix2's "modified residue
+bug" was one lucky seed. **But the honest gap is real: the ref_pos table and
+the OXT drop were validated fold-neutral on `esmfold2` and on the now-dropped
+`esmfold2_exp`, never on the lm tier.** Being measured across seeds with both
+knobs (`AF3_NO_ESM_REF_POS`, `AF3_NO_ESM_DROP_OXT`).
+
+The 12 HuggingFace files for the dropped releases are still published and now
+orphaned; deleting them is outward-facing and has not been done.
+
+---
+
 # Parity testing: what is gated, at which level, for which model
 
 A port can be wrong in places a fold never reveals. This is the map of what is
