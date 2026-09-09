@@ -441,11 +441,23 @@ def native_rf3(model, batch, rng, n, noise):
   s_inputs = (rng.normal(size=(n, c_s_inputs)) * 0.5).astype(np.float32)
   drop = np.setdiff1d(np.arange(c_s_inputs), idx)
   if not os.environ.get('KEEP_DROPPED'):
-    # The two columns our 447-wide layout has no slot for. They are NOT
-    # zeroable here the way they are for a bare Linear -- the LayerNorm turns a
-    # zero into -mean/std -- which is the whole point of PADDED_SINGLE_COND, so
-    # leave them random and let the gate see whether we reproduce them.
-    pass
+    # The two columns our 447-wide layout has no slot for: of3's extra
+    # unknown-DNA restype and profile classes, which AF3 folds into its shared
+    # unknown-nucleic class.
+    #
+    # ZERO here, because zero is what the real featuriser puts there for any
+    # input without an unknown DNA residue -- every case in this panel. The
+    # graph re-inserts zeros for exactly that reason (PADDED_SINGLE_COND: the
+    # LayerNorm maps a zero to -mean/std, so they cannot simply be dropped from
+    # the weights), so feeding native RANDOM values there measured a
+    # disagreement about an input that cannot occur. It was worth 0.124 of
+    # max|d|/rms on `single_cond` and read as a port bug.
+    #
+    # KEEP_DROPPED=1 restores the random values, which is a real question --
+    # "would we reproduce a genuine unknown-DNA column?" -- just not the one
+    # this gate should answer by default. Note the old code left them random
+    # EITHER WAY: the branch body was a bare `pass`.
+    s_inputs[:, drop] = 0.0
   print('  s_inputs: %d native columns, %d ours, %d dropped %s'
         % (c_s_inputs, len(idx), len(drop), drop.tolist()))
   s_inputs_ours = s_inputs[:, idx]
