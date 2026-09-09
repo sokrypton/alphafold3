@@ -539,3 +539,40 @@ def shuffle_msa(
   index_order = gumbel_argsort_sample_idx(sample_key, logits)
 
   return msa.index_msa_rows(index_order), key
+
+
+def subsample_msa_keep_query(
+    key: jax.Array, msa: features.MSA, num_msa: int
+) -> tuple[features.MSA, jax.Array]:
+  """Subsample to num_msa rows KEEPING THE QUERY at row 0, in a3m order.
+
+  ESMFold2's own convention, verbatim from its docstring: "Randomly subsample
+  the MSA to max_depth rows, keeping query row 0" -- and it then does
+  `indices.sort()`, so the rows it keeps stay in the order the alignment gave
+  them (`modeling_esmfold2_common.maybe_subsample_msa`).
+
+  AF3's `shuffle_msa` + `truncate_msa_batch` is a different function: the gumbel
+  shuffle ranks EVERY row including row 0, so the query lands somewhere random
+  and -- because the truncation then keeps only the first num_msa -- is dropped
+  outright with probability 1 - num_msa/depth. On 1STP that is 1 - 1024/2145,
+  about half the time, which is why the experimental line's fold got WORSE the
+  moment it was given a real alignment while native's got better: we were
+  handing the trunk an alignment with no query in it.
+
+  Depth-1 is the case that hides this. A self-MSA has nothing to shuffle and
+  nothing to drop, so every gate that folds from a single sequence agrees.
+  """
+  key, sample_key = jax.random.split(key)
+  logits = (jnp.clip(jnp.sum(msa.mask, axis=-1), 0.0, 1.0) - 1.0) * 1e6
+  # Row 0 is chosen explicitly, so it must not also be drawn into the tail --
+  # otherwise the query occupies two of the num_msa slots and one real sequence
+  # is lost. Pushing it below the padded rows is enough: padding is already at
+  # -1e6 and only the first num_msa - 1 draws are used.
+  logits = logits.at[0].add(-2e6)
+  order = gumbel_argsort_sample_idx(sample_key, logits)
+  idx = jnp.concatenate(
+      [jnp.zeros((1,), order.dtype), order[: num_msa - 1]], axis=0)
+  # Sorted, as native sorts: the alignment's own row order is information (an
+  # a3m is ordered by similarity to the query), and a permutation of it is a
+  # different input to any module that is not row-equivariant.
+  return msa.index_msa_rows(jnp.sort(idx)), key

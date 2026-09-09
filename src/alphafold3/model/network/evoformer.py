@@ -574,9 +574,18 @@ class Evoformer(hk.Module):
     # query first. Shuffling here would also break the query-row handling below,
     # since gumbel_argsort ranks EVERY row including row 0 -- the query would
     # land somewhere random and some other sequence would be labelled as it.
-    if not chai1:
-      msa_batch, key = featurization.shuffle_msa(key, msa_batch)
-    msa_batch = featurization.truncate_msa_batch(msa_batch, self.config.num_msa)
+    keep_query = (self.global_config.model in model_config.MSA_KEEP_QUERY_ROW
+                  and not os.environ.get('AF3_NO_KEEP_QUERY'))
+    if keep_query:
+      # One call, not shuffle-then-truncate: the query has to survive the
+      # SUBSAMPLE, which is a property of the pair and not of either step.
+      msa_batch, key = featurization.subsample_msa_keep_query(
+          key, msa_batch, self.config.num_msa)
+    else:
+      if not chai1:
+        msa_batch, key = featurization.shuffle_msa(key, msa_batch)
+      msa_batch = featurization.truncate_msa_batch(msa_batch,
+                                                   self.config.num_msa)
     msa_feat = featurization.create_msa_feat(
         msa_batch, self.soft_seq, self.design_mask, chai1=chai1,
         is_ligand=is_ligand, asym_id=asym_id).astype(dtype)
@@ -600,6 +609,16 @@ class Evoformer(hk.Module):
       is_paired = jnp.where(jnp.arange(num_msa_rows) == 0, query_paired, 0.0).astype(dtype)
       is_paired = jnp.broadcast_to(is_paired[:, None, None], msa_feat.shape[:2] + (1,))
       msa_feat = jnp.concatenate([msa_feat, is_paired], axis=-1)
+
+    if self.global_config.model in model_config.ESMFOLD2_FAMILY:
+      # "Bias-free MSAEncoder.embed requires zeroed padding" -- ESMFold2's own
+      # comment, and it multiplies the one-hot by the mask before embedding
+      # (modeling_esmfold2_experimental.py, just above the msa_encoder call).
+      # AF3 leaves the feature alone and masks downstream instead, so a PADDED
+      # row still arrives one-hot on class 0 and picks up a real embedding. It
+      # is masked out of the outer product, so it cost nothing measurable here,
+      # but it only stays harmless as long as every consumer honours the mask.
+      msa_feat *= msa_batch.mask.astype(dtype)[..., None]
 
     # chai's MSA feature embedding is feature_embedding's input_projs.MSA,
     # which unlike ours carries a bias.

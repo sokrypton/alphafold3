@@ -1929,61 +1929,125 @@ Both adapters truncate the NATIVE stack when `--blocks` is given, which is the
 rule this file keeps re-learning: dropping it once made a 1-block comparison run
 against native's full 48 and read corr -0.019.
 
-## OPEN: the experimental line's MSA path is INVERTED against native (2026-09-09)
+## ESMFold2's MSA path: three bugs, two closed (2026-09-09)
 
 The L6 sweep put `esmfold2_exp` and `esmfold2_exp_cutoff2025` at 13.7-14.4 A on
-1STP while every other release in the family sits at 0.45-1.53. Those two are
-exactly the releases that are EXPERIMENTAL and carry `msa=4`. Chasing it gave a
-clean, inverted comparison:
+1STP while every other release in the family sat at 0.45-1.53. Those two are
+exactly the releases that are EXPERIMENTAL and carry `msa=4`, and the comparison
+against native was inverted:
 
 | `esmfold2_exp` on 1STP | no MSA | with MSA |
 |---|---|---|
 | **native** | 18.728 A | **3.184 A** (improves) |
 | **ours** | **0.476 A** | 14.364 A (degrades) |
 
-**Native uses the MSA to fix a bad fold; we use it to break a good one.** That
-is a port bug, and it is the first one in this file whose direction is the
-evidence.
+Chasing it found THREE separate faults in the same place. Each was invisible to
+every gate in this file, and each for the same structural reason: **a
+single-sequence fold cannot see any of them.**
 
-What is already excluded, each measured:
+### 1. The alphabet is a permutation, not a shift (CLOSED)
 
-  * **the combination rule.** Native's experimental code adds
-    (`z = z + msa_encoder(x_pair=z, ...)`, no flag consulted) and so do we; the
-    RELEASED line's config sets `msa_encoder_overwrite = True` and both
-    implementations overwrite there. Forcing overwrite on our experimental path
-    gives 14.222 A -- unchanged. Not the rule.
-  * **the depth.** `NUM_MSA=8/64/256/1024` all read 13.5-17.0 A, so it is not a
-    cap, not the row SUBSAMPLING native does per iteration (max_depth 1024,
-    which never binds at 2145 rows), and not the 10% column mask.
-  * **the MSA features being meaningless.** The RELEASED line consumes the SAME
-    features productively: 1STP 1.699 A without the MSA, 0.774 A with it.
-  * **the target.** Both models fold 6MRR well (`esmfold2_exp` 0.761 A), so it
-    takes an MSA to appear.
+`protein_utils.MSA_GAP_TOKEN_ID` is 1: ESMFold2 puts the gap BELOW the residues,
+where AF3 puts it at 21 between UNK and the nucleic acids. Three sites read that
+as a shift-by-two -- `remap_msa_feat`, `_remap_restype_block` (the restype AND
+profile blocks of s_inputs), and `diffusion_head`'s widening back to 451, which
+padded with two LEADING zeros. So the trained gap embedding was discarded, AF3's
+gap column was multiplied by a NUCLEIC weight row, and every nucleic class sat
+one slot low -- the rf3 G/C swap again.
 
-**And the gate that should have caught it cannot.** `msa_parity.py` takes the
-EMBEDDED msa from native's own embedder, so both sides enter the stack on an
-identical activation -- which is what makes it a clean module gate and also what
-makes it blind to our RAW msa features and their depth handling. Its 1.000000
-for esmfold2 is true and does not cover this.
+    esmfold2_exp on 1EHZ (RNA)   21.508 A  ->  1.662 A best
+                                 23.322 A  ->  1.873 A mean
 
-The next step is that gate with REAL features: drive
-`esmfold2_reference.msa_encoder` from OUR msa features (inverting
-`converters/esmfold2.remap_msa_feat` to get back to ESM's 33-class layout) and
-compare against our msa_stack on the same z.
+which also closes the open "esmfold2 RNA 16-26 A" lead. Both numbers are
+LM-less, as the recorded baseline was: there is no `esmc.rna_1ehz.npz`.
 
-The two harnesses this took are in-tree, not in a scratchpad
-(`dev/oracles/esmfold2_native_msa.py` builds native's MSA tensors and dumps its
-coordinates; `esmfold2_score_native.py` scores them through
-`modality_check.reference()`), and their docstrings carry the three things that
-cost a run each: `prepare_protein_features` already supplies a depth-1 self
-`msa` that a real one must REPLACE, a3m rows carry lowercase insertions that
-have to be stripped and counted, and the CA reference has to come from the
-in-repo scorer. The knobs the exclusions used are also in-tree: `NUM_MSA` and
-`NO_MSA` (`fold_check.py`, `modality_check.py`).
+`converters/esmfold2.esm_class_of_af3` is now the single table, and
+`dev/oracles/esmfold2_msa_alphabet.py` gates all three sites STATICALLY. Static
+for the reason [[dna-parity-status]] gives for the nucleotide alphabet: random
+msa rows excite class 0 and class 1 like any other, so an activation comparison
+averages the per-class correspondence into one corr and hides it. It fails on
+the old code.
 
-**Not fixed, and deliberately not guessed at.** Our no-MSA fold being 39x better
-than native's on this target is a second oddity in the same place, and changing
-the MSA path while that is unexplained risks trading one for the other.
+**This changed the published weights.** 10 tensors move for the msa-carrying
+variants and 8 for the rest (`left_single`, `right_single`,
+`extra_msa_target_feat`, `msa_activations`, and six `confidence_head/
+~_boltz2_reembed` tensors) -- 20 of 447 rows in each s_inputs consumer, 1 of 34
+in `msa_activations`. The `.lm.npz` shims carry no alphabet remap and are
+unchanged. Note the blobs and the library must move TOGETHER: the widening lives
+in `diffusion_head`, so old-weights-new-library and new-weights-old-library are
+both wrong, and nothing enforces it since the shape manifests were purged.
+
+### 2. The subsampling drops the query (CLOSED as a fidelity fix, not as the cure)
+
+Native: "Randomly subsample the MSA to max_depth rows, keeping query row 0",
+then `indices.sort()` -- the query survives and the alignment keeps its own
+order. We called AF3's `shuffle_msa`, a uniform gumbel shuffle over EVERY row
+including the query, then truncated to the first `num_msa`. At 1STP's depth 2145
+with `msa_max_depth` 1024 the query is dropped about half the time.
+
+`featurization.subsample_msa_keep_query` + `model_config.MSA_KEEP_QUERY_ROW`,
+named per family. **It did not fix the fold** (14.364 -> 17.064 with the LM
+attached), which is why it is recorded as a fidelity fix: it is what native
+does, and the number moved the wrong way.
+
+Correcting the record: `msa_max_depth=1024` DOES bind at 2145 rows. The earlier
+note here that it "never binds" was wrong.
+
+`dev/oracles/msa_row_check.py` was written for this and found a third thing:
+every row we build is a real a3m row (2145 of 2145) and the query is row 0 in
+the BATCH, but only 21 of 2144 rows sit in the a3m's order -- the pipeline
+permutes before the model ever sees it.
+
+### 3. The two lines are different MODULES, and the gate used the wrong one
+
+ESMFold2 ships two `MSAEncoder`s:
+
+| | `modeling_esmfold2.py` (released) | `modeling_esmfold2_experimental.py` |
+|---|---|---|
+| 1 | `pair += OPM(m)` | `m += pair_weighted_avg(m, pair)` |
+| 2 | `m += pair_weighted_avg(m, pair)` | `m += msa_transition(m)` |
+| 3 | `m += msa_transition(m)` | `pair += OPM(m)` |
+| last block | skips the msa update | runs it |
+| `msa_head_width` | 16 | 32 |
+
+**Opposite order, and it compounds over blocks.** Our order gate was an inline
+`('opendde', 'boltz2')` tuple in `modules.py`, so the experimental releases fell
+into the `else` and ran the RELEASED order. It is now
+`model_config.MSA_UPDATE_BEFORE_OPM`, named by family -- the same lesson the
+protenix `padded_keys` bug taught, and the reason an inline tuple is the wrong
+place for a convention.
+
+**And this is why L1b read 1.000000 while it was wrong.**
+`esmfold2_msa_dump.py` imported `MSAEncoder` from `modeling_esmfold2` for all
+three msa-carrying variants, so for the experimental line the gate compared us
+against the wrong native module -- and we agreed with it. The dump now selects
+by variant and prints which module it built. The registry had the tell all
+along: `msa_w` is 16 for the released variant and 32 for both experimental ones,
+which are the two classes' own defaults.
+
+The experimental encoder also multiplies its whole output by `msa_track_mask`,
+false when the MSA has no non-query rows -- so **at depth 1 both orders return
+exactly zero**, and no single-sequence gate in this file could have separated
+them.
+
+### What is measured, and what is still open
+
+With ESM-C attached (the regime the recorded baselines used -- an LM-less
+`esmfold2_exp` folds 1STP at ~12-14 A even with NO MSA, so LM-less numbers are
+not comparable to these):
+
+| `esmfold2_exp` on 1STP | best | mean |
+|---|---|---|
+| no MSA, before and after | 0.476 / **0.478** | 0.488 |
+| with MSA, before the fixes | 14.364 | 15.555 |
+| with MSA, + alphabet + subsample | 17.064 | 17.975 |
+| with MSA, profile ablated (`ABLATE=profile`) | 14.573 | 14.657 |
+
+The released line is untouched by all of it: 0.491 before, **0.490** after.
+
+Still open: our no-MSA fold beating native's by 39x on this target (0.476
+against 18.728) has no explanation, and a fix that traded one for the other
+would not be a fix.
 
 ## chai1's first in-repo module gate: L4 by injection (2026-09-09)
 

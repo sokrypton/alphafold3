@@ -186,6 +186,38 @@ def affine_norm(model, name):
 # single-sequence fold means the MSA track contributes exactly nothing.
 MSA_AFTER_RECYCLE = ESMFOLD2_EXPERIMENTAL
 
+# Models whose MSA subsampling KEEPS THE QUERY AT ROW 0 and preserves the
+# alignment's own row order, rather than taking AF3's uniform gumbel shuffle
+# over every row followed by a truncation. ESMFold2 says so in its own
+# docstring ("keeping query row 0") and sorts the indices it draws;
+# `featurization.subsample_msa_keep_query` is that function, and why the
+# difference is not cosmetic.
+#
+# Membership is stated per FAMILY, not per model, for the reason the protenix
+# padded_keys bug taught: a convention named on one release is a convention the
+# next release silently loses.
+MSA_KEEP_QUERY_ROW = ESMFOLD2_FAMILY
+
+# Models whose MSA block updates the MSA FIRST and then runs the outer product
+# on the UPDATED msa, against AF3's outer-product-then-update. The order
+# compounds over blocks, so it is not a detail.
+#
+# ESMFold2 ships BOTH orders, one per line, in two files:
+#   modeling_esmfold2.py              OPM first, and the LAST block skips the
+#                                     msa update entirely (is_final_block),
+#   modeling_esmfold2_experimental.py update first, in EVERY block.
+# So membership here is the EXPERIMENTAL releases only, and the released ones
+# must stay out of it. That is also why the L1b gate read 1.000000 while this
+# was wrong: `esmfold2_msa_dump.py` imports MSAEncoder from modeling_esmfold2,
+# the RELEASED class, for all three msa-carrying variants -- so for the
+# experimental line it was comparing us against the wrong native module, and
+# agreeing with it.
+#
+# Invisible without a real alignment: the experimental encoder multiplies its
+# whole output by `msa_track_mask`, which is False when the MSA has no non-query
+# rows, so at depth 1 both orders return exactly zero.
+MSA_UPDATE_BEFORE_OPM = ('opendde', 'boltz2') + ESMFOLD2_EXPERIMENTAL
+
 # The Protenix family. Its model types differ from one another ONLY in counts
 # and widths (converters/protenix2.derive_dims reads both off the checkpoint), so
 # every FORWARD branch that protenix2 takes, the others take too. Keeping the

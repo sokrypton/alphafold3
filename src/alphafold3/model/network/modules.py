@@ -907,14 +907,17 @@ class EvoformerIteration(hk.Module):
     # OuterProductMean (opendde/model/modules/pairformer.py MSABlock.forward). AF3
     # runs the OPM on the pre-update MSA. Order matters and compounds over blocks;
     # gate on opendde so AF3/OF3/IF2 keep their original ordering byte-for-byte.
-    # Boltz-2's MSALayer uses the same update-then-OPM order (boltz2_msa_order gate,
-    # separate from opendde so it does NOT pull in the structural-token stage).
+    # Boltz-2's MSALayer uses the same update-then-OPM order, and so does
+    # ESMFold2's EXPERIMENTAL line (but not its released one, which is why
+    # model_config.MSA_UPDATE_BEFORE_OPM names the members instead of this
+    # branch carrying a tuple: an inline tuple is what let the experimental
+    # releases sit silently in the wrong branch).
     # protenix mini/tiny have no msa_stack at all -- OPM into the pair, and that
     # is the entire MSA contribution. Building _msa_update for them creates 12
     # parameters per block that the checkpoint cannot fill.
     if self.global_config.model in model_config.NO_MSA_ROW_UPDATE:
       pair_act += _opm()
-    elif self.global_config.model in ('opendde', 'boltz2'):
+    elif self.global_config.model in model_config.MSA_UPDATE_BEFORE_OPM:
       msa_act = _msa_update(msa_act)
       pair_act += _opm()
     else:

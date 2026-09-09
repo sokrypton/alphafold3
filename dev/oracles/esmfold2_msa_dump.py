@@ -29,11 +29,29 @@ import sys
 import numpy as np
 import torch
 
-from transformers.models.esmfold2.modeling_esmfold2 import MSAEncoder
+# ESMFold2 ships TWO MSAEncoders, one per line, and they are NOT the same
+# module: the released block runs the outer product FIRST and skips the msa
+# update in its last block, while the experimental block updates the msa first
+# and runs every block. Importing the released one for all three variants is
+# what made this gate read 1.000000 while `model_config.MSA_UPDATE_BEFORE_OPM`
+# had the experimental releases in the wrong branch -- it was comparing us
+# against the wrong native module and agreeing with it. `_encoder_class` picks
+# by variant.
+from transformers.models.esmfold2 import modeling_esmfold2 as _released
+from transformers.models.esmfold2 import modeling_esmfold2_experimental as _exp
 
 _HUB = {'esmfold2': 'ESMFold2',
         'esmfold2_exp': 'ESMFold2-Experimental',
         'esmfold2_exp_cutoff2025': 'ESMFold2-Experimental-Cutoff2025'}
+
+# Which module the release actually runs. Keyed on the same split
+# model_config.ESMFOLD2_EXPERIMENTAL uses.
+_EXPERIMENTAL = ('esmfold2_exp', 'esmfold2_exp_cutoff2025')
+
+
+def _encoder_class(model):
+  mod = _exp if model in _EXPERIMENTAL else _released
+  return mod.MSAEncoder, mod.MSAEncoderBlock, mod is _exp
 
 
 def _state_dict(model):
@@ -81,6 +99,11 @@ def main(argv=None):
         'opm hidden %d, %d heads x %d' % (n_layers, d_msa, msa_in, d_inputs,
                                           d_pair, d_hidden, n_heads, head_w))
 
+  MSAEncoder, MSAEncoderBlock, experimental = _encoder_class(args.model)
+  print('  native module: modeling_esmfold2%s (%s)'
+        % ('_experimental' if experimental else '',
+           'msa update BEFORE the outer product, every block'
+           if experimental else 'outer product first, last block skips it'))
   net = MSAEncoder(d_msa=d_msa, d_pair=d_pair, d_inputs=d_inputs,
                    d_hidden=d_hidden, n_layers=n_layers, n_heads_msa=n_heads,
                    msa_head_width=head_w)
@@ -101,7 +124,10 @@ def main(argv=None):
   if args.keep_final_update:
     if not has_final:
       raise SystemExit('%s has no final-block msa update to keep' % args.model)
-    from transformers.models.esmfold2.modeling_esmfold2 import MSAEncoderBlock
+    if experimental:
+      raise SystemExit('the experimental MSAEncoderBlock has no is_final_block: '
+                       'it runs the msa update in EVERY block already, so there '
+                       'is nothing for --keep_final_update to restore')
     net.blocks[n_layers - 1] = MSAEncoderBlock(
         d_msa=d_msa, d_pair=d_pair, d_hidden=d_hidden, n_heads_msa=n_heads,
         msa_head_width=head_w, is_final_block=False)
