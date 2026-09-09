@@ -46,7 +46,38 @@ the numbers are byte-identical centred or not.
 `L2.conditioning`/`L1.trunk` adapter either, so it is the single worst-covered
 model in the panel.
 
-# Category 1: the 22 non-esmfold2 holes, and what each needs
+# Category 1: the holes, from the AUTHORITATIVE run (2026-09-09-full)
+
+Module levels L0-L4, every model: **236 cells -- 116 OK, 79 N/A, 39 HOLE,
+2 FAIL** (holes were 66 before the day's converter/reference fixes).
+
+## Already addressed in code, awaiting a re-run (13 of the 39)
+
+| gate | models | what closed it |
+|---|---|---|
+| `L1.trunk_ref`, `L3.denoise_ref`, `L2.conditioning`, `L2.atom_encoder` | esmfold2_lm600m, esmfold2_lm300m | one guard: the reference map built a confidence head those structure-only releases do not have. 8 cells. |
+| `L2.conditioning` | openfold3, openbind0, intellifold2 | three new adapters |
+| `L2.conditioning` (FAIL, not SKIP) | boltz2, opendde | new adapters; both errors since fixed |
+| `L2.atom_decoder` | opendde | the decoder gate is no longer protenix-only |
+
+## Genuinely open (26)
+
+| gate | models | what it needs |
+|---|---|---|
+| `L2.atom_decoder` | esmfold2 x8 | a dump-based decoder reference; `native_esmfold2` reads inputs from an npz and the dump does not currently carry decoder I/O |
+| `L2.atom_decoder` | openfold3, openbind0 | a function, not a row: prefix is `diffusion_module.atom_attn_dec.` and the class is `sequence_local_atom_attention.AtomAttentionDecoder`, whose `__init__` wants c_atom, c_atom_pair, c_token, c_hidden, no_heads, no_blocks, n_transition, n_query, n_key, use_ada_layer_norm -- take them from of3's own config the way `denoise_parity.native_of3` does with its `_find` helper. `forward(batch, ai, ql, cl, plm)` needs a batch carrying `token_mask` and `num_atoms_per_token`. |
+| `L2.atom_decoder` | intellifold2 | prefix matches protenix's but the leaves are `linear_a` / `layer_norm_q` / `linear_q` against `linear_no_bias_a` |
+| `L2.atom_decoder` | rosettafold3, boltz2 | not yet looked at |
+| `L4.confidence` | esmfold2 x6 | no adapter; native lives in ~/venv_esm so it needs a dump |
+| `L4.confidence` | boltz2 | converter is done (66 -> 11); the rest is forward branches, recipe in `boltz2-confidence-port` |
+| `L2.atom_encoder` | boltz2, opendde | no adapter |
+| `L2.diffusion`, `L3.denoise` | boltz2, opendde | no adapter |
+| `L1.trunk` | rosettafold3 | no adapter |
+
+**boltz2 (7) and opendde (5) are still half the open work**, and both import
+cleanly beside jax.
+
+
 
 Generated from the adapter map (`NATIVES` in each gate module) crossed against
 the last full matrix. The esmfold2 holes are not listed: 44 of them, all
