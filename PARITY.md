@@ -2177,6 +2177,53 @@ esmfold2's 3) returns no new bugs:
     branch beside it is DEAD: `pair_bias_attn` is always constructed and no
     `no_pair_bias_attn` attribute is ever defined.
 
+## OPEN: six vendors CENTRE their reference conformers and we do not (2026-09-09)
+
+Found by following the boltz2 lead below, and it is not boltz2-specific. Our
+`ref_pos` is the CCD ideal conformer in whatever frame the CCD ships it; six of
+the natives subtract the per-conformer-group mean before the model ever sees it.
+
+| vendor | what it does to `ref_pos` | centres? |
+|---|---|---|
+| boltz2 | per `ref_space_uid` group, `centering=True`, random rotation (`featurizerv2.py:1494`) | **yes** |
+| openfold3 / openbind0 | per molecule, `centre_random_augmentation` -- `pos_centered = xl - mean_xl` unconditional, plus a random translation at `scale_trans=1.0` (`conformer.py:143`) | **yes** |
+| protenix1 / protenix2 | `random_transform(centralize=True)`, and the mean subtraction happens BEFORE the `apply_augmentation` early return, so it is unconditional (`utils/geometry.py:64`) | **yes** |
+| opendde | the same `random_transform` code | **yes** |
+| intellifold2 | `centering=False`, and applied GLOBALLY rather than per group | no |
+
+**Why it is not cosmetic.** `ref_pos` reaches a Linear RAW, as the first element
+of the atom feature concatenation (`encodersv2.py:319`, `atom_feats = [
+atom_ref_pos, ref_charge, ref_element, ...]`). It also reaches
+`embed_atompair_ref_pos` as a pairwise DIFFERENCE, which is translation
+invariant -- but the raw channel is not. Measured on our own boltz2 batch for
+1STP+BTN:
+
+    122 conformer groups, 0 of them centred to within 0.01 A
+    per-group |centroid|  mean 1.493 A   median 1.479   max 4.091
+    rms of the raw ref_pos values  1.554 A
+
+So the offset is the same size as the signal: roughly half of what we feed that
+Linear is a per-group translation the model never saw in training. OF3 adds a
+random ~1 A translation of its own, so it is trained to tolerate that much --
+ours is 1.5 A on average, 4 A at worst, and systematic rather than random.
+
+**Not fixed yet, deliberately.** The change is a per-group masked mean
+subtraction behind a `featurise_spec` knob, gated to those six models and NOT
+intellifold2 -- but it moves the atom features of six ports at once, including
+boltz2, which is currently the best performer in the panel (the 4-chain complex
+at 0.387 A, and BTN at 0.065 A beating native). That wants measuring before it
+is switched on, not after. The A/B is queued behind the matrix refresh.
+
+**A candidate mechanism for two things already on record**: the boltz2
+atom-encoder residual filed as "c=0.944 is the conformer, not a bug"
+([[boltz2-atom-encoder-gap]]), and possibly the openbind0 5K9P lead at 10.4 A
+against openfold3's 1.39.
+
+**And the near-miss worth keeping.** My first sweep for this dismissed
+openfold-3, because I grepped `center` and OF3 spells it `centre`. The pattern
+that found it was `centre_random\|center_random_augment\|centering=True`; one
+spelling would have closed the question wrongly on the largest affected family.
+
 ## The release-line sweep, as a tool, and what it found elsewhere (2026-09-09)
 
 `dev/oracles/release_line_sweep.py` is the ESMFold2 MSA bug generalised. Three
