@@ -306,7 +306,40 @@ RAW_REF_CHARGE = ('chai1', 'boltz2') + ESMFOLD2_FAMILY
 # gates the trunk's z-INIT (trunk_parity feeds the pairformer stack synthetic
 # s/z, so it never sees relpos at all), which is the missing measurement and
 # the next step; until it exists, the trunk keeps the convention that folds.
-CHAIN_BUCKET_ON_SAME_CHAIN = ESMFOLD2_FAMILY
+# boltz2 is DELIBERATELY ABSENT from the trunk list and present in the diffusion
+# one, and `dev/oracles/trunk_init_parity.py` is what makes that a decision
+# rather than an oversight. That gate compares our trunk z-init against boltz2's
+# own five terms assembled from its own checkpoint, and it says the same-chain
+# convention is RIGHT:
+#
+#   same-chain    z_init corr 1.000000, max|d|/rms 2.77e-06
+#   same-entity   z_init corr 0.954268, max|d|/rms 6.49e-01 -- and the per-pair
+#                 max|d| is IDENTICAL for all 68x68 pairs (median = p90 = max =
+#                 2.23553), i.e. exactly one constant vector on every pair,
+#                 which is what a single wrong one-hot column looks like.
+#
+# The FOLD disagrees, and only when recycling:
+#
+#   recycles  0   mean 0.536 (entity) vs 0.570 (chain) -- neutral, no outliers
+#   recycles  3   mean 0.519 vs 0.666, with 2 of 15 samples at ~1.5
+#   recycles 10   mean 0.539 vs 0.775, with 3 of 15 at ~1.5
+#
+# So a bit-exact z-init makes the fold bimodal through the recycle loop. Ruled
+# out on the way: the recycle LayerNorm's OFFSET is mapped (boltz's z_norm has
+# one, so its first pass adds z_recycle(offset) to a zero carry, and ours does
+# too), the recycle projection is mapped, and the MSA double-add is in the right
+# place (boltz's MSAModule returns the updated z and its caller adds z again, so
+# `msa_stack_out + z_pre` IS `z + msa_module(z)`). z_init's five terms are all
+# present, including the two AF3 has no equivalent for.
+#
+# What is left un-gated inside that loop is the template embedder (inert on
+# 6MRR, which has no template) and the composition of the loop itself. Until
+# one of those is measured, the trunk keeps the convention that folds and
+# AF3_BOLTZ2_TRUNK_SAME_CHAIN opts into the certified one.
+CHAIN_BUCKET_ON_SAME_CHAIN = (
+    (('boltz2',)
+     if __import__('os').environ.get('AF3_BOLTZ2_TRUNK_SAME_CHAIN') else ())
+    + ESMFOLD2_FAMILY)
 CHAIN_BUCKET_ON_SAME_CHAIN_DIFFUSION = ('boltz2',) + CHAIN_BUCKET_ON_SAME_CHAIN
 
 

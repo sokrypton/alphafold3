@@ -71,6 +71,25 @@ the numbers are byte-identical centred or not.
 `L2.conditioning`/`L1.trunk` adapter either, so it is the single worst-covered
 model in the panel.
 
+
+# The trunk z-INIT had no gate at all, and now it does
+
+`dev/oracles/trunk_init_parity.py` (L1i). `trunk_parity` feeds the pairformer
+SYNTHETIC s and z -- the right way to gate 48 blocks of arithmetic, and it means
+nothing ever measured the tensor those blocks start from: the relative position
+encoding, the bond embeddings, and for boltz2 two terms AF3 has no equivalent
+for. `conditioning_parity` gates the DIFFUSION conditioner's copy of the
+relative encoding, not the trunk's.
+
+boltz2 is the model that proved the gap was real, and it now reads
+**corr 1.000000, max|d|/rms 2.77e-06** with its own convention -- against
+0.954268 / 6.49e-01 with AF3's, where the per-pair max|d| is IDENTICAL on all
+4624 pairs, one constant vector everywhere.
+
+Only boltz2 has an adapter. The other twelve are one function each and the
+recipe is the same: assemble the vendor's own z-init terms from its own
+checkpoint and feed them OUR features.
+
 # Category 1: the holes, from the AUTHORITATIVE run (2026-09-09-full)
 
 Module levels L0-L4, every model: **236 cells -- 116 OK, 79 N/A, 39 HOLE,

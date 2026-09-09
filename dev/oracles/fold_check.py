@@ -118,6 +118,14 @@ def _fold_setup(model_name, seq, model_dir=None, templates=None, seed=0,
   # 2026-09-09) folded 1STP at 14.4 A on a
   # 2145-row MSA and 0.476 A on none, so the response to depth is the
   # measurement that localises it.
+  if os.environ.get('RECYCLES'):
+    # Every module gate runs ONE trunk pass. A fold recycles (10 by default), so
+    # a difference that a gate calls exact can still be re-injected through
+    # `z = z_init + z_recycle(z_norm(z))` on every pass -- which is exactly the
+    # boltz2 relative-CHAIN question: the trunk z-init is exact against the
+    # vendor with one convention and the FOLD prefers the other. Being able to
+    # fold at zero recycles is what separates those.
+    cfg.num_recycles = int(os.environ['RECYCLES'])
   if os.environ.get('NUM_MSA'):
     cfg.evoformer.num_msa = int(os.environ['NUM_MSA'])
   if os.environ.get('STEPS'):
