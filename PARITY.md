@@ -2151,9 +2151,31 @@ deliberately NOT a member. After:
 **And this one defeats the sweep in section 3.** `OuterProductMean` lives in the
 SHARED `modeling_esmfold2_common.py`: the two release lines do not differ by
 class here, they differ by the ARGUMENT each block passes when instantiating it.
-Enumerating duplicated class NAMES cannot find that. The sweep has to be:
-duplicated classes, AND every constructor argument a shared class is
-instantiated with differently.
+Enumerating duplicated class NAMES cannot find that.
+
+So the sweep is TWO passes, and I closed it after one:
+
+  1. list `^class` per file, intersect the names, diff the intersection;
+  2. for every class defined in the SHARED file, collect every keyword argument
+     each release file passes when constructing it, and diff those sets.
+
+Pass 2 on esmfold2 returns exactly two entries, both now accounted for:
+`divide_outer_before_proj=True` (this bug) and `FoldingTrunk n_layers` twice on
+the released side, for the `lm_encoder` and parcae `coda` stacks the
+experimental line does not have (`lm_enc` 0, `coda` 0, already gated).
+
+Pass 2 on **boltz** (v1 vs v2, where 26 class names are duplicated against
+esmfold2's 3) returns no new bugs:
+
+  * `post_layer_norm` threaded into `AtomTransformer` and
+    `AtomAttentionEncoder` -- `nn.Identity` in practice, and the coverage audit
+    is the evidence rather than the default value: an affine LayerNorm carries
+    weight and bias, so clean-in-both-directions means the checkpoint has no
+    such tensors.
+  * `AttentionPairBias(compute_pair_bias=False)`, which is our port's
+    precomputed per-block `*_proj_z` bias by design. The `no_pair_bias_attn`
+    branch beside it is DEAD: `pair_bias_attn` is always constructed and no
+    `no_pair_bias_attn` attribute is ever defined.
 
 ## chai1's first in-repo module gate: L4 by injection (2026-09-09)
 
