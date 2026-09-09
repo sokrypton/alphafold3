@@ -1,5 +1,30 @@
 # STATE OF PLAY -- 2026-09-09 (overnight session)
 
+## IN FLIGHT at the time of writing -- where to look
+
+Two jobs are running, and their logs are in a SESSION SCRATCHPAD, which is
+exactly the trap [[harness-rot]] describes. Paths, markers and what each answers:
+
+  * `/tmp/claude-1000/-home-ubuntu-ColabDesign2/<session>/scratchpad/lm600.log`
+    -- marker `LM600DONE`. Three seeds of `esmfold2_lm600m` on 6MRR, with and
+    without `AF3_NO_ESM_REF_POS` + `AF3_NO_ESM_DROP_OXT`, answering whether the
+    ref_pos table and the OXT drop cost anything on the lm tier (they were
+    validated fold-neutral on `esmfold2` and the dropped `esmfold2_exp`, never
+    here). Seed 0: WITH 1.113 best / 1.486 mean, WITHOUT 0.834 / 1.423. The
+    comparison IS paired -- the dense atom layout is `num_tokens * max_atoms`
+    and dropping OXT masks a slot rather than resizing it, so both arms draw
+    identical noise.
+  * `.../scratchpad/final.log` -- marker `FINALDONE`. Queued behind it: the
+    authoritative pass over the purged 14-model project, `FORCE=1`, into
+    `dev/oracles/parity_runs/2026-09-09-final/`, then
+    `dev/oracles/diagnose_bad_cells.sh`.
+
+If those logs are gone, the matrix is re-runnable from the repo:
+`FORCE=1 LOGDIR=... bash dev/oracles/run_all_parity.sh L0 L1 L1b L1t L1d L2 L3 L4`
+then `... L5 L6`. Read the result with BOTH tools -- `gate_applies.py` for
+holes and `parity_audit.py` for whether the OK cells agree.
+
+
 Two tools now measure parity, because the driver could not:
 
   * `dev/oracles/gate_applies.py` -- is a SKIP a hole, or does the model simply
