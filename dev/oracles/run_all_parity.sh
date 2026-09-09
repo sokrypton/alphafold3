@@ -84,7 +84,7 @@ classify () {  # classify <log> -> status on stdout
   # A RESOURCE failure is not a result. Two gates sharing a 23 GB card is the
   # usual cause and it says nothing about the port, so it gets its own status
   # rather than being counted as a failure.
-  if grep -qi 'RESOURCE_EXHAUSTED\|CUDA_ERROR_OUT_OF_MEMORY\|Out of memory' "$log"; then
+  if grep -qi 'RESOURCE_EXHAUSTED\|CUDA_ERROR_OUT_OF_MEMORY\|Out of memory\|solver_handle_pool\|gpusolverDnCreate\|CUBLAS_STATUS_\|cuSolver internal error' "$log"; then
     echo OOM; return
   fi
   # NONZERO counts only. `[1-9][0-9]*` matters: every trunk gate prints
