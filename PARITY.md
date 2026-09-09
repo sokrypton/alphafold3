@@ -1380,6 +1380,47 @@ Two calibration notes for reading any of this:
     spread between models -- `protenix2` runs 0.691 to 1.641 -- so `best` and
     `mean` are both given and neither alone should be quoted.
 
+## L6 for all 18 models, in one driver run (2026-09-08)
+
+126 cells, every one measured. `best` per case; the ligand column is BTN's
+in-frame RMSD after aligning on the protein, the nucleic columns C1', the rest
+CA.
+
+| model | complex_1lmb | dna_1lmb | ligand_1stp | plain_5k9p | 6mrr | ptm_5k9p | rna_1ehz |
+|---|---|---|---|---|---|---|---|
+| `alphafold3` | 17.704 | 2.022 | 0.450 | 1.527 | 0.628 | 1.623 | 1.409 |
+| `boltz2` | **0.387** | 1.534 | 0.458 | 1.714 | **0.423** | 1.815 | 1.197 |
+| `chai1` | **0.509** | 1.863 | 0.535 | 1.526 | 1.723 | 1.804 | 1.506 |
+| `intellifold2` | 12.155 | 1.585 | **0.441** | 1.669 | 1.512 | 1.554 | 1.469 |
+| `openbind0` | 16.711 | 2.206 | **0.426** | 10.388 | 1.650 | 11.542 | 1.497 |
+| `opendde` | 17.855 | 1.987 | 0.876 | 1.794 | 0.769 | 1.811 | 1.326 |
+| `openfold3` | 12.697 | 1.916 | 0.456 | 1.388 | 1.540 | 1.499 | 1.331 |
+| `protenix1` | 10.332 | 1.695 | 0.936 | 10.983 | 1.696 | 2.085 | 1.801 |
+| `protenix2` | 17.446 | 2.080 | 1.199 | 7.458 | 0.685 | 7.921 | 1.759 |
+| `rosettafold3` | 1.410 | 2.443 | 0.451 | 1.574 | 0.942 | 1.805 | **1.047** |
+
+(the eight esmfold2 rows are being re-measured after the atom-decoder fix; the
+pre-fix set is in the driver's own summary.tsv)
+
+Four things this says that no single-model run could:
+
+  * **the 4-chain complex is where the ports diverge most.** `boltz2` 0.387,
+    `chai1` 0.509 and `rosettafold3` 1.410 get it; everything else lands at
+    10-25 A, `alphafold3` itself included at 17.7. Scored in ONE frame, so a
+    correct-but-misplaced chain fails -- which is the point of scoring it that
+    way, and why the per-chain numbers in the older table read fine.
+  * **three models fail on ubiquitin and their families do not.** `openbind0`
+    10.388 against `openfold3`'s 1.388 on the same architecture, and
+    `protenix1` 10.983 / `protenix2` 7.458. The PTM column tracks the plain one
+    in every case, so it is the target and not the modification --
+    [[protenix2-5k9p-retraction]] already covers protenix2's; openbind0's is
+    open.
+  * **ligands are uniformly good** -- eight of ten under 0.94, four under 0.46 --
+    which is the strongest cross-model row here.
+  * **RNA is uniformly good for the AF3 family** (1.05-1.80) and hopeless for
+    esmfold2 (16-26 A), which is a competence limit rather than a port fault;
+    see below.
+
 ## ESMFold2 is NOT protein-only, and this document said it was (2026-09-08)
 
 Both tables here read `n/a -- protein only` for the esmfold2 family at L6. That
