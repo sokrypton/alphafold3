@@ -286,7 +286,14 @@ def map_trunk(sd, dims=None):
   p.update(nest('lm_encoder', pair_only_stack(sd, 'lm_encoder', dims['n_lm_encoder'])))
   p.update(nest('folding_trunk', pair_only_stack(sd, 'folding_trunk', dims['n_trunk'])))
   p.update(nest('parcae_coda', pair_only_stack(sd, 'parcae_coda', dims['n_coda'])))
-  p.update(nest('msa_encoder', msa_encoder(sd, dims)))
+  # ESMFold2-Fast and the experimental *_fast releases set
+  # `msa_encoder.enabled` false and ship NO msa weights (msa=0 in
+  # model_registry.ESMFOLD2_VARIANTS), so this has to be conditional -- calling
+  # it anyway raises KeyError('msa_encoder.embed.weight') and made the reference
+  # tree unbuildable for four of the eight releases. The GRAPH mapper already
+  # handled it; this is the reference-tree mapper the oracles use.
+  if dims.get('n_msa'):
+    p.update(nest('msa_encoder', msa_encoder(sd, dims)))
   return p
 
 

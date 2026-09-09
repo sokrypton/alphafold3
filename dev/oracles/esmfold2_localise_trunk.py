@@ -21,8 +21,12 @@ from converters import esmfold2 as CV
 import esmfold2_reference as R
 
 seq,_ = parse_ca(os.path.expanduser('~/6MRR.pdb'))
-d = os.path.expanduser('~/ported/esmfold2')
-spec = model_registry.get('esmfold2')
+# MODEL selects the release on BOTH sides. It used to pick the reference's
+# weights while the graph always loaded ~/ported/esmfold2, so every variant but
+# the base one compared two different models -- esmfold2_fast read corr 0.069
+# with the graph's std identical to the base model's, which is the tell.
+d = os.path.expanduser('~/ported/%s' % MODEL)
+spec = model_registry.get(MODEL)
 fi = folding_input.Input(name='x', chains=[folding_input.ProteinChain(
     id='A', sequence=seq, ptms=[], unpaired_msa='', paired_msa='', templates=[])], rng_seeds=[0])
 ccd = decoded_ccd.get_ccd()
@@ -89,7 +93,11 @@ sd=_sd_of(MODEL); dims=CV.derive_dims(sd); dims['n_input_atom']=3
 dd=_native_of(MODEL)
 f={k[5:]: jnp.asarray(v[0]) for k,v in dd.items() if k.startswith('feat.')}
 pref={k: jnp.asarray(v) for k,v in CV.map_esmfold2_to_af3(sd).items()}
-msa=R.self_msa(f)
+# A release with `msa_encoder.enabled` false (every *_fast row: msa=0 in
+# model_registry.ESMFOLD2_VARIANTS) has no MSA weights at all, so building a
+# self-MSA asks the reference for `msa_encoder.embed.weight` and dies. None is
+# the correct input there, not an empty MSA.
+msa = R.self_msa(f) if dims.get('n_msa') else None
 z,_,_ = R.trunk(f, lm_hidden, pref, dims, n_loops=3, key=jax.random.PRNGKey(0),
                 lm_dropout=0.0, msa=msa)
 zr = np.asarray(z)

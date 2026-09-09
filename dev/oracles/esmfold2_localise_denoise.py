@@ -30,8 +30,12 @@ import esmfold2_reference as R
 
 T_HAT = 8.0
 seq, _ = parse_ca(os.path.expanduser('~/6MRR.pdb'))
-d = os.path.expanduser('~/ported/esmfold2')
-spec = model_registry.get('esmfold2')
+# MODEL selects the release on BOTH sides. It used to pick the reference's
+# weights while the graph always loaded ~/ported/esmfold2, so every variant but
+# the base one compared two different models -- esmfold2_fast read corr 0.069
+# with the graph's std identical to the base model's, which is the tell.
+d = os.path.expanduser('~/ported/%s' % MODEL)
+spec = model_registry.get(MODEL)
 fi = folding_input.Input(name='x', chains=[folding_input.ProteinChain(
     id='A', sequence=seq, ptms=[], unpaired_msa='', paired_msa='', templates=[])], rng_seeds=[0])
 ccd = decoded_ccd.get_ccd()
@@ -85,7 +89,10 @@ if _CHUNKS:
         % (ZERO_ATOM, _CHUNKS))
 
 zr, s_in, _ = R.trunk(f, None, pref, dims, n_loops=3, key=jax.random.PRNGKey(0),
-                      lm_dropout=0.0, msa=R.self_msa(f))
+                      lm_dropout=0.0,
+                      # see the note in esmfold2_localise_trunk.py: a *_fast
+                      # release has no msa_encoder to build one with
+                      msa=R.self_msa(f) if dims.get('n_msa') else None)
 rp = jnp.asarray(R.rel_pos_features(
     f['residue_index'].astype(int), f['asym_id'].astype(int), f['sym_id'].astype(int),
     f['entity_id'].astype(int), f['token_index'].astype(int))) @ pref['rel_pos/weights']
