@@ -344,6 +344,27 @@ CLAMPED_OPM_NORM = ESMFOLD2_FAMILY
 # single-sequence 6MRR fold was exact throughout while its MSA module was not.
 OPM_ROW_COUNT_NORM = ('boltz2',)
 
+# Models that subtract each conformer group's OWN mean from `ref_pos` before the
+# model sees it. Ours is the CCD ideal in whatever frame the CCD ships, and the
+# offset is the size of the signal: on 1STP+BTN our 122 groups are off-centre by
+# 1.493 A on average and 4.091 A at worst, against a raw-value rms of 1.554 A.
+#
+# It reaches a Linear RAW (the first element of the atom feature concatenation),
+# as well as through a translation-INVARIANT pairwise difference -- so only the
+# raw channel is affected, and it is affected fully.
+#
+#   boltz2                  featurizerv2.py:1494, centering=True, per ref_space_uid
+#   openfold3 / openbind0   conformer.py:143 -> centre_random_augmentation,
+#                           whose `pos_centered = xl - mean_xl` is unconditional
+#   protenix* / opendde     random_transform(centralize=True), where the mean
+#                           subtraction PRECEDES the apply_augmentation early return
+#
+# intellifold2 is deliberately absent: it passes `centering=False` and applies
+# the rotation GLOBALLY rather than per group, so uncentred CCD ideals are what
+# it expects. alphafold3 is absent because it is the reference implementation.
+CENTRE_REF_CONFORMERS = ('boltz2', 'openfold3', 'openbind0',
+                         'opendde') + PROTENIX_FAMILY
+
 # The minimum blob CONVENTION this library will read, per model. See
 # converters/common.BLOB_CONVENTION for what a convention is and what version 1
 # means; an absent `__meta__/__convention__` record counts as 0, which is every

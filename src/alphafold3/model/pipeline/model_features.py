@@ -368,6 +368,33 @@ def _attach_lm_pair(batch, lm_pair):
   return batch
 
 
+def _centre_conformers(batch):
+  """Subtract each conformer group's own mean from ref_pos -- see
+  model_config.CENTRE_REF_CONFORMERS for who does this and why it matters.
+
+  Grouped by `ref_space_uid`, which is the grouping those natives use, and
+  MASKED: an unmasked mean would drag the centre toward padding atoms. Padding
+  keeps zero afterwards, because the mask is what every consumer reads and a
+  nonzero coordinate there would put real numbers where the graph expects none.
+  """
+  pos = np.array(batch['ref_pos'], dtype=np.float32)
+  mask = np.asarray(batch['ref_mask']) > 0
+  uid = np.asarray(batch['ref_space_uid'])
+  flat = pos.reshape(-1, 3)
+  fm = mask.reshape(-1)
+  fu = uid.reshape(-1).astype(np.int64)
+  if not fu.size:
+    return
+  n = int(fu.max()) + 1
+  w = fm.astype(np.float32)
+  count = np.bincount(fu, weights=w, minlength=n)
+  centre = np.stack(
+      [np.bincount(fu, weights=w * flat[:, k], minlength=n) for k in range(3)],
+      axis=-1) / np.maximum(count, 1.0)[:, None]
+  flat = (flat - centre[fu]) * w[:, None]
+  batch['ref_pos'] = flat.reshape(pos.shape)
+
+
 def apply(batch, spec, *, refeaturise=None, model_dir=None, esm=None,
           has_msa=True, fold_input=None, cyclic=None, lm_pair=None):
   """Apply `spec`'s featurisation conventions to a featurised batch, in place.
@@ -390,6 +417,15 @@ def apply(batch, spec, *, refeaturise=None, model_dir=None, esm=None,
   knobs = spec.featurise
   if cyclic:
     cyclic_period(batch, cyclic, fold_input=fold_input)
+  # BEFORE the early return: openfold3 has no featurise entry at all, so a
+  # knob in spec.featurise would silently skip the largest affected family.
+  # Imported locally, as this file's other cross-package imports are, rather
+  # than at module scope where it would be the only one.
+  import os
+  from alphafold3.model import model_config as _mc
+  if (spec.name in _mc.CENTRE_REF_CONFORMERS
+      and not os.environ.get('AF3_NO_CENTRE_CONFORMERS')):
+    _centre_conformers(batch)
   if not knobs:
     return batch
 

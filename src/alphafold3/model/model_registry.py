@@ -509,8 +509,17 @@ _FEATURISE = {
     # substituting it is what takes the family's L2.atom_encoder from
     # a_token corr 0.9998 with max|d|/rms ~0.5 to parity, and the fold effect
     # has to be measured rather than assumed.
+    # ...and no terminal OXT: ESMFold2 builds its atom list from
+    # PROTEIN_REF_POS's keys, which carry no such atom for any residue, so AF3's
+    # extra terminal oxygen is an atom native has never seen. Not harmless --
+    # the atom window is +/-64 by RANK, so one spurious atom at the END of the
+    # list corrupts the last ~64 atoms' attention, which is what the atom gate's
+    # DIAG showed: max|d| 0.0000 at the median, rising only over the final seven
+    # tokens. AF3_NO_ESM_DROP_OXT keeps it, for the A/B.
     **{m: dict(atom_keys_subset_size=192, lm_pair=True,
-               esmfold2_ref_pos=not os.environ.get('AF3_NO_ESM_REF_POS'))
+               esmfold2_ref_pos=not os.environ.get('AF3_NO_ESM_REF_POS'),
+               **({} if os.environ.get('AF3_NO_ESM_DROP_OXT')
+                  else dict(drop_atoms=('OXT',))))
        for m in model_config.ESMFOLD2_FAMILY},
     # boltz2 keeps a modified residue as ONE token holding all its atoms
     # (data/tokenize/boltz2.py: standard -> per residue, NONPOLYMER -> per atom,
