@@ -12,6 +12,23 @@ exactly the trap [[harness-rot]] describes. Path, marker and what it answers:
     `dev/oracles/parity_runs/2026-09-09-final/`, then
     `dev/oracles/diagnose_bad_cells.sh`.
 
+## Eleven module adapters are DRAFTED but not yet applied
+
+They live in the session scratchpad next to `final.log`, with
+`PATCH_ORDER.md` naming the order and `after_matrix.sh` running the whole
+sequence (apply, exercise every newly enabled cell, re-run L0, regenerate the
+four ESMFold2 dumps, then audit). Every NATIVE half was verified on CPU first
+-- each vendor module built from its own config, loaded from its own
+checkpoint, asserted to have nothing missing -- so what is unverified is only
+the comparison, never the reference.
+
+They close: `L2.atom_decoder` for openfold3, openbind0, intellifold2, opendde,
+boltz2 and rosettafold3; `L2.atom_encoder` for opendde and boltz2;
+`L2.diffusion` for opendde and boltz2; `L3.denoise` for opendde and boltz2;
+`L1.trunk` for rosettafold3. If the scratchpad is gone, `HOLES.md` carries the
+recipe for each -- the checkpoint prefix, the widths, and the convention that
+had to be derived rather than inherited.
+
 If those logs are gone, the matrix is re-runnable from the repo:
 `FORCE=1 LOGDIR=... bash dev/oracles/run_all_parity.sh L0 L1 L1b L1t L1d L2 L3 L4`
 then `... L5 L6`. Read the result with BOTH tools -- `gate_applies.py` for
