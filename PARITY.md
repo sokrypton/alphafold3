@@ -2177,6 +2177,61 @@ esmfold2's 3) returns no new bugs:
     branch beside it is DEAD: `pair_bias_attn` is always constructed and no
     `no_pair_bias_attn` attribute is ever defined.
 
+## The release-line sweep, as a tool, and what it found elsewhere (2026-09-09)
+
+`dev/oracles/release_line_sweep.py` is the ESMFold2 MSA bug generalised. Three
+passes, because each of the first two missed something:
+
+  1. **duplicated class names.** Two files, same class, different code
+     (`MSAEncoder`; boltz's `x.py` / `xv2.py`).
+  2. **constructor FLAGS.** ESMFold2's `OuterProductMean` is in the file BOTH
+     lines import, so it is not duplicated at all -- the lines differ by the
+     argument each block passes. Pass 1 is blind to that, and it was the fourth
+     bug.
+  3. **module-level FUNCTIONS defined in both files.** boltz ships its
+     featuriser and tokeniser as functions, so passes 1 and 2 report NOTHING
+     for `featurizer.py` vs `featurizerv2.py` -- and featurisation is where a
+     good share of this project's bugs have lived.
+
+Dimension-shaped argument names are filtered out: a width mismatch fails loudly
+in `load_state_dict` or in the converter's shape check, which is exactly what a
+behaviour flag does not do.
+
+**Only boltz and ESMFold2 ship release lines as separate files.** protenix,
+openfold-3, IntelliFold, OpenDDE and foundry_rf3 have no such pair anywhere in
+their trees, so this class of bug cannot exist for them. That is five ports
+closed by a screen that takes seconds, and it is the useful half of the result.
+
+For boltz the sweep reproduces the audit done by hand -- `post_layer_norm`
+(`nn.Identity`, and the coverage audit is the evidence: 5102 tensors, 0
+unaccounted for, so no such weights exist), `AttentionPairBias`
+(`compute_pair_bias=False` is our precomputed per-block `*_proj_z` bias, and the
+`no_pair_bias_attn` branch beside it is dead code) -- and adds two pairs nobody
+had looked at.
+
+### OPEN LEAD: boltz2 centres its reference conformers and we do not
+
+`featurizerv2.py:1494` applies a random roto-translation to `ref_pos` per
+`ref_space_uid` group with **`centering=True`**; v1 used `False`. Centering is
+deterministic and matchable even though the rotation is not, and our boltz2 path
+takes AF3's CCD ideal coordinates with no per-group centering at all (the
+centering that IS in `model_features.py` is chai1's `std_conformers` path).
+
+CCD ideal coordinates sit in an arbitrary frame, so this is a real per-group
+translation difference on a feature that reaches a Linear. It is a candidate
+mechanism for the residual already on record as "c=0.944 is the conformer, not
+a bug" ([[boltz2-atom-encoder-gap]]) -- **candidate, not shown**: confirming it
+needs the boltz2 atom-encoder gate, and a translation may yet wash out if v2
+consumes `ref_pos` only through distances. The pass-1 diff says v2's
+`AtomAttentionEncoder` dropped `embed_atompair_ref_pos` and
+`embed_atompair_ref_dist`, so where `ref_pos` enters v2 is the thing to read
+first.
+
+Also unexamined from pass 2/3, and all plausibly training-only: `TokenData`'s
+v2 `frame_rot`/`frame_t`/`modified`/`affinity_mask`, `Tokenized`'s
+`template_bonds`/`extra_mols`, and `process_token_features`'
+`override_method` / `contact_conditioned_prop`.
+
 ## chai1's first in-repo module gate: L4 by injection (2026-09-09)
 
 chai1 had L0, L5 and L6 and nothing in between -- every module cell a SKIP,
