@@ -136,6 +136,77 @@ def native_protenix(model, n, mask, blocks=None):
   return s, z, s_ref[0].numpy(), z_ref[0].numpy(), n_blocks
 
 
+def native_if2(model, n, mask, blocks=None):
+  """-> (s, z, s_ref, z_ref, n_blocks) from IntelliFold-2's own PairformerStack.
+
+  if2's trunk is the WIDENED tree, and every width here is read off the
+  checkpoint for that reason: c_z is 512 (not AF3's 128), the triangle
+  multiplication is 512 wide, and the pair attention runs 8 heads of 64 against
+  the single track's 16. Hardcoding AF3's numbers fails in load_state_dict --
+  the good outcome -- but the same trap already cost this repo a session on if2's
+  TEMPLATE stack, so the derivation is spelled out rather than assumed:
+
+      c_s               attention_pair_bias.layer_norm          (384,)
+      c_z               attention_pair_bias.layer_norm_z        (512,)
+      no_heads_single   attention_pair_bias.linear_z            (16, 512)
+      no_heads_pair     pair_stack.tri_att_start.linear         (8, 512)
+      c_hidden_pair_att mha.linear_q // no_heads_pair           512/8 = 64
+      c_hidden_mul      tri_mul_out.linear_ab_p // 2            1024/2 = 512
+  """
+  import torch
+
+  from intellifold.openfold.model.pairformer import PairformerStack
+
+  ckpt = os.path.expanduser('~/model_v2/intellifold_v2.pt')
+  raw = torch.load(ckpt, map_location='cpu', weights_only=False)
+  raw = raw.get('model', raw.get('state_dict', raw))
+  pre = 'backbone_trunk.pairformer.'
+  sub = {k[len(pre):]: v for k, v in raw.items() if k.startswith(pre)}
+  if not sub:
+    raise SystemExit('no %r keys in %s' % (pre, ckpt))
+
+  n_blocks = 1 + max(int(k.split('.')[1])
+                     for k in sub if k.startswith('blocks.'))
+  b0 = 'blocks.0.'
+  c_s = sub[b0 + 'attention_pair_bias.layer_norm.weight'].shape[0]
+  c_z = sub[b0 + 'attention_pair_bias.layer_norm_z.weight'].shape[0]
+  nh_single = sub[b0 + 'attention_pair_bias.linear_z.weight'].shape[0]
+  nh_pair = sub[b0 + 'pair_stack.tri_att_start.linear.weight'].shape[0]
+  c_pair_att = sub[b0 + 'pair_stack.tri_att_start.mha.linear_q.weight'].shape[0] // nh_pair
+  c_mul = sub[b0 + 'pair_stack.tri_mul_out.linear_ab_p.weight'].shape[0] // 2
+  # the transition's expansion, off the single track's SwiGLU: linear is
+  # (2 * n * c_s, c_s), so n = shape[0] // (2 * c_s)
+  trans_n = sub[b0 + 'single_transition.linear.weight'].shape[0] // (2 * c_s)
+  print('  checkpoint: %d blocks, c_s %d, c_z %d, %d single heads, '
+        '%d pair heads x %d, c_hidden_mul %d, transition_n %d'
+        % (n_blocks, c_s, c_z, nh_single, nh_pair, c_pair_att, c_mul, trans_n))
+
+  rng = np.random.default_rng(0)
+  s = (rng.normal(size=(n, c_s)) * 0.5).astype(np.float32)
+  z = (rng.normal(size=(n, n, c_z)) * 0.5).astype(np.float32)
+
+  net = PairformerStack(c_s=c_s, c_z=c_z, c_hidden_mul=c_mul,
+                        c_hidden_pair_att=c_pair_att, no_heads_pair=nh_pair,
+                        no_heads_single=nh_single, no_blocks=n_blocks,
+                        transition_n=trans_n, pair_dropout=0.0, inf=1e9,
+                        eps=1e-8)
+  missing, unexpected = net.load_state_dict(sub, strict=False)
+  print('  native: %d tensors, %d missing, %d unexpected %s'
+        % (len(sub), len(missing), len(unexpected), list(missing)[:2]))
+  assert not missing, 'native is missing %d tensors' % len(missing)
+  # TRUNCATE THE NATIVE STACK TOO -- see native_protenix.
+  if blocks is not None and blocks < n_blocks:
+    net.blocks = net.blocks[:blocks]
+    n_blocks = blocks
+  net.eval()
+  with torch.no_grad():
+    out = net(torch.tensor(s)[None], torch.tensor(z)[None],
+              torch.tensor(mask.max(-1))[None].float(),
+              torch.tensor(mask)[None], chunk_size=None)
+  s_ref, z_ref = out[0], out[1]
+  return s, z, s_ref[0].numpy(), z_ref[0].numpy(), n_blocks
+
+
 def native_boltz2(model, n, mask, blocks=None):
   """-> (s, z, s_ref, z_ref, n_blocks) from Boltz-2's own PairformerModule.
 
@@ -329,6 +400,7 @@ NATIVES = {m: native_protenix for m in _PROTENIX_CKPT}
 NATIVES.update({m: native_of3 for m in _OF3_CKPT})
 NATIVES['opendde'] = native_opendde
 NATIVES['boltz2'] = native_boltz2
+NATIVES['intellifold2'] = native_if2
 
 
 def ours(model, s, z, mask, n_blocks, model_dir=None):
