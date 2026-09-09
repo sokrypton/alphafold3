@@ -648,10 +648,256 @@ def native_esmfold2(model, fb, feats, pos_noisy, s, z, n_tok):
   return (np.asarray(a), sel(q), sel(c0), None, None)
 
 
+_BOLTZ2_CKPT = '~/boltz2_weights/boltz2_conf.ckpt'
+
+
+def _boltz2_modules(need_decoder=False):
+  """-> the vendor's atom modules, loaded, plus the widths they were built from.
+
+  Every width and depth is read off the checkpoint. Verified on CPU before the
+  gate was wired: `AtomEncoder` 16 tensors, `AtomAttentionEncoder` 71,
+  `AtomAttentionDecoder` 73, both bias stacks 9, and all five load with nothing
+  missing and nothing unexpected.
+
+  boltz2 splits AF3's atom encoder in two, and the split is the reason this is
+  one helper rather than two adapters: `diffusion_conditioning.atom_encoder`
+  (an `AtomEncoder`) builds q / c / p from the reference features, and
+  `structure_module.score_model.atom_attention_encoder` (an
+  `AtomAttentionEncoder`) runs the stack. The per-block pair BIAS is a third
+  thing again -- `diffusion_conditioning.atom_enc_proj_z`, a ModuleList of
+  (LayerNorm, Linear -> heads) applied to p and concatenated -- where AF3
+  projects the pair inside the stack. Our graph fuses all three, so the gate
+  has to assemble them here.
+  """
+  import numpy as _np
+  import torch
+  import torch.nn as nn
+
+  from boltz.model.modules.encodersv2 import (AtomAttentionDecoder,
+                                              AtomAttentionEncoder,
+                                              AtomEncoder)
+
+  ckpt = os.path.expanduser(_BOLTZ2_CKPT)
+  raw = torch.load(ckpt, map_location='cpu', weights_only=False)
+  sd = raw.get('state_dict', raw.get('model', raw))
+  take = lambda pre: {k[len(pre):]: v for k, v in sd.items()
+                      if k.startswith(pre)}
+  enc_pre = 'diffusion_conditioning.atom_encoder.'
+  aae_pre = 'structure_module.score_model.atom_attention_encoder.'
+  aad_pre = 'structure_module.score_model.atom_attention_decoder.'
+  bias_pre = 'diffusion_conditioning.atom_enc_proj_z.'
+  dbias_pre = 'diffusion_conditioning.atom_dec_proj_z.'
+  e, a, d = take(enc_pre), take(aae_pre), take(aad_pre)
+  if not e:
+    raise SystemExit('no %r keys in %s' % (enc_pre, ckpt))
+
+  atom_s, feat_dim = e['embed_atom_features.weight'].shape
+  atom_z = e['embed_atompair_ref_pos.weight'].shape[0]
+  token_s = e['s_to_c_trans.0.weight'].shape[0]
+  token_z = e['z_to_p_trans.0.weight'].shape[0]
+  depth = lambda pre: 1 + max(int(k[len(pre):].split('.')[0])
+                              for k in sd if k.startswith(pre))
+  n_enc, n_dec = depth(bias_pre), depth(dbias_pre)
+  heads = sd[bias_pre + '0.1.weight'].shape[0]
+  d_heads = sd[dbias_pre + '0.1.weight'].shape[0]
+  print('  checkpoint: atom_s %d, atom_z %d, token_s %d, token_z %d, '
+        'atom_feature_dim %d, encoder %dx%d heads, decoder %dx%d heads'
+        % (atom_s, atom_z, token_s, token_z, feat_dim, n_enc, heads,
+           n_dec, d_heads))
+  # The feature width says which optional atom features this release uses, and
+  # all three flags default off: 3 + 1 + 128 + 4*64 = 388 is position, charge,
+  # element and the four atom-name characters and nothing else. A release that
+  # turned on `use_atom_backbone_feat` or `use_residue_feats_atoms` would widen
+  # this, and then the feature vector built below would be wrong -- so it is
+  # asserted rather than assumed.
+  assert feat_dim == 3 + 1 + 128 + 4 * 64, (
+      'boltz2 atom_feature_dim is %d, not the 388 this adapter builds; the '
+      'release has an optional atom feature turned on' % feat_dim)
+
+  enc = AtomEncoder(atom_s=atom_s, atom_z=atom_z, token_s=token_s,
+                    token_z=token_z, atoms_per_window_queries=32,
+                    atoms_per_window_keys=128, atom_feature_dim=feat_dim,
+                    structure_prediction=True)
+  aae = AtomAttentionEncoder(atom_s=atom_s, token_s=token_s,
+                             atoms_per_window_queries=32,
+                             atoms_per_window_keys=128,
+                             atom_encoder_depth=n_enc, atom_encoder_heads=heads,
+                             structure_prediction=True)
+  mods = [(enc, e, 'AtomEncoder'), (aae, a, 'AtomAttentionEncoder')]
+  aad = None
+  if need_decoder:
+    aad = AtomAttentionDecoder(atom_s=atom_s, token_s=token_s,
+                               attn_window_queries=32, attn_window_keys=128,
+                               atom_decoder_depth=n_dec,
+                               atom_decoder_heads=d_heads)
+    mods.append((aad, d, 'AtomAttentionDecoder'))
+
+  def _bias(pre, n, h):
+    stack = nn.ModuleList([nn.Sequential(nn.LayerNorm(atom_z),
+                                         nn.Linear(atom_z, h, bias=False))
+                           for _ in range(n)])
+    mods.append((stack, take(pre), pre.rstrip('.').split('.')[-1]))
+    return stack
+
+  enc_bias = _bias(bias_pre, n_enc, heads)
+  dec_bias = _bias(dbias_pre, n_dec, d_heads) if need_decoder else None
+
+  for mod, sub, label in mods:
+    missing, unexpected = mod.load_state_dict(sub, strict=False)
+    print('  native %-22s %3d tensors, %d missing, %d unexpected %s'
+          % (label, len(sub), len(missing), len(unexpected),
+             list(missing)[:2]))
+    assert not missing, '%s is missing %d tensors' % (label, len(missing))
+    mod.eval()
+  return dict(enc=enc, aae=aae, aad=aad, enc_bias=enc_bias,
+              dec_bias=dec_bias, token_s=token_s, token_z=token_z,
+              atom_s=atom_s, atom_z=atom_z)
+
+
+def _boltz2_feats(fb, feats, pos_noisy, n_tok):
+  """-> (boltz feature dict, real atom count, padded length, noisy coords).
+
+  PACKED, not dense. boltz2's own featuriser emits a packed atom list -- all
+  real atoms contiguous, then padding to a multiple of the query window -- and
+  its `atom_to_token` matrix and `atom_pad_mask` are built from that. Feeding it
+  the DENSE (token, slot) layout instead puts padding BETWEEN real atoms, so its
+  windows hold different neighbours than ours even though the returned per-atom
+  tensors can still be indexed back into agreement: q read corr 0.847 and the
+  atom pair 0.609 that way, with c_atom_cond (which has no window) at 0.999999
+  -- the signature of a layout difference rather than an arithmetic one.
+
+  The one hazard is the window arithmetic: `AtomEncoder` computes K = N // W
+  with W = 32 and reshapes, so N must be a MULTIPLE of 32. 6MRR happens to
+  satisfy that (68 tokens * 24 slots = 1632 = 51 * 32) and 1STP does not
+  (121 * 24 = 2904), so the dense axis is padded up here and the outputs are
+  cut back down. boltz's own featuriser pads for the same reason.
+  """
+  import numpy as _np
+  import torch
+
+  rs = fb.ref_structure
+  mask = _np.asarray(feats['mask'])
+  n_slot = mask.shape[1]
+  n_dense = n_tok * n_slot
+  real = mask.reshape(-1)
+  n_real = int(real.sum())
+  # Dense first (every (token, slot), row-major), then PACKED by the mask, which
+  # is the order our own queries layout uses. `AtomEncoder` computes K = N // 32
+  # and reshapes, so the packed length is padded up to a whole window.
+  keep = _np.flatnonzero(real)
+  dense = lambda x: _np.asarray(x).reshape(n_dense,
+                                           *_np.asarray(x).shape[2:])[keep]
+  pad_to = -(-n_real // 32) * 32
+  pad = pad_to - n_real
+  print('  packed layout: %d real atoms padded to %d (boltz windows N // 32)'
+        % (n_real, pad_to))
+
+  def _p(x, fill=0.0):
+    x = _np.asarray(x, _np.float32)
+    if not pad:
+      return x
+    z = _np.full((pad,) + x.shape[1:], fill, _np.float32)
+    return _np.concatenate([x, z], axis=0)
+
+  el = _np.clip(dense(rs.element).astype(int), 0, 127)
+  elem = _np.zeros((n_real, 128), _np.float32)
+  elem[_np.arange(n_real), el] = 1.0
+  chars = dense(rs.atom_name_chars).astype(int)
+  ref_chars = _np.zeros((n_real, 4, 64), _np.float32)
+  for i in range(4):
+    ref_chars[_np.arange(n_real), i, chars[:, i]] = 1.0
+  # The noisy coordinates already arrive packed, in this same order.
+  d_r = _np.asarray(pos_noisy, _np.float32)
+  # atom -> token as a one-hot MATRIX: boltz pools with a bmm against its
+  # column-normalised transpose, not a gather through an index.
+  a2t = _np.zeros((n_real, n_tok), _np.float32)
+  a2t[_np.arange(n_real),
+      _np.repeat(_np.arange(n_tok), n_slot)[keep]] = 1.0
+  # A padding atom must not join a real window's `v`: uid equality is ANDed
+  # with the masks, but a distinct uid makes it true by construction rather
+  # than by the mask alone.
+  uid = dense(rs.ref_space_uid).astype(_np.float32)
+  t = lambda x, dt=torch.float32: torch.tensor(_np.asarray(x), dtype=dt)
+  bf = {
+      'ref_pos': t(_p(dense(rs.positions)))[None],
+      'ref_charge': t(_p(dense(rs.charge)))[None],
+      'ref_element': t(_p(elem))[None],
+      'ref_atom_name_chars': t(_p(ref_chars))[None],
+      'ref_space_uid': t(_p(uid, -1.0), torch.long)[None],
+      'atom_pad_mask': t(_p(_np.ones(n_real, _np.float32)))[None],
+      'atom_to_token': t(_p(a2t))[None],
+  }
+  return bf, n_real, pad_to, t(_p(d_r))[None]
+
+
+def native_boltz2(model, fb, feats, pos_noisy, s, z, n_tok):
+  """-> (a, q_l, c_l, p_lm, pad_mask) from Boltz-2's own atom encoder."""
+  import numpy as _np
+  import torch
+
+  _stub_layer_norm()
+  M = _boltz2_modules()
+  bf, n_real, pad_to, r = _boltz2_feats(fb, feats, pos_noisy, n_tok)
+  t = lambda x: torch.tensor(_np.asarray(x, _np.float32))
+  with torch.no_grad():
+    q, c, p, to_keys = M['enc'](feats=bf, s_trunk=t(s)[None], z=t(z)[None])
+    bias = torch.cat([l(p) for l in M['enc_bias']], dim=-1)
+    a, q_out, c_out, _ = M['aae'](feats=bf, q=q, c=c, atom_enc_bias=bias,
+                                  to_keys=to_keys, r=r)
+  _RAW['boltz2'] = dict(p=p, q=q_out, c=c_out, to_keys=to_keys,
+                        bf=bf, n_real=n_real)
+  # The atom axis is already packed in our order; drop the window padding.
+  qn = _np.asarray(q_out)[0][:n_real]
+  cn = _np.asarray(c_out)[0][:n_real]
+  # WHICH (block, query, key) SLOTS HOLD A REAL ATOM PAIR. boltz clips and pads
+  # its window and then masks, so the padded slots hold index 0 -- a real atom,
+  # repeated -- on both sides but are excluded from attention on both sides. A
+  # p_atom_pair comparison over all slots is dominated by numbers neither model
+  # looks at; this is the same mask protenix's `pad_info` supplies, built here
+  # from boltz's own `to_keys` so it cannot drift from the window it describes.
+  with torch.no_grad():
+    am = bf['atom_pad_mask']
+    K = am.shape[-1] // 32
+    mq = am.view(1, K, 32, 1)
+    mk = to_keys(am.unsqueeze(-1).float()).view(1, K, 1, -1)
+    pm = (mq * mk)[0]
+  return (_np.asarray(a)[0], qn, cn,
+          _np.asarray(p).reshape(*_np.asarray(p).shape[-4:]),
+          _np.asarray(pm))
+
+
+def _native_decoder_boltz2(model, feats, a, q_ref, c_ref, p_ref, n_atom,
+                           c_token):
+  """-> r_ref from Boltz-2's own AtomAttentionDecoder.
+
+  Reuses the encoder invocation parked in `_RAW`, because boltz's decoder needs
+  three things the gate's arguments cannot carry: the DENSE q and c (the gate
+  hands back the real atoms only), the `to_keys` closure the encoder built
+  (a partial over an indexing matrix, not a tensor), and the same feature dict.
+  Each side is still fed its own encoder's skips, which is the rule this gate
+  already follows.
+  """
+  import numpy as _np
+  import torch
+
+  if _RAW.get('boltz2') is None:
+    raise SystemExit('the boltz2 decoder needs the encoder invocation; '
+                     'native_boltz2 did not park one in _RAW')
+  R = _RAW['boltz2']
+  M = _boltz2_modules(need_decoder=True)
+  t = lambda x: torch.tensor(_np.asarray(x, _np.float32))
+  with torch.no_grad():
+    dbias = torch.cat([l(R['p']) for l in M['dec_bias']], dim=-1)
+    r = M['aad'](a=t(a)[None], q=R['q'], c=R['c'], atom_dec_bias=dbias,
+                 feats=R['bf'], to_keys=R['to_keys'])
+  return _np.asarray(r)[0][:R['n_real']][:n_atom]
+
+
 NATIVES = {m: native_protenix for m in _ENC_SRC}
 NATIVES.update({m: native_of3 for m in _OF3_CKPT})
 NATIVES['intellifold2'] = native_if2
 NATIVES['rosettafold3'] = native_rf3
+NATIVES['boltz2'] = native_boltz2
 NATIVES.update({m: native_esmfold2 for m in (
     'esmfold2', 'esmfold2_fast', 'esmfold2_lm600m', 'esmfold2_lm300m')})
 
@@ -1178,7 +1424,8 @@ def _native_decoder_if2(model, feats, a, q_ref, c_ref, p_ref, n_atom, c_token):
             inplace_safe=False)
   return _np.asarray(r).reshape(-1, 3)[:n_atom]
 
-_DECODER_FN = {'openfold3': _native_decoder_of3,
+_DECODER_FN = {'boltz2': _native_decoder_boltz2,
+               'openfold3': _native_decoder_of3,
                'openbind0': _native_decoder_of3,
                'intellifold2': _native_decoder_if2}
 

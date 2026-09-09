@@ -253,6 +253,26 @@ PROTENIX_FAMILY = ('protenix1', 'protenix2')
 # the per-block pair LayerNorm (PER_BLOCK_PAIR_LAYER_NORM, below) and the
 # swapped column-attention pair bias (an explicit list at modules.py, where the
 # openbind's direction, once an open question, is now measured -- see modules.py).
+# Whose atom encoder is fed the RAW formal charge, and whose gets arcsinh(charge).
+#
+# AlphaFold 3 embeds `arcsinh(charge)`. Three families do not, and the two facts
+# are indistinguishable on a neutral molecule -- 6MRR has 17 charged atoms out of
+# 574 -- so this can only be caught by a gate that isolates the feature. The
+# `FEAT=charge` arm of `dev/oracles/atom_parity.py` is that gate: with every
+# other reference feature zeroed on both sides, boltz2 read max|d|/rms 2.18e-02
+# where positions, element and atom-name characters were all exact at ~1e-6.
+#
+# Read off each vendor's own code, not inferred:
+#   chai1          feeds the raw charge.
+#   esmfold2       feeds the raw charge.
+#   boltz2         `AtomEncoder.forward` concatenates `feats["ref_charge"]`
+#                  verbatim (encodersv2.py:321), and its featuriser stores
+#                  `GetFormalCharge()` unmodified (schema.py:684).
+#   intellifold2   applies asinh INSIDE the module, so arcsinh here is right.
+#   protenix/of3/opendde/rf3  AF3's convention; their charge arm is exact.
+RAW_REF_CHARGE = ('chai1', 'boltz2') + ESMFOLD2_FAMILY
+
+
 OPENFOLD3_LINEAGE = (
     'openfold3', 'openbind0', 'opendde', 'boltz2', 'rosettafold3',
 ) + PROTENIX_FAMILY

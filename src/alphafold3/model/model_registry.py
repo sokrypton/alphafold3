@@ -518,7 +518,19 @@ _FEATURISE = {
     # else -> one token, all atoms). AF3 atomises instead, and handing boltz2 ten
     # single-atom tokens where it wants one ten-atom token inflates the residue
     # ~2.4x. Inert when nothing is modified, and ligands atomise either way.
-    'boltz2': dict(modified_as_one_token=True),
+    # boltz2 CLIPS AND PADS its atom key window, where AF3 slides it back in
+    # bounds -- the same convention opendde and protenix use, and it was set for
+    # them and not for boltz2. Enumerated from `get_indexing_matrix` /
+    # `single_to_keys` rather than inferred: window 0 holds keys 0..79 with its
+    # leading 48 slots filled with index 0 and masked, window 1 holds 0..111
+    # with 16 such slots, and the last two windows pad at the END. So the edge
+    # blocks see fewer real neighbours AND the ones they see sit at different
+    # key SLOTS, which misaligns the per-slot pair bias too.
+    #
+    # The signature in the gate is unmistakable once the layout is right: q per
+    # 32-atom window read 39.7 / 45.3 at windows 0-1 and 15.5 / 26.6 at 16-17,
+    # against 0.1-2.1 across the whole interior.
+    'boltz2': dict(modified_as_one_token=True, padded_keys=True),
     # opendde runs its diffusion on an expanded structural-token set, and pads
     # the atom key window rather than sliding it in bounds.
     # struct_num_tokens is deliberately absent: the structural-token count
