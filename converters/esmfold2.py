@@ -613,7 +613,12 @@ def map_esmfold2_to_af3(sd, **overrides):
                 atom_encoder(sd, 'inputs_embedder.atom_attention_encoder',
                              dims.get('n_input_atom', 3))))
   p.update(nest('diffusion', map_diffusion(sd, dims)))
-  p.update(nest('confidence', confidence_head(sd, dims)))
+  # The language-model-tier releases ship NO confidence head at all
+  # (model_config.NO_CONFIDENCE_HEAD), so there is nothing to map and
+  # confidence_head() would die on its first key. Read off the checkpoint, as
+  # every other per-release branch in this file is.
+  if 'confidence_head.boundaries' in sd:
+    p.update(nest('confidence', confidence_head(sd, dims)))
   return p
 
 

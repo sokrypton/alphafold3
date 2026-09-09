@@ -370,9 +370,25 @@ def trunk(f, lm_hidden, p, dims, n_loops=3, key=None, lm_dropout=0.25, msa=None)
       if msa is not None:
         # ADDED, not overwritten, and the encoder returns the UPDATED pair --
         # the same double count the graph makes (model_config.MSA_AFTER_RECYCLE).
-        z = z + msa_encoder(z, s_inputs, msa['oh'], msa['has_deletion'],
-                            msa['deletion_value'], msa['mask'], p, dims,
-                            experimental=True)
+        #
+        # ...times `msa_track_mask`, which the experimental encoder applies to
+        # its WHOLE output: `msa_attention_mask[:, :, 1:].any()`, i.e. "is there
+        # any real NON-QUERY row". On a depth-1 self-MSA that is False and
+        # native contributes exactly zero. Omitting it here made this reference
+        # run an encoder the graph correctly skips, and the gate then blamed the
+        # graph -- the reference being wrong is indistinguishable from the port
+        # being wrong unless you look.
+        # NOTE THE AXIS. This file's msa tensors are [L, M] -- `self_msa`
+        # returns mask (L, 1) -- while the graph's `batch.msa.mask` is
+        # [M, L]. So the non-query rows are `[:, 1:]` here and `[1:]` there,
+        # and the two spellings look identical while meaning different things:
+        # `mask[1:]` would slice TOKENS and answer True for any structure
+        # longer than one residue.
+        track = jnp.any(msa['mask'][:, 1:] > 0).astype(z.dtype)
+        z = z + track * msa_encoder(z, s_inputs, msa['oh'],
+                                    msa['has_deletion'],
+                                    msa['deletion_value'], msa['mask'], p, dims,
+                                    experimental=True)
       TAPS.setdefault('z_parcae', []).append(z)
       z = pair_stack(z, p, 'folding_trunk/', dims['n_trunk'], pm)
     # no parcae_readout and no coda: the trunk's own output IS the result.
