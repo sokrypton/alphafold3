@@ -226,13 +226,24 @@ def esmc_hidden_states(ids, p, dims):
 # against 20-22 A without -- even on a depth-1 self MSA.  Layout is TOKEN-major
 # [L, M, c], unlike AF3's [M, L, c].
 
-def outer_product_mean(m, mmask, q):
-  """NOTE the divide order: Wout(outer)/n_valid, so the BIAS is scaled too."""
+def outer_product_mean(m, mmask, q, bias_after_norm=False):
+  """`divide_outer_before_proj`, which ESMFold2 sets PER RELEASE LINE.
+
+  False (the released default): `Wout(outer) / n_valid`, so the bias is scaled
+  by 1/n_valid along with the outer product. True (hardcoded by the
+  experimental block, `modeling_esmfold2_experimental.py:366`):
+  `Wout(outer / n_valid)`, so the bias is added unscaled. The two differ by
+  `output_b * (1 - 1/n)` -- a per-CHANNEL CONSTANT, which corr cannot see
+  ([[correlation-hides-bias]]) and which read as max|d| == p99.9|d| when it was
+  found in the graph.
+  """
   mn = layer_norm(m, q['layer_norm/scale'], q['layer_norm/offset'])
   a = (mn @ q['left_projection/weights']) * mmask[..., None]
   b = (mn @ q['right_projection/weights']) * mmask[..., None]
   n_valid = jnp.maximum(mmask @ mmask.T, 1.0)[..., None]
   outer = jnp.einsum('imc,jmd->ijcd', a, b).reshape(a.shape[0], b.shape[0], -1)
+  if bias_after_norm:
+    return (outer @ q['output/weights']) / n_valid + q['output/bias']
   return (outer @ q['output/weights'] + q['output/bias']) / n_valid
 
 
@@ -249,7 +260,8 @@ def msa_pair_weighted_averaging(m, z, pair_mask, q):
   return o.reshape(L, M, h * dh) @ q['output/weights']
 
 
-def msa_encoder(z, s_inputs, msa_oh, has_deletion, deletion_value, mmask, p, dims):
+def msa_encoder(z, s_inputs, msa_oh, has_deletion, deletion_value, mmask, p,
+                dims, experimental=False):
   q = {k[len('msa_encoder/'):]: v for k, v in p.items() if k.startswith('msa_encoder/')}
   feat = jnp.concatenate([msa_oh, has_deletion[..., None], deletion_value[..., None]], -1)
   m = feat @ q['embed/weights'] + (s_inputs @ q['project_inputs/weights'])[:, None]
@@ -258,14 +270,34 @@ def msa_encoder(z, s_inputs, msa_oh, has_deletion, deletion_value, mmask, p, dim
   n = dims['n_msa']
   for i in range(n):
     sub = lambda pre, d: {k[len(pre):]: v for k, v in d.items() if k.startswith(pre)}
-    blk = ({k[len('blocks/'):]: v[i] for k, v in q.items() if k.startswith('blocks/')}
-           if i < n - 1 else sub('final_block/', q))
-    z = z + outer_product_mean(m, mmask, sub('outer_product_mean/', blk))
-    if i < n - 1:                      # the LAST block drops the MSA update entirely
-      m = m + msa_pair_weighted_averaging(m, z, pair_mask, sub('msa_pair_weighted_averaging/', blk))
+    # The released line's LAST block has its own scope and no msa update at all
+    # (`is_final_block`); the experimental line runs every block the same way,
+    # so all n come out of the stacked `blocks/` axis.
+    last = (not experimental) and i == n - 1
+    blk = (sub('final_block/', q) if last else
+           {k[len('blocks/'):]: v[i] for k, v in q.items()
+            if k.startswith('blocks/')})
+
+    def _update(m_, z_):
+      m_ = m_ + msa_pair_weighted_averaging(
+          m_, z_, pair_mask, sub('msa_pair_weighted_averaging/', blk))
       t = sub('msa_transition/', blk)
-      m = m + swiglu(layer_norm(m, t['input_layer_norm/scale'], t['input_layer_norm/offset']),
-                     t['transition1/weights'], t['transition2/weights'])
+      return m_ + swiglu(
+          layer_norm(m_, t['input_layer_norm/scale'],
+                     t['input_layer_norm/offset']),
+          t['transition1/weights'], t['transition2/weights'])
+
+    if experimental:
+      # msa update FIRST, on the PRE-update pair, then the outer product on the
+      # UPDATED msa -- and the bias after the divide. Both are the experimental
+      # block, and both are opposite to the released one.
+      m = _update(m, z)
+      z = z + outer_product_mean(m, mmask, sub('outer_product_mean/', blk),
+                                 bias_after_norm=True)
+    else:
+      z = z + outer_product_mean(m, mmask, sub('outer_product_mean/', blk))
+      if not last:
+        m = _update(m, z)
     z = pair_block(z, blk, pair_mask)
   return z
 
@@ -317,6 +349,35 @@ def trunk(f, lm_hidden, p, dims, n_loops=3, key=None, lm_dropout=0.25, msa=None)
 
   key = jax.random.PRNGKey(0) if key is None else key
   key, k_init = jax.random.split(key)
+
+  # The EXPERIMENTAL line recycles through a plain projection instead of the
+  # parcae SSM and has no coda. Keyed on the PARAMETERS, the same way
+  # converters/esmfold2.map_trunk keys on the checkpoint, so a release that
+  # changes its mind is followed rather than asserted.
+  if 'parcae_a' not in p:
+    # zeros, not a truncated-normal draw: native writes `z = zeros_like(z_init)`
+    z = jnp.zeros_like(z_init)
+    # and the LM term folds into z_init ONCE, rather than being re-dropped every
+    # loop through an lm_encoder stack -- lm_enc is 0 for every experimental
+    # release, so there is no such stack to run.
+    if lm_z is not None:
+      z_init = z_init + lm_z
+    for _ in range(n_loops + 1):
+      z = z_init + layer_norm(
+          z, p['pair_loop_proj_norm/scale'],
+          p['pair_loop_proj_norm/offset']) @ p['pair_loop_proj/weights']
+      TAPS.setdefault('z_inject', []).append(z)
+      if msa is not None:
+        # ADDED, not overwritten, and the encoder returns the UPDATED pair --
+        # the same double count the graph makes (model_config.MSA_AFTER_RECYCLE).
+        z = z + msa_encoder(z, s_inputs, msa['oh'], msa['has_deletion'],
+                            msa['deletion_value'], msa['mask'], p, dims,
+                            experimental=True)
+      TAPS.setdefault('z_parcae', []).append(z)
+      z = pair_stack(z, p, 'folding_trunk/', dims['n_trunk'], pm)
+    # no parcae_readout and no coda: the trunk's own output IS the result.
+    return z, s_inputs, rp
+
   std = np.sqrt(2.0 / (5.0 * z_init.shape[-1]))
   z = jax.random.truncated_normal(k_init, -3.0, 3.0, z_init.shape) * std
   av, bT = p['parcae_a'], p['parcae_b/weights']

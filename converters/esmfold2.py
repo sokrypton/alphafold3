@@ -268,20 +268,41 @@ def msa_encoder(sd, dims, prefix='msa_encoder'):
 def map_trunk(sd, dims=None):
   """Every parameter from features to the final pair representation."""
   dims = dims or derive_dims(sd)
-  a_vec, b_T = parcae_dynamics(sd)
+  # ONLY the released line recycles through the parcae SSM. The experimental one
+  # uses a plain projection (`pair_loop_proj`), carries no `parcae_*` tensors at
+  # all, and this map used to call `parcae_dynamics` unconditionally -- so every
+  # oracle that builds the REFERENCE tree died on
+  # `KeyError: 'parcae_log_delta'` for the experimental releases, which is why
+  # L2.atom_encoder / L2.atom_decoder / L2.conditioning skipped for them.
+  #
+  # `map_esmfold2_to_af3_graph` had the branch already; this is the second copy
+  # ([[three-code-copies]]). Keyed on the CHECKPOINT rather than the model name,
+  # as `_drops_msa_update` is, so a release that changes its mind is followed
+  # rather than asserted.
+  has_parcae = 'parcae_log_delta' in sd
   p = {
       'z_init_1/weights': t(sd['z_init_1.weight']),
       'z_init_2/weights': t(sd['z_init_2.weight']),
       'rel_pos/weights': t(sd['rel_pos.embed.weight']),
       'token_bonds/weights': t(sd['token_bonds.weight']),
-      'parcae_a': a_vec,
-      'parcae_b/weights': b_T,
-      'parcae_input_norm/scale': _arr(sd['parcae_input_norm.weight']),
-      'parcae_input_norm/offset': _arr(sd['parcae_input_norm.bias']),
-      'parcae_readout/weights': t(sd['parcae_readout.weight']),
       'distogram/weights': t(sd['distogram_head.weight']),
       'distogram/bias': _arr(sd['distogram_head.bias']),
   }
+  if has_parcae:
+    a_vec, b_T = parcae_dynamics(sd)
+    p.update({
+        'parcae_a': a_vec,
+        'parcae_b/weights': b_T,
+        'parcae_input_norm/scale': _arr(sd['parcae_input_norm.weight']),
+        'parcae_input_norm/offset': _arr(sd['parcae_input_norm.bias']),
+        'parcae_readout/weights': t(sd['parcae_readout.weight']),
+    })
+  else:
+    p.update({
+        'pair_loop_proj/weights': t(sd['pair_loop_proj.1.weight']),
+        'pair_loop_proj_norm/scale': _arr(sd['pair_loop_proj.0.weight']),
+        'pair_loop_proj_norm/offset': _arr(sd['pair_loop_proj.0.bias']),
+    })
   p.update(nest('language_model', language_model_shim(sd)))
   p.update(nest('lm_encoder', pair_only_stack(sd, 'lm_encoder', dims['n_lm_encoder'])))
   p.update(nest('folding_trunk', pair_only_stack(sd, 'folding_trunk', dims['n_trunk'])))
