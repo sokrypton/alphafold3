@@ -886,6 +886,23 @@ def _native_decoder(model, feats, a, q_ref, c_ref, p_ref, n_atom, c_token):
   Widths come off the CHECKPOINT, never a default: `c_atompair` is read from the
   reference pair tensor and `n_blocks` counted from the block keys, so a release
   that changes either fails in load_state_dict rather than comparing quietly.
+
+  Who fits this helper and who does not, checked rather than assumed:
+
+    protenix1, protenix2, opendde   same class, same prefix
+                                    (`module.diffusion_module.atom_attention_decoder.`),
+                                    same leaf names, same call signature.
+    openfold3, openbind0            call it `atom_attn_dec`, not
+                                    `atom_attention_decoder`, and its leaf
+                                    names differ.
+    intellifold2                    prefix matches
+                                    (`diffusion_module.atom_attention_decoder.`)
+                                    but the leaves are `linear_a`,
+                                    `layer_norm_q`, `linear_q` where protenix
+                                    has `linear_no_bias_a`.
+    rosettafold3, boltz2            not yet looked at.
+
+  So those five need a function each, not a row.
   """
   import importlib
 
