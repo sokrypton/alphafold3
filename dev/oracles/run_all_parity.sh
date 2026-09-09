@@ -189,6 +189,13 @@ fi
 if want L1; then
   echo "== L1 trunk pairformer"
   for m in $MODELS; do gate L1.trunk "$m" '^  (single|pair) ' dev/oracles/trunk_parity.py "$m"; done
+  # L1i -- the tensor the pairformer STARTS FROM. trunk_parity feeds it
+  # synthetic s and z, so nothing here ever measured the relative position
+  # encoding or the bond embeddings until this gate existed. In the driver from
+  # the day it was written, because a gate the driver does not run is a gate
+  # that stops running ([[harness-rot]]).
+  echo "== L1i trunk z-init"
+  for m in $MODELS; do gate L1i.trunk_init "$m" '^  z_init ' dev/oracles/trunk_init_parity.py "$m"; done
   # ESMFold2 has no vendor MODULE to import -- its implementation is inside
   # `transformers`, which lives in ~/venv_esm. What it has instead is
   # `esmfold2_reference.py`, a complete self-contained JAX reimplementation that

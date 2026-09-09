@@ -85,7 +85,128 @@ def native_boltz2(model, batch, s_inputs, bonds, bond_types, n):
 
 
 _CONTACT_CLASSES = range(5)
+
+
+def native_boltz2_loop(model, batch, s_inputs, bonds, bond_types, n, passes):
+  """-> (s, z) after `passes` of Boltz-2's own recycle loop, on OUR features.
+
+  PASSES>=1 turns this gate from "the tensor the trunk starts from" into "the
+  loop that consumes it", which is the one thing left un-gated when z-init, the
+  MSA module, the pairformer stack and the diffusion conditioner are each exact
+  on their own and the composed fold still prefers a z-init that is NOT exact.
+
+  The loop is boltz's, verbatim (models/boltz2.py:461-494):
+
+      s = s_init + s_recycle(s_norm(s))
+      z = z_init + z_recycle(z_norm(z))
+      z = z + msa_module(z, s_inputs, feats)          # templates skipped: 6MRR
+      s, z = pairformer(s, z, mask, pair_mask)        # has none
+
+  starting from s = z = ZERO, which matters: `s_norm` and `z_norm` are
+  LayerNorms WITH a bias, so LayerNorm(0) is that bias and the first pass adds
+  `recycle(bias)`, not nothing.
+  """
+  import torch
+
+  from boltz.model.layers.pairformer import PairformerModule
+  from boltz.model.modules.trunkv2 import MSAModule
+
+  ckpt = os.path.expanduser('~/boltz2_weights/boltz2_conf.ckpt')
+  raw = torch.load(ckpt, map_location='cpu', weights_only=False)
+  sd = raw.get('state_dict', raw.get('model', raw))
+  hp = raw.get('hyper_parameters', {})
+  g = lambda k: sd[k]
+  t = lambda x, d=torch.float32: torch.tensor(np.asarray(x), dtype=d)
+  lin = lambda w, x: torch.nn.functional.linear(x, g(w))
+
+  z_init = t(native_boltz2(model, batch, s_inputs, bonds, bond_types, n))[None]
+  si = t(s_inputs)[None]
+  s_init = lin('s_init.weight', si)
+  token_s, token_z = s_init.shape[-1], z_init.shape[-1]
+
+  # The MSA module, with the same feature construction msa_parity validates --
+  # 6MRR has no alignment, so the "MSA" is the query and the deletions are zero.
+  msub = {k[len('msa_module.'):]: v for k, v in sd.items()
+          if k.startswith('msa_module.')}
+  msa_s, in_dim = msub['msa_proj.weight'].shape
+  # THE REAL ROWS ONLY. `batch.msa.rows` is padded to the bucket (16384 for
+  # 6MRR, which has no alignment at all), and handing 16384 rows to the MSA
+  # module is neither what our graph runs nor something that fits.
+  raw_msa = np.asarray(batch.msa.rows)
+  keep_rows = np.asarray(batch.msa.mask).max(-1) > 0
+  raw_msa = raw_msa[keep_rows][:int(os.environ.get('N_MSA', 8))]
+  n_seq = raw_msa.shape[0]
+  dele = np.asarray(batch.msa.deletion_matrix)[keep_rows][:n_seq]
+  # IN BOLTZ'S CLASS ORDER, not ours. Our converter reorders boltz's 33 restype
+  # columns into our 31 classes (`BOLTZ2_RESTYPE_PERM`), so our side applies
+  # REMAPPED weights to an AF3-ordered one-hot while native applies its ORIGINAL
+  # weights -- our class j is boltz's column PERM[j]. Feeding native ours
+  # instead read s corr 0.95 / z 0.93 at one pass, which is what a permuted
+  # vocabulary looks like when most columns still land somewhere plausible.
+  from converters.boltz2 import BOLTZ2_RESTYPE_PERM
+  perm = np.asarray(BOLTZ2_RESTYPE_PERM)
+  paired = (in_dim - 33) == 3
+  onehot = np.zeros((n_seq, n, 33), np.float32)
+  cols = perm[np.clip(raw_msa, 0, len(perm) - 1)]
+  onehot[np.arange(n_seq)[:, None], np.arange(n)[None, :], cols] = 1.0
+  has_del = (dele > 0).astype(np.float32)
+  del_val = (2.0 / np.pi) * np.arctan(np.asarray(dele, np.float32) / 3.0)
+  print('  msa: %d rows, 33 boltz classes (msa_proj in %d, paired %s), '
+        '%d deletions' % (n_seq, in_dim, paired, int(has_del.sum())))
+  n_blocks = 1 + max(int(k.split('.')[1]) for k in msub
+                     if k.startswith('layers.'))
+  msa_net = MSAModule(msa_s=msa_s, token_z=token_z, token_s=token_s,
+                      msa_blocks=n_blocks, msa_dropout=0.0, z_dropout=0.0,
+                      use_paired_feature=paired, subsample_msa=False)
+  miss, _ = msa_net.load_state_dict(msub, strict=False)
+  assert not miss, list(miss)[:3]
+  zero_msa = np.zeros((n_seq, n), np.float32)
+  feats = {'msa': t(onehot)[None], 'has_deletion': t(has_del)[None],
+           'deletion_value': t(del_val)[None], 'msa_paired': t(zero_msa)[None],
+           'msa_mask': torch.ones(1, n_seq, n),
+           'token_pad_mask': torch.ones(1, n),
+           'target_pair_mask': None}
+
+  psub = {k[len('pairformer_module.'):]: v for k, v in sd.items()
+          if k.startswith('pairformer_module.')}
+  pargs = hp.get('pairformer_args', {})
+  # v2=True. The checkpoint's pairformer layers carry `pre_norm_s`, where the
+  # default (v1) layer builds `attention.norm_s` -- 128 tensors missing, and
+  # nothing else in the panel needed this flag. Read off the layer-0 key set,
+  # not from the hparams, which do not mention it.
+  pf = PairformerModule(token_s=token_s, token_z=token_z,
+                        num_blocks=pargs.get('num_blocks', 64),
+                        num_heads=pargs.get('num_heads', 16), dropout=0.0,
+                        post_layer_norm=pargs.get('post_layer_norm', False),
+                        v2=True)
+  miss, _ = pf.load_state_dict(psub, strict=False)
+  assert not miss, list(miss)[:3]
+  print('  native: msa %d tensors, pairformer %d tensors, %d blocks'
+        % (len(msub), len(psub), pargs.get('num_blocks', 64)))
+  msa_net.eval(); pf.eval()
+
+  mask = torch.ones(1, n)
+  pair_mask = mask[:, :, None] * mask[:, None, :]
+  s = torch.zeros_like(s_init)
+  z = torch.zeros_like(z_init)
+  with torch.no_grad():
+    for i in range(passes):
+      s = s_init + lin('s_recycle.weight',
+                       torch.nn.functional.layer_norm(
+                           s, (token_s,), g('s_norm.weight'), g('s_norm.bias')))
+      z = z_init + lin('z_recycle.weight',
+                       torch.nn.functional.layer_norm(
+                           z, (token_z,), g('z_norm.weight'), g('z_norm.bias')))
+      z = z + msa_net(z, si, feats)
+      s, z = pf(s, z, mask=mask, pair_mask=pair_mask)
+      print('  native pass %d: s rms %.4f, z rms %.4f'
+            % (i + 1, float(s.pow(2).mean().sqrt()),
+               float(z.pow(2).mean().sqrt())))
+  return np.asarray(s)[0], np.asarray(z)[0]
+
+
 NATIVES = {'boltz2': native_boltz2}
+LOOPS = {'boltz2': native_boltz2_loop}
 
 
 def ours(model, cfg, model_dir, batch, s_inputs):
@@ -144,6 +265,63 @@ def ours(model, cfg, model_dir, batch, s_inputs):
   return np.asarray(f.apply(params, jax.random.PRNGKey(0)))
 
 
+def ours_loop(model, cfg, model_dir, batch, s_inputs, passes):
+  """-> (s, z) after `passes` calls of our own Evoformer, carrying prev.
+
+  `Evoformer.__call__(batch, prev, target_feat, key)` IS the loop body, so the
+  seam is the `prev` dict -- exactly what the model itself threads through its
+  recycle scan. Running it pass by pass here (rather than through the scan) is
+  what lets a divergence be attributed to a pass number.
+  """
+  import haiku as hk
+  import jax
+  import jax.numpy as jnp
+
+  from alphafold3.model import params as afp
+  from alphafold3.model.network import evoformer as evo
+
+  cfg.global_config.bfloat16 = 'none'
+  cfg.global_config.flash_attention_implementation = 'xla'
+  full = afp.get_model_haiku_params(model_dir=model_dir)
+  n = int(np.asarray(batch.token_features.mask).shape[0])
+  c_s, c_z = cfg.evoformer.seq_channel, cfg.evoformer.pair_channel
+
+  def fwd(prev):
+    ev = evo.Evoformer(cfg.evoformer, cfg.global_config, name='evoformer')
+    return ev(batch=batch, prev=prev, target_feat=jnp.asarray(s_inputs),
+              key=jax.random.PRNGKey(0))
+
+  f = hk.transform(fwd)
+  prev0 = {'single': jnp.zeros((n, c_s), jnp.float32),
+           'pair': jnp.zeros((n, n, c_z), jnp.float32)}
+  init = f.init(jax.random.PRNGKey(0), prev0)
+  params, unmapped = {}, []
+  for sc in init:
+    params[sc] = {}
+    for k in init[sc]:
+      key = ('diffuser/' + sc if sc.startswith('evoformer')
+             else 'diffuser/evoformer' if sc == '~'
+             else 'diffuser/evoformer/' + sc)
+      src = full.get(key)
+      v = None if src is None else src.get(k)
+      if v is None:
+        unmapped.append('%s/%s' % (sc, k))
+        params[sc][k] = init[sc][k]
+      else:
+        params[sc][k] = np.asarray(v, np.float32)
+  print('  ours: %d scopes, %d unmapped %s'
+        % (len(init), len(unmapped), unmapped[:4]))
+  assert not unmapped, 'our trunk is partly at init'
+  prev = prev0
+  for i in range(passes):
+    out = f.apply(params, jax.random.PRNGKey(0), prev)
+    prev = {'single': out['single'], 'pair': out['pair']}
+    print('  ours pass %d: s rms %.4f, z rms %.4f'
+          % (i + 1, float(jnp.sqrt(jnp.mean(out['single'] ** 2))),
+             float(jnp.sqrt(jnp.mean(out['pair'] ** 2)))))
+  return np.asarray(prev['single']), np.asarray(prev['pair'])
+
+
 def main(argv=None):
   ap = argparse.ArgumentParser()
   ap.add_argument('model')
@@ -177,6 +355,21 @@ def main(argv=None):
   bond_types = np.asarray(evo.token_bond_type_matrix(batch, symmetrize=sym))
   print('%s trunk z-init, %d tokens, s_inputs %d wide, %d bonded pairs:'
         % (args.model, n, w, int((bonds > 0).sum())))
+
+  passes = int(os.environ.get('PASSES', 0))
+  if passes:
+    if args.model not in LOOPS:
+      raise SystemExit('no native LOOP for %r; have %s'
+                       % (args.model, sorted(LOOPS)))
+    s_ref, z_ref = LOOPS[args.model](args.model, batch, s_inputs, bonds,
+                                     bond_types, n, passes)
+    s_got, z_got = ours_loop(args.model, cfg, model_dir, batch, s_inputs,
+                             passes)
+    print('  shapes: ours s %s z %s | native s %s z %s'
+          % (s_got.shape, z_got.shape, s_ref.shape, z_ref.shape))
+    _cmp('s_pass%d' % passes, s_got, s_ref)
+    _cmp('z_pass%d' % passes, z_got, z_ref)
+    return 0
 
   z_ref = NATIVES[args.model](args.model, batch, s_inputs, bonds, bond_types, n)
   z_got = ours(args.model, cfg, model_dir, batch, s_inputs)

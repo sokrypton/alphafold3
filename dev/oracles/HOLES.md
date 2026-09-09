@@ -90,6 +90,30 @@ Only boltz2 has an adapter. The other twelve are one function each and the
 recipe is the same: assemble the vendor's own z-init terms from its own
 checkpoint and feed them OUR features.
 
+`PASSES=n` turns the same gate into the FULL TRUNK LOOP -- boltz's own
+`s/z recycle -> msa_module -> pairformer`, n times, against our own
+`Evoformer.__call__` carrying `prev`. That is the measurement the chain-bucket
+question needed, because every constituent is exact on its own (z-init
+2.77e-06, MSA module 7.62e-05, pairformer 1.000000, and the diffusion
+conditioner and atom path too) and the COMPOSED fold still prefers a z-init
+that is not.
+
+It reports a real divergence at ONE pass: **s corr 0.963092, z corr 0.914937**.
+Two things to know before chasing it:
+
+  * the gate's own oracle is young, and two bugs have already come out of it --
+    boltz2's pairformer needs `v2=True` (its layers carry `pre_norm_s` where the
+    default builds `attention.norm_s`, 128 tensors missing), and the MSA one-hot
+    has to be built in BOLTZ's class order, not ours, because our converter
+    permutes those 33 columns into our 31. So treat the number as a lead.
+  * the MSA double-add is NOT it. `AF3_NO_MSA_DOUBLE_ADD=1` moves the pass by
+    nothing (z 0.914937 -> 0.914679).
+
+The next thing to check is what each side feeds the MSA module: this gate hands
+native exactly the 2 real rows of a 6MRR batch, and our graph pads and
+subsamples to `num_msa` with the row-count outer-product norm. If those differ,
+the divergence is the harness and the chain-bucket anomaly is still open.
+
 # Category 1: the holes, from the AUTHORITATIVE run (2026-09-09-full)
 
 Module levels L0-L4, every model: **236 cells -- 116 OK, 79 N/A, 39 HOLE,

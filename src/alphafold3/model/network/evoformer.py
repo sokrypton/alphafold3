@@ -679,7 +679,12 @@ class Evoformer(hk.Module):
       # drops one copy of z. Measured on the lone ligand -- our MSA contribution had
       # std 9.1 against native's 18.1 (corr 0.916), and z entering the pairformer was
       # 15.8 vs 25.9.
-      pair_out = pair_out + pair_activations
+      # AF3_NO_MSA_DOUBLE_ADD exists to A/B this against the vendor's own loop
+      # (dev/oracles/trunk_init_parity.py PASSES=n). Measured there: turning it
+      # off moves the composed first pass by almost nothing (z corr 0.914937 ->
+      # 0.914679), so whatever makes that pass disagree, it is not this.
+      if not __import__('os').environ.get('AF3_NO_MSA_DOUBLE_ADD'):
+        pair_out = pair_out + pair_activations
 
     return pair_out, key
 

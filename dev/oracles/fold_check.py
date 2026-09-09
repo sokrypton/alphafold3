@@ -126,6 +126,12 @@ def _fold_setup(model_name, seq, model_dir=None, templates=None, seed=0,
     # vendor with one convention and the FOLD prefers the other. Being able to
     # fold at zero recycles is what separates those.
     cfg.num_recycles = int(os.environ['RECYCLES'])
+  if os.environ.get('MSA_STACK'):
+    # How many MSA-stack blocks run INSIDE the recycle loop. Zero removes the
+    # module (and, for boltz2/chai1, the double-add that goes with it), which is
+    # a differential test rather than a realistic setting: it says whether a
+    # difference that only appears with recycling lives in that module.
+    cfg.evoformer.msa_stack.num_layer = int(os.environ['MSA_STACK'])
   if os.environ.get('NUM_MSA'):
     cfg.evoformer.num_msa = int(os.environ['NUM_MSA'])
   if os.environ.get('STEPS'):
