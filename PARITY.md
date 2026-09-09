@@ -1986,9 +1986,15 @@ including the query, then truncated to the first `num_msa`. At 1STP's depth 2145
 with `msa_max_depth` 1024 the query is dropped about half the time.
 
 `featurization.subsample_msa_keep_query` + `model_config.MSA_KEEP_QUERY_ROW`,
-named per family. **It did not fix the fold** (14.364 -> 17.064 with the LM
-attached), which is why it is recorded as a fidelity fix: it is what native
-does, and the number moved the wrong way.
+named per family. **It is not what fixed the fold, and it is not a regression
+either.** On its own it read 14.364 -> 17.064, which looked like a change for
+the worse; with the block order (below) also fixed, turning it back off through
+`AF3_NO_KEEP_QUERY` gives 0.477 best / 0.485 mean -- the SAME numbers as leaving
+it on. So the 17.064 was noise inside a broken regime, and this stands as a
+fidelity fix: it is what native does, and on this target it costs nothing either
+way. A target whose alignment is shallower than `num_msa` would not even reach
+the truncation, so somewhere between there and depth 2145 it has to start
+mattering; 1STP is simply not where.
 
 Correcting the record: `msa_max_depth=1024` DOES bind at 2145 rows. The earlier
 note here that it "never binds" was wrong.

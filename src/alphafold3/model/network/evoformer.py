@@ -819,8 +819,20 @@ class Evoformer(hk.Module):
           # returns the updated pair, so `z + encoder(z)` double-counts z --
           # the same shape as boltz2's and chai's, and the weights were trained
           # with it.
-          n_msa_rows = batch.msa.rows.shape[0]
-          if n_msa_rows > 1:
+          # native's `msa_track_mask`:
+          #     msa_track_mask = msa_attention_mask[:, :, 1:].any(dim=(1, 2))
+          # "is there ANY real non-query row", and the encoder multiplies its
+          # WHOLE output by it. Reading it off `rows.shape[0]` instead was
+          # wrong: that is the PADDED depth (16384 here), so it is true for a
+          # query-only alignment too -- we ran the whole MSA track on ~1023
+          # all-gap padding rows where native runs nothing at all. It showed up
+          # as a single-sequence fold MOVING when the block order was fixed,
+          # which for a target with no MSA it must not.
+          #
+          # A traced multiply, not a Python branch: the answer depends on the
+          # mask's VALUES. The shape test stays as a static early-out for a
+          # batch that provably cannot have a second row.
+          if batch.msa.rows.shape[0] > 1:
             msa_out, key = self._embed_process_msa(
                 msa_batch=batch.msa,
                 pair_activations=pair_activations,
@@ -831,9 +843,9 @@ class Evoformer(hk.Module):
                 is_ligand=batch.token_features.is_ligand,
                 asym_id=batch.token_features.asym_id,
             )
-            pair_activations = pair_activations + msa_out
-          # with a query-only MSA `msa_track_mask` is all False and native's
-          # whole update is multiplied by zero, so there is nothing to add.
+            msa_track = jnp.any(batch.msa.mask[1:] > 0).astype(
+                msa_out.dtype)
+            pair_activations = pair_activations + msa_out * msa_track
       elif chai:
         pair_activations = self._relative_encoding(batch, pair_activations)
         pair_init = pair_activations
