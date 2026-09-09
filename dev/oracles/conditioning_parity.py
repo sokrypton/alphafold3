@@ -115,7 +115,12 @@ def native_opendde(model, batch, rng, n, noise):
   # `relpe.linear_no_bias` gives the DIFFUSION pair width, `linear_no_bias_z`
   # the trunk's -- the two the extra argument separates.
   c_z_pair = sub['relpe.linear_no_bias.weight'].shape[0]
-  c_z = sub['linear_no_bias_z.weight'].shape[1]
+  # `linear_no_bias_z` takes [z_trunk, relpe] CONCATENATED, so its input width
+  # is c_z + c_z_pair -- (128, 256) with c_z_pair 128 means c_z is 128, not 256.
+  # Read straight off shape[1] it would have built the module at twice the trunk
+  # width and died in load_state_dict, which is the good failure; the point of
+  # deriving both is that neither can be assumed equal to the other.
+  c_z = sub['linear_no_bias_z.weight'].shape[1] - c_z_pair
   c_s = sub['linear_no_bias_s.weight'].shape[0]
   c_s_inputs = sub['layernorm_s.weight'].shape[0] - c_s
   c_noise = sub['layernorm_n.weight'].shape[0]
