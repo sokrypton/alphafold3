@@ -2,18 +2,11 @@
 
 ## IN FLIGHT at the time of writing -- where to look
 
-Two jobs are running, and their logs are in a SESSION SCRATCHPAD, which is
-exactly the trap [[harness-rot]] describes. Paths, markers and what each answers:
+One job is still running, and its log is in a SESSION SCRATCHPAD, which is
+exactly the trap [[harness-rot]] describes. Path, marker and what it answers:
 
-  * `/tmp/claude-1000/-home-ubuntu-ColabDesign2/<session>/scratchpad/lm600.log`
-    -- marker `LM600DONE`. Three seeds of `esmfold2_lm600m` on 6MRR, with and
-    without `AF3_NO_ESM_REF_POS` + `AF3_NO_ESM_DROP_OXT`, answering whether the
-    ref_pos table and the OXT drop cost anything on the lm tier (they were
-    validated fold-neutral on `esmfold2` and the dropped `esmfold2_exp`, never
-    here). Seed 0: WITH 1.113 best / 1.486 mean, WITHOUT 0.834 / 1.423. The
-    comparison IS paired -- the dense atom layout is `num_tokens * max_atoms`
-    and dropping OXT masks a slot rather than resizing it, so both arms draw
-    identical noise.
+  * the `lm600m` A/B is **RESOLVED** -- see "The lm600m A/B" below. It cost
+    +0.017 A on the 15-sample mean and flips sign by seed; the change stays.
   * `.../scratchpad/final.log` -- marker `FINALDONE`. Queued behind it: the
     authoritative pass over the purged 14-model project, `FORCE=1`, into
     `dev/oracles/parity_runs/2026-09-09-final/`, then
@@ -103,8 +96,35 @@ other four samples match to ~0.03 (1.581/1.568, 1.528/1.538, 1.592/1.556,
 has retracted exactly that inference before -- protenix2's "modified residue
 bug" was one lucky seed. **But the honest gap is real: the ref_pos table and
 the OXT drop were validated fold-neutral on `esmfold2` and on the now-dropped
-`esmfold2_exp`, never on the lm tier.** Being measured across seeds with both
-knobs (`AF3_NO_ESM_REF_POS`, `AF3_NO_ESM_DROP_OXT`).
+`esmfold2_exp`, never on the lm tier.** Now measured -- see "The lm600m A/B"
+below: +0.017 A on 15 paired samples, and it flips sign by seed.
+
+## The lm600m A/B -- RESOLVED, the change stays
+
+Three seeds x 5 samples of `esmfold2_lm600m` on 6MRR, with and without
+`AF3_NO_ESM_REF_POS` + `AF3_NO_ESM_DROP_OXT`. The comparison is **paired**: the
+dense atom layout is `num_tokens * max_atoms`, so dropping OXT masks a slot
+rather than resizing it, and both arms draw identical noise. So the right
+statistic is the per-sample delta, not the best-of-5.
+
+| seed | WITH (current default) | WITHOUT (old behaviour) |
+|---|---|---|
+| 0 | 1.113 1.579 1.541 1.585 1.614 | 0.834 1.596 1.493 1.578 1.612 |
+| 1 | 1.560 0.980 1.521 1.587 1.456 | 1.560 1.097 1.530 1.591 1.455 |
+| 2 | 1.492 1.516 1.435 1.293 1.610 | 1.487 1.517 1.417 1.246 1.615 |
+
+**13 of the 15 paired deltas are inside +/-0.05 A**, and the two that are not
+point in OPPOSITE directions: seed 0 sample 0 is +0.279 against the change,
+seed 1 sample 1 is -0.117 for it. Mean over all 15: **1.459 WITH vs 1.442
+WITHOUT, a +0.017 A difference** -- inside the sampling band this file has
+measured repeatedly.
+
+So the 0.937 -> 1.506 that the purge table showed was one sample of one seed,
+exactly the [[protenix2-5k9p-retraction]] shape. Decision: **keep both**. They
+are certified by a gate that measures something a fold cannot -- the atom
+conditioning is now bit-exact against the native module (a_token corr
+1.000000, `DIAG` p90 0.0000) -- and traded against a mean difference that is
+not distinguishable from noise. A hard measurement outranks a soft one.
 
 The 12 HuggingFace files for the dropped releases are still published and now
 orphaned; deleting them is outward-facing and has not been done.
