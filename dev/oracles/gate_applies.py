@@ -57,6 +57,13 @@ def reason(gate, model):
   # implementation lives in ~/venv_esm only, so the family is gated through
   # npz dumps instead, under the *_ref and *dump names. Reporting the
   # in-process cell as a hole would double-count what is already covered.
+  # protenix's MSA module has its own cell. `msa_parity.py`'s own docstring says
+  # so: "prot_parity.py gates the MSA module for protenix only, which is what
+  # closes CLAMPED_OPM_NORM and NO_MSA_ROW_UPDATE". So L1b.msa is n/a there,
+  # covered by L1b.prot.
+  if gate.startswith('L1b.msa') and model in mc.PROTENIX_FAMILY:
+    return 'protenix\'s MSA module is gated by L1b.prot, not L1b.msa'
+
   ref_covered = {'L1.trunk': 'L1.trunk_ref',
                  'L3.denoise': 'L3.denoise_ref',
                  'L1d.dgram': 'L1.trunk_ref (the distogram rides on it)',
