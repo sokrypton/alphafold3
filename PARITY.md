@@ -1900,6 +1900,40 @@ pair reads 0.998994 for the same reason). Its template stack is the widened
 every width is read off the checkpoint; hardcoding AF3's numbers fails in
 load_state_dict with eight size mismatches rather than comparing quietly.
 
+## chai1's first in-repo module gate: L4 by injection (2026-09-09)
+
+chai1 had L0, L5 and L6 and nothing in between -- every module cell a SKIP,
+because its modules ship inside TorchScript archives with no callable submodule
+`forward`. But its confidence head's verbatim I/O was captured during the port
+(nine input tensors, three output LOGIT tensors), and a capture needs no torch,
+no trunk, no diffusion and no featurisation agreement:
+
+    dev/oracles/chai1_confidence_parity.py
+      pae_logits  corr 0.999938  rms ours/native 1.0001
+      pde_logits  corr 0.999916  rms ours/native 1.0001
+
+**Logits, not the derived pLDDT/PAE**, so no assumption about chai's bin centres
+enters the gate -- the trap in [[confidence-heads-status]], where a head emitting
+logits under a score key reads plausible and is wrong. Only PAE and PDE: they
+are per TOKEN PAIR and need no atom-layout agreement, where pLDDT is per atom
+and would.
+
+Two things it took to get right, both worth keeping:
+
+  * **`atom_name_chars` is REQUIRED for chai1.** `confidence_head.py:521` keys
+    its 37-slot pLDDT gather on that argument being present; omit it and the
+    generic path builds a 24-slot projection the blob cannot fill
+    (`plddt_logits/weights` (384, 37, 50) against (384, 24, 50)). chai's 37 is
+    ATOM37 padding for the largest residue.
+  * **the PDE half.** AF3 emits the LEFT half and symmetrises
+    (`left + swapaxes(left)`); chai computes `pde_projection(LN(z) + LN(z)^T)`,
+    the same function. Comparing our half against its full matrix read corr
+    0.963 with **rms ours/native 0.5019** -- and a ratio of exactly one half is
+    the tell, not a finding. Symmetrised, 0.999916.
+
+The residual few percent is bf16: chai's head runs in bfloat16 natively and the
+capture is stored that way.
+
 **chai1 cannot be gated here, and the reason is structural.** chai ships
 TorchScript (`models_v2/trunk.pt`), and while `template_embedder` IS reachable as
 a child module with its parameters, it has **no callable `forward`** -- the

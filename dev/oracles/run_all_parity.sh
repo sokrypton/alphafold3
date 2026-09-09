@@ -255,6 +255,12 @@ if want L4; then
   for m in $MODELS; do
     gate L4.confidence "$m" '^  (full_pae|plddt)' dev/oracles/confidence_parity.py "$m"
   done
+  # chai1's head has no standalone-constructible vendor module, but its verbatim
+  # I/O was captured during the port -- nine inputs and three LOGIT tensors -- so
+  # its L4 is an injection gate. Logits, not the derived pLDDT/PAE, so no
+  # assumption about chai's bin centres enters it.
+  gate L4.confidence_inject chai1 '_logits' \
+    dev/oracles/chai1_confidence_parity.py
 fi
 
 # --- L5 / L6: folds. Much slower, and opt-in for that reason -------------
