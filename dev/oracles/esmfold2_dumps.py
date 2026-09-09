@@ -72,6 +72,45 @@ def native(model='esmfold2', target='6mrr68'):
       % (path, os.path.dirname(os.path.dirname(HERE))))
 
 
+# What the module-I/O hooks in `esmfold2_oracle_6mrr.py` put in the dump, read
+# off the vendor's own call sites rather than discovered by running it -- both
+# modules are called with keyword arguments only, so the key names ARE the
+# parameter names:
+#
+#   dec.in.a_i / q_l / c_l / p_lm / atom_to_token / atom_attention_mask
+#   dec.out.0                     r_update, the per-atom position update
+#   conf.in.s_inputs / z / x_pred / distogram_atom_idx / token_attention_mask
+#          / atom_to_token / atom_attention_mask / asym_id / mol_type
+#          / relative_position_encoding / token_bonds_encoding
+#   conf.out.<name>               one key per entry of the head's output dict
+#
+# Non-tensor arguments (`num_diffusion_samples`, `return_intermediates`) are not
+# recorded. The decoder hook fires once per sampling step, so what lands in the
+# dump is the LAST step -- which is why its INPUTS are dumped beside its output:
+# a gate feeds the recorded inputs and compares the recorded output, so it never
+# has to reproduce the step.
+MODULE_IO_KEYS = ('dec.in.a_i', 'dec.in.q_l', 'dec.in.c_l', 'dec.in.p_lm',
+                  'dec.in.atom_to_token', 'dec.in.atom_attention_mask',
+                  'dec.out.0')
+
+
+def module_io(model='esmfold2', target='6mrr68', tag='dec'):
+  """-> {key without the `<tag>.` prefix: array} for one hooked module.
+
+  Raises with the producing command if the dump predates the hooks, rather than
+  returning an empty dict that a gate would read as "nothing to compare".
+  """
+  d = native(model, target)
+  got = {k[len(tag) + 1:]: v for k, v in d.items() if k.startswith(tag + '.')}
+  if not got:
+    raise SystemExit(
+        'the dump for %s/%s carries no %r module I/O -- it predates the hooks '
+        'in esmfold2_oracle_6mrr.py. Regenerate it:\n'
+        '    MODEL=%s ~/venv_esm/bin/python dev/oracles/esmfold2_oracle_6mrr.py'
+        % (model, target, tag, model))
+  return got
+
+
 def atom_map(fb, f):
   """-> (ref_idx, our_flat): the same atoms, in each side's own flat indexing.
 
