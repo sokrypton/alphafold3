@@ -2177,6 +2177,68 @@ esmfold2's 3) returns no new bugs:
     branch beside it is DEAD: `pair_bias_attn` is always constructed and no
     `no_pair_bias_attn` attribute is ever defined.
 
+## ESMFold2's atom encoder wants ESMFold2's OWN ref_pos (2026-09-09)
+
+The family's L2.atom_encoder residual had been filed as "the ref_pos local-frame
+difference" and left. It is exactly that, and the frame is nameable:
+`protein_utils.prepare_protein_features` fills `ref_pos` straight from
+`PROTEIN_REF_POS[res_3][atom_name]`, with no centering and no augmentation,
+while AF3 -- and so `featurise_spec` -- uses the CCD ideal values.
+
+`constants/esmfold2_ref_pos.py` now carries that table (21 residues, 171
+heavy-atom positions, from transformers, Apache-2.0). It is NOT centred
+(per-residue |centroid| 0.333 A mean, 0.535 max), so it is a specific frame.
+Substituted by atom NAME through the helper chai1's `std_conformers` uses, so
+AF3's terminal OXT keeps the coordinate it had. `AF3_NO_ESM_REF_POS=1` is the
+A/B.
+
+| | `c_atom_cond` max\|d\| | `q_atom` |
+|---|---|---|
+| `esmfold2` CCD ideals | 0.00136 (1.2e-03) | corr 0.999805, 0.514 |
+| `esmfold2` its own table | **0.00000 (1.3e-06)** | corr 0.999933, 0.496 |
+| `esmfold2_exp` CCD ideals | 0.00344 (2.6e-03) | corr 0.999638, 1.07 |
+| `esmfold2_exp` its own table | **0.00000 (1.5e-06)** | corr **0.999993**, 0.357 |
+
+**The atom CONDITIONING is bit-exact on both lines** -- it is what consumes
+`ref_pos` directly, so that is the proof the table is the right input -- **and
+the fold does not move**: 6MRR released reads 1.390 against the 1.387 on record,
+per-sample identical to 0.003 A. Strictly more faithful at no cost, and the two
+claims are worth separating, because module exactness and fold quality are not
+the same thing.
+
+### STILL OPEN: a second residual, in the atom TRANSFORMER
+
+`a_token` survives the fix at max|d|/rms 0.48 (released) and 0.84
+(experimental), corr 0.9998 -- a handful of atoms badly wrong, not noise. The
+inputs are now exact, so it is the transformer. The gate names the suspect
+itself: "native windows the DENSE atom axis, ours the packed one", and
+ESMFold2's window is +/-64 by RANK among valid atoms where AF3's is
+block-aligned with the exact window riding in as a mask.
+
+## The matrix had no denominator, and now it does (2026-09-09)
+
+`run_all_parity.sh` reported one SKIP for two different things: a module the
+model DOES NOT HAVE, and a module it has with no adapter written. So the last
+esmfold2 refresh read **22 OK / 88 SKIP** when it was really
+
+    22 OK   /   52 N/A   /   36 HOLES
+
+and the 36 sat in exactly six gates -- L2.atom_decoder (8), L2.conditioning (6),
+L2.atom_encoder (6), L3.denoise_ref (6), L4.confidence (6), L1.trunk_ref (4) --
+which is a morning's work rather than an open-ended backlog.
+
+`dev/oracles/gate_applies.py` decides from the REGISTRY, not from a hand list:
+`ESMFOLD2_VARIANTS` msa=0 means no MSA gate, `NO_CONFIDENCE_HEAD` means no L4,
+the family has no template embedder, and the in-process gates are n/a for
+ESMFold2 because it is gated by dump under the `*_ref` names instead. A variant
+that gains a module stops being n/a with no edit here.
+
+Two of those six gate groups were not missing adapters at all -- they were
+CRASHING, both because the reference/oracle path knew only the released line:
+`stack_blocks` died on `blocks[0]` for a stack of zero blocks (experimental sets
+`coda=0` and `lm_enc=0`), and `confidence_head` assumed the released head's five
+extra submodules. Both now read the checkpoint.
+
 ## OPEN: six vendors CENTRE their reference conformers and we do not (2026-09-09)
 
 Found by following the boltz2 lead below, and it is not boltz2-specific. Our
