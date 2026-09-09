@@ -2206,14 +2206,46 @@ per-sample identical to 0.003 A. Strictly more faithful at no cost, and the two
 claims are worth separating, because module exactness and fold quality are not
 the same thing.
 
-### STILL OPEN: a second residual, in the atom TRANSFORMER
+### ...and the residual that survived it is the terminal OXT
 
-`a_token` survives the fix at max|d|/rms 0.48 (released) and 0.84
-(experimental), corr 0.9998 -- a handful of atoms badly wrong, not noise. The
-inputs are now exact, so it is the transformer. The gate names the suspect
-itself: "native windows the DENSE atom axis, ours the packed one", and
-ESMFold2's window is +/-64 by RANK among valid atoms where AF3's is
-block-aligned with the exact window riding in as a mask.
+`a_token` survived the table at max|d|/rms 0.48 (released) / 0.84
+(experimental), corr 0.9998. `DIAG` located it in one run:
+
+    per-token max|d|: worst [(67, 2.163), (66, 0.767), (62, 0.647),
+                             (65, 0.600), (64, 0.458), (61, 0.237)]
+                      median 0.0000   p90 0.2017   n tokens 68
+
+**The median is exactly zero.** Only the last seven tokens of 68 are wrong, and
+monotonically worse toward the end. 6MRR is 68 residues and our atom list was
+574 against native's 573 -- one extra atom, AF3's terminal OXT, which
+`PROTEIN_REF_POS` has no entry for in any residue, so ESMFold2 has never seen
+one.
+
+It is not a harmless extra atom, because the atom attention is a +/-64 window
+by RANK among valid atoms: a spurious atom at the END of the list falls inside
+the window of the last ~64 atoms, and 64 atoms at ~8 per residue is the last
+eight residues. That is tokens 61..67 exactly.
+
+`drop_atoms=('OXT',)` already exists as a knob -- chai1 uses it, for the same
+reason (its conformers carry no OXT either). Applied to the family, with
+`AF3_NO_ESM_DROP_OXT=1` as the A/B.
+
+**Four things were eliminated by reading before DIAG was believed**, and they
+are worth not re-doing: the SWA window semantics (native
+`abs(rank_i - rank_j) <= half_window`, `half_window = swa_window_size // 2 = 64`,
+`rank = cumsum(valid) - 1`, and the flash path's `cu_seqlens` is
+`mask.sum(-1)` -- one sequence per structure -- all identical to ours, no
+off-by-one); the aggregation (native `scatter_reduce(reduce='mean')` after
+`F.relu(atom_to_token_linear(q))`, ours `mask_mean` after `relu(Linear(q))` --
+same order, and the relu being AFTER the Linear on both sides was the
+promising-looking difference that turned out not to be one); atom-name coverage
+(`c_atom_cond` exact across all 573 real atoms); and the atom feature order.
+
+Also worth stating: **`a_token` reading worse than `q_atom` is not a second
+bug.** `q_atom` is the per-atom activation BEFORE the aggregation Linear, and a
+relu amplifies relative error near zero -- an atom whose pre-activation straddles
+0 turns a small difference into a full-magnitude one, and the mean over ~4 atoms
+carries it.
 
 ## The matrix had no denominator, and now it does (2026-09-09)
 
