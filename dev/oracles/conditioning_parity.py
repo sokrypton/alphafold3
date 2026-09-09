@@ -115,12 +115,14 @@ def native_opendde(model, batch, rng, n, noise):
   # `relpe.linear_no_bias` gives the DIFFUSION pair width, `linear_no_bias_z`
   # the trunk's -- the two the extra argument separates.
   c_z_pair = sub['relpe.linear_no_bias.weight'].shape[0]
-  # `linear_no_bias_z` takes [z_trunk, relpe] CONCATENATED, so its input width
-  # is c_z + c_z_pair -- (128, 256) with c_z_pair 128 means c_z is 128, not 256.
-  # Read straight off shape[1] it would have built the module at twice the trunk
-  # width and died in load_state_dict, which is the good failure; the point of
-  # deriving both is that neither can be assumed equal to the other.
-  c_z = sub['linear_no_bias_z.weight'].shape[1] - c_z_pair
+  # This is what `c_z_pair_diffusion` exists FOR, and the checkpoint spells it
+  # out: opendde carries `layernorm_z_trunk` + `linear_no_bias_z_trunk`, which
+  # project the TRUNK pair down to the diffusion width before it is concatenated
+  # with relpe. So the trunk width is the z_trunk norm's, and
+  # `linear_no_bias_z`'s 256-wide input is [projected_trunk, relpe] -- both
+  # halves already at c_z_pair, which is why deriving c_z from it gave 128 where
+  # our own config says 384.
+  c_z = sub['layernorm_z_trunk.weight'].shape[0]
   c_s = sub['linear_no_bias_s.weight'].shape[0]
   c_s_inputs = sub['layernorm_s.weight'].shape[0] - c_s
   c_noise = sub['layernorm_n.weight'].shape[0]
@@ -222,8 +224,11 @@ def native_boltz2(model, batch, rng, n, noise):
   tf = batch.token_features
   feats = {}
   for k in ('asym_id', 'residue_index', 'entity_id', 'token_index', 'sym_id'):
-    feats[k] = torch.tensor(np.asarray(getattr(tf, k)).astype(np.float32))[None]
-  feats['mol_type'] = torch.zeros(1, n)
+    # int64: the encoder one-hots these, and torch's one_hot refuses anything
+    # but a LongTensor ("one_hot is only applicable to index tensor of type
+    # LongTensor"). Only `mol_type` is compared rather than indexed.
+    feats[k] = torch.tensor(np.asarray(getattr(tf, k)).astype(np.int64))[None]
+  feats['mol_type'] = torch.zeros(1, n, dtype=torch.long)
   rp = RelativePositionEncoder(token_z=token_z)
   rp.load_state_dict(sub_r, strict=False)
   rp.eval()
