@@ -344,6 +344,21 @@ CLAMPED_OPM_NORM = ESMFOLD2_FAMILY
 # single-sequence 6MRR fold was exact throughout while its MSA module was not.
 OPM_ROW_COUNT_NORM = ('boltz2',)
 
+# The minimum blob CONVENTION this library will read, per model. See
+# converters/common.BLOB_CONVENTION for what a convention is and what version 1
+# means; an absent `__meta__/__convention__` record counts as 0, which is every
+# blob published before the record existed.
+#
+# EMPTY ON PURPOSE, for now. Adding a model here makes the loader REFUSE that
+# model's currently published blob until it is reconverted and re-uploaded, so
+# an entry and a republish have to land together or every user of that model
+# breaks in between. The esmfold2 family's convention DID change today (the
+# alphabet permutation) and its blobs were republished, but without the record
+# -- so enforcement for them rides along with the next reconversion rather than
+# forcing a second 6.5 GB upload into a window where a half-applied guard is
+# worse than none.
+MIN_BLOB_CONVENTION: dict[str, int] = {}
+
 # Models whose outer product adds the OUTPUT BIAS AFTER the divide, i.e.
 # `Wout(outer) / n` against `Wout(outer / n)`. Algebraically the two differ by
 # exactly `output_b * (1 - 1/n)` -- a per-CHANNEL CONSTANT, which is why corr

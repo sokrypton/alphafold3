@@ -26,8 +26,24 @@ from alphafold3.model.params import encode_record, read_records
 # blob io
 # ---------------------------------------------------------------------------
 
+# The CONVENTION version of a converted blob: bumped when a fix changes what the
+# weights MEAN rather than only their values, so a blob and a library that
+# disagree fail loudly instead of predicting quietly. The stale-blob guard that
+# went with the shape manifests covered PROVENANCE (are these the weights we
+# think they are?); this covers INTERPRETATION (does this library read them the
+# way the converter wrote them?).
+#
+#   1  ESMFold2's restype/profile alphabet is a PERMUTATION, not a shift-by-two
+#      (converters/esmfold2.esm_class_of_af3). The matching widening lives in
+#      diffusion_head, so a v1 blob under a pre-permutation library puts AF3's
+#      gap column on a NUCLEIC weight row -- silently, and only on inputs that
+#      have gaps or nucleic acids at all.
+BLOB_CONVENTION = 1
+
+
 def write_params_blob(output_dir, filename, params, *, add_meta=True,
-                      level=10, dtype=np.float32):
+                      level=10, dtype=np.float32,
+                      convention=BLOB_CONVENTION):
   """Write a nested {scope: {name: array}} tree to output_dir/filename (.bin.zst).
 
   Records are scope/name-sorted for a stable byte layout. add_meta prepends the
@@ -45,6 +61,18 @@ def write_params_blob(output_dir, filename, params, *, add_meta=True,
       name = os.path.basename(filename).split('.')[0].encode()[:64]
       ident[:len(name)] = np.frombuffer(name, dtype=np.uint8)
       comp.write(encode_record('__meta__', '__identifier__', ident))
+    if convention is not None:
+      # DEFAULTED, so every new conversion is self-describing without touching
+      # fourteen converters. Safe for an older library too: it lands under the
+      # `__meta__` scope that already carries `__identifier__`, which loaders
+      # either skip outright (model/esm.py) or pass through into params, where
+      # haiku ignores what the graph does not ask for.
+      #
+      # A separate record rather than a suffix on __identifier__: that field is
+      # stamped into every structure a run writes, as the provenance of the
+      # weights, so widening it would change output files too.
+      comp.write(encode_record('__meta__', '__convention__',
+                               np.asarray([convention], np.int32)))
     for scope in sorted(params):
       for name in sorted(params[scope]):
         comp.write(encode_record(scope, name, np.asarray(params[scope][name], dtype=dtype)))

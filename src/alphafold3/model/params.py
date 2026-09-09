@@ -282,4 +282,43 @@ def get_model_haiku_params(model_dir: epath.PathLike) -> hk.Params:
     params.setdefault(scope, {})[name] = jnp.array(arr)
   if not params:
     raise FileNotFoundError(f'Model missing from "{model_dir}"')
+  _check_blob_convention(model_dir, params)
   return params
+
+
+def _check_blob_convention(model_dir, params) -> None:
+  """Refuse a blob this library would MISREAD, rather than predicting quietly.
+
+  Some fixes change what a weight MEANS, not just its value -- ESMFold2's
+  restype/profile alphabet being a permutation rather than a shift-by-two is
+  one, because the matching widening lives in `diffusion_head`. A blob and a
+  library that disagree about that produce a fold with no error anywhere, and
+  only on inputs that have gaps or nucleic acids at all.
+
+  `converters/common.BLOB_CONVENTION` is the version a fresh conversion writes
+  into `__meta__/__convention__`; `model_config.MIN_BLOB_CONVENTION` is the
+  minimum this library will read, PER MODEL. Per model on purpose: a global
+  minimum would reject every blob of every model the moment one model's
+  convention changed, and the whole point is to be precise about which
+  artifacts are actually incompatible.
+
+  An absent record means convention 0 -- every blob published before this
+  existed -- so a model with no entry in the table is unchecked, and adding an
+  entry is what makes the guard bite.
+  """
+  from alphafold3.model import model_config
+
+  name = os.path.basename(os.path.normpath(os.path.expanduser(str(model_dir))))
+  minimum = model_config.MIN_BLOB_CONVENTION.get(name)
+  if not minimum:
+    return
+  rec = params.get('__meta__', {}).get('__convention__')
+  have = int(np.asarray(rec).reshape(-1)[0]) if rec is not None else 0
+  if have < minimum:
+    raise ValueError(
+        f'{name}: these weights were converted under blob convention {have}, '
+        f'and this library reads convention {minimum} or later. The two '
+        'disagree about what the weights MEAN, so the fold would be wrong '
+        'without erroring. Re-download the blob (delete '
+        f'{model_dir} and let ensure_weights refetch it), or re-run the '
+        'converter against the checkpoint.')
