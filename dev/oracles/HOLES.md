@@ -27,7 +27,32 @@ comparisons inside those OK cells, **PARITY 77, CLOSE 16, LOOSE 10, BAD 12**.
 | BAD | L3.denoise | intellifold2 | `x_denoised` | 0.999950 | 0.141 |
 | BAD | L2.conditioning | rosettafold3 | `single_cond` | 0.999996 | 0.124 |
 
-**`p_atom_pair` is four models of one lineage, so it is one suspect, not four.**
+**`p_atom_pair` is four models of one lineage, so it is one suspect, not four --
+and the shapes say it is probably the HARNESS.**
+
+    ours   (51, 32, 128, 16)      51 * 32 = 1632 = 68 tokens * 24 max_atoms
+    native (18, 32, 128, 16)      18 * 32 =  576, i.e. 574 real atoms rounded up
+
+Our flat queries axis is padded to `num_tokens * max_atoms`; native's stops at
+the real atoms. The gate compares `pg[:18]` against `pr[:18]` on the stated
+assumption that "the leading windows hold the same atoms in the same order",
+and for the QUERY axis that holds -- `c_atom_cond` is exact under the same
+`[:574]` slicing, which proves the real atoms are contiguous at the front.
+
+But the KEY axis is 128 wide per window, and for the last real windows those
+keys run PAST atom 574. Ours then reads our own padding slots (574..623);
+native's axis simply ends at 576. So the two windows hold different keys near
+the tail, and a tail artifact would explain a large `max|d|` with `q_atom`
+exact -- q is a per-atom quantity over the query axis, p is per key PAIR.
+
+Prediction to check with `DIAG=1` (added for exactly this): the per-window
+max|d| should be concentrated at the HIGH window indices, and the per-key-position
+max|d| at the END of each window. If it is spread evenly instead, the residual
+is real and the pair conditioning genuinely differs.
+
+Do not "fix" this by trimming the comparison until the DIAG says which it is.
+Seven of the nineteen BAD cells so far have been the oracle, so the prior is
+strong -- but the prior is exactly what makes a wrong trim easy to believe.
 There is a tension to resolve first: `q_atom` is 1.000000 for protenix while
 `p_atom_pair` is 9.64 off, and q is computed FROM p -- so either the comparison
 is misaligned or p is not what feeds q. The comparison rests on an assumption
