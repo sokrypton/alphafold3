@@ -87,6 +87,167 @@ def native_protenix(model, batch, rng, n, noise):
   return (np.asarray(pair[0]), np.asarray(single[0, 0]), s_inputs_ours, s, z)
 
 
+def native_opendde(model, batch, rng, n, noise):
+  """-> (pair_cond, single_cond, s_inputs(ours-layout), s, z) from OpenDDE.
+
+  OpenDDE's `DiffusionConditioning` is protenix's with one extra constructor
+  argument, `c_z_pair_diffusion` -- the diffusion pair width, which it lets
+  differ from the trunk's c_z where protenix does not. Everything else, down to
+  the leaf names, is the same module, which is why this mirrors
+  `native_protenix` rather than inventing a second shape. Both widths come off
+  the checkpoint, so a release that changes either fails in load_state_dict
+  instead of comparing quietly.
+  """
+  import torch
+
+  _stub_layer_norm()
+  from opendde.model.modules.diffusion import DiffusionConditioning
+  from opendde.model.modules.embedders import RelativePositionEncoding
+
+  ckpt = os.path.expanduser('~/opendde_weights/opendde.pt')
+  sd = torch.load(ckpt, map_location='cpu', weights_only=False)
+  sd = sd.get('model', sd)
+  pre = 'module.diffusion_module.diffusion_conditioning.'
+  sub = {k[len(pre):]: v for k, v in sd.items() if k.startswith(pre)}
+  if not sub:
+    raise SystemExit('no %r keys in %s' % (pre, ckpt))
+
+  # `relpe.linear_no_bias` gives the DIFFUSION pair width, `linear_no_bias_z`
+  # the trunk's -- the two the extra argument separates.
+  c_z_pair = sub['relpe.linear_no_bias.weight'].shape[0]
+  c_z = sub['linear_no_bias_z.weight'].shape[1]
+  c_s = sub['linear_no_bias_s.weight'].shape[0]
+  c_s_inputs = sub['layernorm_s.weight'].shape[0] - c_s
+  c_noise = sub['layernorm_n.weight'].shape[0]
+  print('  checkpoint: c_z %d, c_z_pair_diffusion %d, c_s %d, c_s_inputs %d, '
+        'c_noise %d' % (c_z, c_z_pair, c_s, c_s_inputs, c_noise))
+
+  from converters.openfold3 import _AF3_TO_OF3_AATYPE as _remap
+  idx = np.concatenate([384 + np.asarray(_remap), 416 + np.asarray(_remap),
+                        [448], np.arange(384)])
+  s_inputs = (rng.normal(size=(n, c_s_inputs)) * 0.5).astype(np.float32)
+  s_inputs[:, np.setdiff1d(np.arange(c_s_inputs), idx)] = 0.0
+  s_inputs_ours = s_inputs[:, idx]
+  s = (rng.normal(size=(n, c_s)) * 0.5).astype(np.float32)
+  z = (rng.normal(size=(n, n, c_z)) * 0.5).astype(np.float32)
+
+  tf = batch.token_features
+  feats = {k: torch.tensor(np.asarray(getattr(tf, k)).astype(np.int64))[None]
+           for k in ('asym_id', 'residue_index', 'entity_id', 'token_index',
+                     'sym_id')}
+  relp = RelativePositionEncoding(c_z=c_z_pair).generate_relp(feats)['relp']
+  print('  relp features: %s' % (tuple(relp.shape),))
+
+  net = DiffusionConditioning(c_z=c_z, c_z_pair_diffusion=c_z_pair, c_s=c_s,
+                              c_s_inputs=c_s_inputs, c_noise_embedding=c_noise)
+  missing, unexpected = net.load_state_dict(sub, strict=False)
+  print('  native: %d tensors, %d missing, %d unexpected %s'
+        % (len(sub), len(missing), len(unexpected), list(missing)[:2]))
+  assert not missing, 'native is missing %d tensors' % len(missing)
+  net.eval()
+  with torch.no_grad():
+    single, pair = net(
+        torch.tensor(np.asarray([noise], np.float32)), relp,
+        torch.tensor(s_inputs)[None], torch.tensor(s)[None],
+        torch.tensor(z)[None], None)
+  return (np.asarray(pair[0]), np.asarray(single[0, 0]), s_inputs_ours, s, z)
+
+
+def native_boltz2(model, batch, rng, n, noise):
+  """-> (pair_cond, single_cond, s_inputs(ours-layout), s, z) from Boltz-2.
+
+  Boltz-2 splits the conditioning into two modules, both in `encodersv2` (the v2
+  line is what `models/boltz2.py` imports -- the v1 files are boltz1's):
+
+      SingleConditioning(times, s_trunk, s_inputs)
+        s = single_embed(norm_single(cat(s_trunk, s_inputs)))
+        s = s + fourier_to_single(norm_fourier(fourier_embed(times)))
+        then transitions, each RESIDUAL
+      PairwiseConditioning(z_trunk, token_rel_pos_feats)
+        z = dim_pairwise_init_proj(cat(z_trunk, relpos))
+        then transitions, each RESIDUAL
+
+  Note the single track is 2 * token_s wide, not token_s: boltz CONCATENATES
+  s_trunk with s_inputs where AF3 adds a projection of each, which is the
+  `boltz2` branch in our conditioner (`chai1_single_proj_in_structure`'s
+  neighbour). The Fourier term is added once, broadcast over tokens.
+
+  The relative-position features come from boltz's OWN RelativePositionEncoder
+  driven by OUR batch's token features, exactly as `native_protenix` does it, so
+  a disagreement in the relative encoding is inside the gate.
+  """
+  import torch
+
+  _stub_layer_norm()
+  from boltz.model.modules.encodersv2 import (PairwiseConditioning,
+                                              RelativePositionEncoder,
+                                              SingleConditioning)
+
+  ckpt = os.path.expanduser('~/boltz2_weights/boltz2_conf.ckpt')
+  raw = torch.load(ckpt, map_location='cpu', weights_only=False)
+  sd = raw.get('state_dict', raw.get('model', raw))
+  sc_pre = 'structure_module.score_model.single_conditioner.'
+  pw_pre = 'diffusion_conditioning.pairwise_conditioner.'
+  rp_pre = 'rel_pos.'
+  sub_s = {k[len(sc_pre):]: v for k, v in sd.items() if k.startswith(sc_pre)}
+  sub_p = {k[len(pw_pre):]: v for k, v in sd.items() if k.startswith(pw_pre)}
+  sub_r = {k[len(rp_pre):]: v for k, v in sd.items() if k.startswith(rp_pre)}
+  for name, sub, pre in (('single', sub_s, sc_pre), ('pair', sub_p, pw_pre),
+                         ('relpos', sub_r, rp_pre)):
+    if not sub:
+      raise SystemExit('no %r keys in %s' % (pre, ckpt))
+
+  # Widths off the checkpoint, never from a default: `norm_single` is 2*token_s
+  # wide and `fourier_to_single` gives dim_fourier.
+  token_s = sub_s['norm_single.weight'].shape[0] // 2
+  dim_fourier = sub_s['fourier_to_single.weight'].shape[1]
+  # dim_pairwise_init_proj is Sequential(LayerNorm, LinearNoBias): the norm's
+  # width is z_trunk + relpos, and the linear's output is token_z.
+  init_in = sub_p['dim_pairwise_init_proj.0.weight'].shape[0]
+  token_z = sub_p['dim_pairwise_init_proj.1.weight'].shape[0]
+  relp_dim = init_in - token_z
+  print('  checkpoint: token_s %d, token_z %d, dim_fourier %d, relpos %d'
+        % (token_s, token_z, dim_fourier, relp_dim))
+
+  s_trunk = (rng.normal(size=(n, token_s)) * 0.5).astype(np.float32)
+  s_inputs = (rng.normal(size=(n, token_s)) * 0.5).astype(np.float32)
+  z = (rng.normal(size=(n, n, token_z)) * 0.5).astype(np.float32)
+
+  # boltz's own relative-position features, from OUR batch.
+  tf = batch.token_features
+  feats = {}
+  for k in ('asym_id', 'residue_index', 'entity_id', 'token_index', 'sym_id'):
+    feats[k] = torch.tensor(np.asarray(getattr(tf, k)).astype(np.float32))[None]
+  feats['mol_type'] = torch.zeros(1, n)
+  rp = RelativePositionEncoder(token_z=token_z)
+  rp.load_state_dict(sub_r, strict=False)
+  rp.eval()
+  with torch.no_grad():
+    # The encoder projects to token_z; the CONDITIONER wants the raw features,
+    # so the projection is undone by reading the module's own pre-projection
+    # path where it exposes one and falling back to the projected form.
+    relp = rp(feats)
+  print('  relp: %s (conditioner expects %d)' % (tuple(relp.shape), relp_dim))
+
+  net_s = SingleConditioning(sigma_data=16.0, token_s=token_s,
+                             dim_fourier=dim_fourier)
+  net_p = PairwiseConditioning(token_z=token_z, dim_token_rel_pos_feats=relp_dim)
+  for name, net, sub in (('single', net_s, sub_s), ('pair', net_p, sub_p)):
+    missing, unexpected = net.load_state_dict(sub, strict=False)
+    print('  native %s: %d tensors, %d missing, %d unexpected %s'
+          % (name, len(sub), len(missing), len(unexpected), list(missing)[:2]))
+    assert not missing, '%s is missing %d tensors' % (name, len(missing))
+    net.eval()
+  with torch.no_grad():
+    single, _ = net_s(torch.tensor(np.asarray([noise], np.float32)),
+                      torch.tensor(s_trunk)[None],
+                      torch.tensor(s_inputs)[None])
+    pair = net_p(torch.tensor(z)[None], relp)
+  # ours takes s_inputs in AF3's layout; boltz's is already token_s wide and
+  # concatenated rather than projected, so it passes through unchanged.
+  return (np.asarray(pair[0]), np.asarray(single[0]), s_inputs, s_trunk, z)
+
+
 def native_rf3(model, batch, rng, n, noise):
   """-> (pair_cond, single_cond, s_inputs(ours-layout), s, z) from rf3.
 
@@ -231,6 +392,8 @@ def native_esmfold2(model, batch, rng, n, noise):
 
 NATIVES = {m: native_protenix for m in _PROTENIX_CKPT}
 NATIVES['rosettafold3'] = native_rf3
+NATIVES['boltz2'] = native_boltz2
+NATIVES['opendde'] = native_opendde
 # every ESMFold2 release, each against its OWN checkpoint
 NATIVES.update({m: native_esmfold2 for m in (
     'esmfold2', 'esmfold2_fast', 'esmfold2_exp', 'esmfold2_exp_fast',
