@@ -341,7 +341,8 @@ class Evoformer(hk.Module):
             max_relative_idx=self.config.max_relative_idx,
             max_relative_chain=self.config.max_relative_chain,
             chain_bucket_on_same_chain=(
-                self.global_config.model in model_config.ESMFOLD2_FAMILY),
+                self.global_config.model
+                in model_config.CHAIN_BUCKET_ON_SAME_CHAIN),
         ))
     pair_activations += _RelativeEncodingProjection(
         self.config.pair_channel, name='position_activations',

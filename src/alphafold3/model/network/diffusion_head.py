@@ -215,8 +215,11 @@ class DiffusionHead(hk.Module):
           # (0.999957). Two call sites for one convention is exactly the shape
           # of bug this repo keeps finding; the flag is named identically in
           # both places so a grep finds them together.
+          # The DIFFUSION list, not the trunk's: boltz2's two call sites do
+          # not agree, and model_config says why with the numbers.
           chain_bucket_on_same_chain=(
-              self.global_config.model in model_config.ESMFOLD2_FAMILY),
+              self.global_config.model
+              in model_config.CHAIN_BUCKET_ON_SAME_CHAIN_DIFFUSION),
       ).astype(pair_embedding.dtype)
       pc = self.config.conditioning.pair_channel
       if self.global_config.model == 'opendde':

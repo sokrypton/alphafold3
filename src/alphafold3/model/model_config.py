@@ -273,6 +273,43 @@ PROTENIX_FAMILY = ('protenix1', 'protenix2')
 RAW_REF_CHARGE = ('chai1', 'boltz2') + ESMFOLD2_FAMILY
 
 
+# Whose relative-CHAIN bucket is keyed on same-CHAIN, sending the MATCH to the
+# pad class, rather than on same-ENTITY sending the MISMATCH there.
+#
+# On a monomer this flips EVERY pair: same-chain is universally true, so one
+# convention makes the whole a_rel_chain one-hot the pad class (column 5) and
+# the other the zero-offset class (column 2). Read off each vendor:
+#
+#   boltz2     `torch.where(b_same_chain, 2*s_max+1, d_chain)`
+#              (encodersv2.py RelativePositionEncoder.forward)
+#   esmfold2   the same, which is where this was first found -- worth
+#              1.522 -> 0.719 A on esmfold2_lm600m
+#   opendde,   `d_chain * b_same_entity + (1 - b_same_entity) * (2*s_max+1)`,
+#   protenix   i.e. AF3's convention. Checked, not assumed.
+#
+# TWO CALL SITES build these features -- the trunk (evoformer.py) and the
+# diffusion conditioning (diffusion_head.py) -- and they DO NOT AGREE for
+# boltz2, which is why there are two lists.
+#
+# For the diffusion conditioning, boltz2's convention is certified by its own
+# module: with it, `pair_cond` is 1.000000 / max|d|/rms 1.95e-06 against
+# boltz's `PairwiseConditioning` fed our features; without it, 0.949940 / 1.60.
+# It is also free on the fold -- 15 paired samples of 6MRR, best 0.425 against
+# 0.433, mean 0.535 against 0.539.
+#
+# For the TRUNK it is NOT settled, and the fold says the opposite. Same 15
+# paired samples with the trunk ALSO flipped: mean 0.801 against 0.539, best
+# 0.514 against 0.433, and three samples at ~1.5 where the other arm has
+# nothing above 0.65. That is not sampling noise, and it contradicts the vendor
+# using ONE `rel_pos` module for both -- so something else in our trunk's
+# relative encoding differs and the two errors have been cancelling. Nothing
+# gates the trunk's z-INIT (trunk_parity feeds the pairformer stack synthetic
+# s/z, so it never sees relpos at all), which is the missing measurement and
+# the next step; until it exists, the trunk keeps the convention that folds.
+CHAIN_BUCKET_ON_SAME_CHAIN = ESMFOLD2_FAMILY
+CHAIN_BUCKET_ON_SAME_CHAIN_DIFFUSION = ('boltz2',) + CHAIN_BUCKET_ON_SAME_CHAIN
+
+
 # boltz2's atom cross-attention builds its keys by gathering the ALREADY
 # NORMALISED queries -- `k_in = to_keys(b)` where `b = self.adaln(a, s)`, with no
 # key-side norm after it (transformersv2.py DiffusionTransformerLayer.forward),
@@ -329,7 +366,7 @@ PER_BLOCK_PAIR_LAYER_NORM = (
 # `AtomCrossAtt` SHIFTS an out-of-bounds atom window bodily back inside the real
 # atom count, so its 128 keys are real whenever there are 128 atoms to find.
 #
-# These three do not rely on that. rosettafold3 adds the two mask terms
+# These four do not rely on that. rosettafold3 adds the two mask terms
 # (`-1e9 * (maskQ + maskK)`); protenix2 and opendde pad the key sequence and then
 # write -inf into the padded columns FOR REAL QUERIES
 # (`attn_bias[..., :n, 0:pad_left] = -inf`, protenix
@@ -341,7 +378,14 @@ PER_BLOCK_PAIR_LAYER_NORM = (
 # featurisation knob. It is a superset of that knob, and `model_registry_test`
 # asserts the containment, so a future padded-window port cannot land here
 # masking the wrong way.
-KEY_MASKED_ATOM_ATTENTION = ('rosettafold3', 'opendde') + PROTENIX_FAMILY
+# boltz2 masks the key side and only the key side:
+# `attn = attn + (1 - mask[:, None, None]) * -inf` with `mask` gathered into the
+# KEYS layout (`model/layers/attention.py:124`, and `to_keys(mask)` two lines
+# above). It was found by `model_registry_test.test_padded_key_windows_imply_
+# the_or_mask` the moment boltz2 gained the `padded_keys` knob, which is what
+# that test is for.
+KEY_MASKED_ATOM_ATTENTION = (
+    ('rosettafold3', 'opendde', 'boltz2') + PROTENIX_FAMILY)
 
 
 # Models that recycle through a linear STATE-SPACE step instead of an addition.

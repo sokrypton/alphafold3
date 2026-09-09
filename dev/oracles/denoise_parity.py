@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from atom_parity import flat_atom_features                 # noqa: E402
 from confidence_parity import _cmp                         # noqa: E402
-from diffusion_parity import _stub_layer_norm              # noqa: E402
+from diffusion_parity import _stub_einx, _stub_layer_norm  # noqa: E402
 
 _PROTENIX_CKPT = {
     'protenix2': 'protenix-v2.pt',
@@ -555,10 +555,144 @@ def native_of3(model, fb, feats, pos_noisy, noise, s_inputs_449, s, z):
   return np.asarray(x).reshape(-1, 3)
 
 
+def native_boltz2(model, fb, feats, pos_noisy, noise, s_inputs_449, s, z):
+  """-> x_denoised (flat real atoms) from Boltz-2's own score model + EDM.
+
+  The last of the boltz2 module holes, and the deepest: it needs everything the
+  atom and diffusion gates just gained, plus the two things only the whole step
+  has -- the conditioning DICT and the EDM preconditioning.
+
+  Three boltz2 facts:
+
+    * `DiffusionModule.forward` does not take z. It takes a
+      `diffusion_conditioning` dict that `DiffusionConditioning` produced
+      (q, c, to_keys, atom_enc_bias, atom_dec_bias, token_trans_bias), so that
+      module is built and run here first, from `diffusion_conditioning.*`.
+    * the EDM scaling lives OUTSIDE the score model, in
+      `AtomDiffusion.preconditioned_network_forward`: the network is fed
+      `c_in(sigma) * x` and `c_noise(sigma)`, and its output is combined as
+      `c_skip * x + c_out * r_update`. Same constants AF3 uses, sigma_data 16,
+      so the four coefficients are written out here rather than importing the
+      sampler (which would also want a schedule and a device).
+    * s_inputs is token_s wide (384), NOT AF3's 449. `norm_single` is 768 =
+      2 * token_s, i.e. s_trunk concatenated with s_inputs -- which is why main
+      feeds boltz2 its own width and hands the same array to both sides.
+  """
+  import numpy as _np
+  import torch
+
+  _stub_layer_norm()
+  _stub_einx()
+  from atom_parity import _boltz2_feats
+  from boltz.model.modules.diffusion_conditioning import DiffusionConditioning
+  from boltz.model.modules.diffusionv2 import DiffusionModule
+  from boltz.model.modules.encodersv2 import RelativePositionEncoder
+
+  ckpt = os.path.expanduser('~/boltz2_weights/boltz2_conf.ckpt')
+  raw = torch.load(ckpt, map_location='cpu', weights_only=False)
+  sd = raw.get('state_dict', raw.get('model', raw))
+  take = lambda pre: {k[len(pre):]: v for k, v in sd.items()
+                      if k.startswith(pre)}
+  c_pre, m_pre, r_pre = ('diffusion_conditioning.',
+                         'structure_module.score_model.', 'rel_pos.')
+  cs, ms, rs = take(c_pre), take(m_pre), take(r_pre)
+  for pre, sub in ((c_pre, cs), (m_pre, ms), (r_pre, rs)):
+    if not sub:
+      raise SystemExit('no %r keys in %s' % (pre, ckpt))
+
+  atom_s, feat_dim = cs['atom_encoder.embed_atom_features.weight'].shape
+  atom_z = cs['atom_encoder.embed_atompair_ref_pos.weight'].shape[0]
+  token_s = cs['atom_encoder.s_to_c_trans.0.weight'].shape[0]
+  token_z = cs['atom_encoder.z_to_p_trans.0.weight'].shape[0]
+  dim_fourier = ms['single_conditioner.fourier_to_single.weight'].shape[1]
+  depth = lambda sub, pre: 1 + max(int(k[len(pre):].split('.')[0])
+                                   for k in sub if k.startswith(pre))
+  n_enc = depth(cs, 'atom_enc_proj_z.')
+  n_dec = depth(cs, 'atom_dec_proj_z.')
+  n_tok_blocks = depth(cs, 'token_trans_proj_z.')
+  h_enc = cs['atom_enc_proj_z.0.1.weight'].shape[0]
+  h_dec = cs['atom_dec_proj_z.0.1.weight'].shape[0]
+  h_tok = cs['token_trans_proj_z.0.1.weight'].shape[0]
+  n_trans = depth(cs, 'pairwise_conditioner.transitions.')
+  # relpos width from the init projection's norm: token_z + relpos.
+  relp = cs['pairwise_conditioner.dim_pairwise_init_proj.0.weight'].shape[0] \
+      - token_z
+  print('  checkpoint: token_s %d, token_z %d, atom_s %d, atom_z %d, fourier '
+        '%d, relpos %d, stacks %d/%d/%d, heads %d/%d/%d, transitions %d'
+        % (token_s, token_z, atom_s, atom_z, dim_fourier, relp, n_enc,
+           n_tok_blocks, n_dec, h_enc, h_tok, h_dec, n_trans))
+  assert relp == token_z, (
+      'this adapter feeds boltz its OWN relative-position features at token_z '
+      'width; the checkpoint wants %d' % relp)
+
+  # The two modules take DIFFERENT argument sets and only look alike: the
+  # conditioner wants token_z and the atom-pair width (it builds the pair), the
+  # score model wants dim_fourier (it builds the single conditioning) and no
+  # token_z at all. Sharing one dict fires
+  # `DiffusionModule.__init__() got an unexpected keyword argument 'token_z'`.
+  kw = dict(token_s=token_s,
+            atoms_per_window_queries=32, atoms_per_window_keys=128,
+            atom_encoder_depth=n_enc, atom_encoder_heads=h_enc,
+            token_transformer_depth=n_tok_blocks,
+            token_transformer_heads=h_tok,
+            atom_decoder_depth=n_dec, atom_decoder_heads=h_dec,
+            conditioning_transition_layers=n_trans)
+  cond = DiffusionConditioning(atom_s=atom_s, atom_z=atom_z, token_z=token_z,
+                               atom_feature_dim=feat_dim, **kw)
+  score = DiffusionModule(atom_s=atom_s, dim_fourier=dim_fourier, **kw)
+  rp = RelativePositionEncoder(token_z=token_z)
+  for mod, sub, label in ((cond, cs, 'DiffusionConditioning'),
+                          (score, ms, 'score model'),
+                          (rp, rs, 'RelativePositionEncoder')):
+    missing, unexpected = mod.load_state_dict(sub, strict=False)
+    print('  native %-24s %3d tensors, %d missing, %d unexpected %s'
+          % (label, len(sub), len(missing), len(unexpected), list(missing)[:2]))
+    assert not missing, '%s is missing %d tensors' % (label, len(missing))
+    mod.eval()
+
+  n_tok = _np.asarray(fb.token_features.mask).shape[0]
+  bf, n_real, pad_to, r_dense = _boltz2_feats(fb, feats, pos_noisy, n_tok)
+  # boltz's own relative-position features, from OUR batch -- the same rule
+  # every adapter here follows, so a disagreement in the encoding is inside
+  # the gate rather than attributed to the port.
+  tf = fb.token_features
+  rpf = {k: torch.tensor(_np.asarray(getattr(tf, k)).astype(_np.int64))[None]
+         for k in ('asym_id', 'residue_index', 'entity_id', 'token_index',
+                   'sym_id')}
+  rpf['mol_type'] = torch.zeros(1, n_tok, dtype=torch.long)
+  t = lambda x: torch.tensor(_np.asarray(x, _np.float32))
+  sigma_data = 16.0
+  sigma = float(noise)
+  c_in = 1.0 / _np.sqrt(sigma ** 2 + sigma_data ** 2)
+  c_skip = sigma_data ** 2 / (sigma ** 2 + sigma_data ** 2)
+  c_out = sigma * sigma_data / _np.sqrt(sigma_data ** 2 + sigma ** 2)
+  c_noise = _np.log(sigma / sigma_data) * 0.25
+  with torch.no_grad():
+    relpos = rp(rpf)
+    q, c, to_keys, aeb, adb, ttb = cond(
+        s_trunk=t(s)[None], z_trunk=t(z)[None],
+        relative_position_encoding=relpos, feats=bf)
+    dc = {'q': q, 'c': c, 'to_keys': to_keys, 'atom_enc_bias': aeb,
+          'atom_dec_bias': adb, 'token_trans_bias': ttb}
+    r_update = score(
+        s_inputs=t(s_inputs_449)[None], s_trunk=t(s)[None],
+        r_noisy=r_dense * c_in,
+        # `times` is Float[' b'] -- ONE per sample, not a broadcastable
+        # (b, 1, 1). `FourierEmbedding.forward` does
+        # `rearrange(times, "b -> b 1")`, which refuses anything else, and
+        # `SingleConditioning` then broadcasts over tokens itself.
+        times=torch.full((1,), c_noise, dtype=torch.float32),
+        feats=bf, diffusion_conditioning=dc)
+    x = c_skip * r_dense + c_out * r_update
+  # The atom axis is packed in our order already; drop the window padding.
+  return _np.asarray(x)[0][:n_real]
+
+
 NATIVES = {m: native_protenix for m in _DIFF_SRC}
 NATIVES['intellifold2'] = native_if2
 NATIVES['rosettafold3'] = native_rf3
 NATIVES.update({m: native_of3 for m in _OF3_CKPT})
+NATIVES['boltz2'] = native_boltz2
 
 
 def ours(model, cfg, model_dir, fb, pos_dense, noise, s_inputs, s, z):
@@ -646,6 +780,12 @@ def main(argv=None):
   s449 = (rng.normal(size=(n_tok, 449)) * 0.5).astype(np.float32)
   s449[:, np.setdiff1d(np.arange(449), idx)] = 0.0
   s447 = s449[:, idx]
+  if args.model == 'boltz2':
+    w = cfg.evoformer.seq_channel
+    s449 = s447 = (rng.normal(size=(n_tok, w)) * 0.5).astype(np.float32)
+    print('  s_inputs is %d wide for this model (s_trunk is concatenated with '
+          'it, not with a 449-channel target_feat), and both sides get the '
+          'same array' % w)
   # Noisy coordinates, dense and flat, the same numbers either way.
   pos_dense = (rng.normal(size=(n_tok, max_atoms, 3)) * args.noise
                ).astype(np.float32) * feats['mask'][..., None]

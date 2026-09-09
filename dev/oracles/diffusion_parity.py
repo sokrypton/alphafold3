@@ -102,6 +102,20 @@ _DIFF_SRC = {
 }
 
 
+def _stub_einx():
+  """Stand in for `einx`, which boltz2's loss module imports and never uses.
+
+  `model/modules/diffusionv2.py` imports `model/loss/diffusionv2.py`, whose only
+  reference to einx is the import line itself -- so the whole DiffusionModule is
+  unreachable from this venv for a dead dependency. Stubbing it is right rather
+  than expedient: nothing in the port's path calls it, and installing into
+  ~/venv is not on the table.
+  """
+  import sys
+  import types
+  sys.modules.setdefault('einx', types.ModuleType('einx'))
+
+
 def native_protenix(model, n):
   """-> (a, s, z, ref, n_blocks) from the vendor's own DiffusionTransformer.
 
@@ -356,10 +370,83 @@ def native_rf3(model, n):
   return a, s, z, np.asarray(ref[0]), n_blocks
 
 
+def native_boltz2(model, n):
+  """-> (a, s, z, ref, n_blocks) from Boltz-2's own token DiffusionTransformer.
+
+  boltz2 does NOT project the pair inside the block. `DiffusionConditioning`
+  holds a `token_trans_proj_z` ModuleList -- one (LayerNorm, Linear -> heads)
+  per block -- whose outputs are CONCATENATED into a single bias tensor, and
+  `DiffusionTransformer.forward` slices block i out of it. Our graph projects
+  inside each block from the same weights, so both sides are handed `z` and
+  each does its own projection: that keeps the comparison over the whole path
+  rather than injecting a bias one side computed.
+  """
+  import numpy as _np
+  import torch
+  import torch.nn as nn
+
+  _stub_layer_norm()
+  from boltz.model.modules.transformersv2 import DiffusionTransformer
+
+  ckpt = os.path.expanduser('~/boltz2_weights/boltz2_conf.ckpt')
+  raw = torch.load(ckpt, map_location='cpu', weights_only=False)
+  sd = raw.get('state_dict', raw.get('model', raw))
+  pre = 'structure_module.score_model.token_transformer.'
+  bias_pre = 'diffusion_conditioning.token_trans_proj_z.'
+  sub = {k[len(pre):]: v for k, v in sd.items() if k.startswith(pre)}
+  bsub = {k[len(bias_pre):]: v for k, v in sd.items()
+          if k.startswith(bias_pre)}
+  if not sub or not bsub:
+    raise SystemExit('no %r / %r keys in %s' % (pre, bias_pre, ckpt))
+
+  n_blocks = 1 + max(int(k.split('.')[1]) for k in sub
+                     if k.startswith('layers.'))
+  n_bias = 1 + max(int(k.split('.')[0]) for k in bsub)
+  assert n_bias == n_blocks, (
+      'the bias stack has %d layers and the transformer %d; the forward slices '
+      'one per block, so they have to agree' % (n_bias, n_blocks))
+  heads = bsub['0.1.weight'].shape[0]
+  token_z = bsub['0.1.weight'].shape[1]
+  dim = sub['layers.0.adaln.s_scale.weight'].shape[0] if (
+      'layers.0.adaln.s_scale.weight' in sub) else (
+      sub['layers.0.pair_bias_attn.proj_o.weight'].shape[0])
+  dim_single = sub['layers.0.adaln.s_norm.weight'].shape[0] if (
+      'layers.0.adaln.s_norm.weight' in sub) else dim
+  print('  checkpoint: %d blocks, dim %d, dim_single_cond %d, token_z %d, '
+        '%d heads' % (n_blocks, dim, dim_single, token_z, heads))
+
+  net = DiffusionTransformer(depth=n_blocks, heads=heads, dim=dim,
+                             dim_single_cond=dim_single)
+  missing, unexpected = net.load_state_dict(sub, strict=False)
+  print('  native: %d tensors, %d missing, %d unexpected %s'
+        % (len(sub), len(missing), len(unexpected), list(missing)[:2]))
+  assert not missing, 'native is missing %d tensors' % len(missing)
+  proj = nn.ModuleList([nn.Sequential(nn.LayerNorm(token_z),
+                                      nn.Linear(token_z, heads, bias=False))
+                        for _ in range(n_blocks)])
+  bmiss, bunexp = proj.load_state_dict(bsub, strict=False)
+  print('  native bias stack: %d tensors, %d missing, %d unexpected'
+        % (len(bsub), len(bmiss), len(bunexp)))
+  assert not bmiss, 'the bias stack is missing %d tensors' % len(bmiss)
+  net.eval(); proj.eval()
+
+  rng = _np.random.default_rng(0)
+  a = (rng.normal(size=(n, dim)) * 0.5).astype(_np.float32)
+  s = (rng.normal(size=(n, dim_single)) * 0.5).astype(_np.float32)
+  z = (rng.normal(size=(n, n, token_z)) * 0.5).astype(_np.float32)
+  t = lambda x: torch.tensor(_np.asarray(x, _np.float32))
+  with torch.no_grad():
+    zt = t(z)[None]
+    bias = torch.cat([l(zt) for l in proj], dim=-1)
+    ref = net(t(a)[None], t(s)[None], bias=bias, mask=torch.ones(1, n).bool())
+  return a, s, z, _np.asarray(ref)[0], n_blocks
+
+
 NATIVES = {m: native_protenix for m in _DIFF_SRC}
 NATIVES['rosettafold3'] = native_rf3
 NATIVES['intellifold2'] = native_if2
 NATIVES.update({m: native_of3 for m in _OF3_CKPT})
+NATIVES['boltz2'] = native_boltz2
 
 
 def ours(model, a, s, z, model_dir=None):

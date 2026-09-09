@@ -362,6 +362,13 @@ def native_boltz2(model, batch, rng, n, noise):
   s_trunk = (rng.normal(size=(n, token_s)) * 0.5).astype(np.float32)
   s_inputs = (rng.normal(size=(n, token_s)) * 0.5).astype(np.float32)
   z = (rng.normal(size=(n, n, token_z)) * 0.5).astype(np.float32)
+  if os.environ.get('ZERO_Z'):
+    # The pair conditioner is `init_proj(cat(z_trunk, relpos))` plus residual
+    # transitions. Zeroing the TRUNK pair on both sides leaves the relative
+    # position encoding as the only input, which splits a pair disagreement
+    # into "our relpos differs" and "our z half differs".
+    z = np.zeros_like(z)
+    print('  NOTE trunk pair zeroed on both sides')
 
   # boltz's own relative-position features, from OUR batch.
   tf = batch.token_features
@@ -392,7 +399,15 @@ def native_boltz2(model, batch, rng, n, noise):
     assert not missing, '%s is missing %d tensors' % (name, len(missing))
     net.eval()
   with torch.no_grad():
-    single, _ = net_s(torch.tensor(np.asarray([noise], np.float32)),
+    # `times` IS ALREADY c_noise, NOT sigma. boltz's `SingleConditioning`
+    # Fourier-embeds whatever it is handed -- its own comment says "sigma
+    # rescaling done in diffusion module" -- and the caller in
+    # `AtomDiffusion.preconditioned_network_forward` hands it
+    # `c_noise(sigma) = log(sigma / sigma_data) * 0.25`. Feeding the raw sigma
+    # instead reads single_cond rms 0.4367 of native's with max|d| 6762, which
+    # is what a Fourier embedding does when its input is 16.0 instead of 0.0.
+    _times = np.log(np.asarray([noise], np.float64) / 16.0) * 0.25
+    single, _ = net_s(torch.tensor(_times.astype(np.float32)),
                       torch.tensor(s_trunk)[None],
                       torch.tensor(s_inputs)[None])
     pair = net_p(torch.tensor(z)[None], relp)

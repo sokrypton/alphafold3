@@ -826,6 +826,11 @@ def _boltz2_feats(fb, feats, pos_noisy, n_tok):
       'ref_space_uid': t(_p(uid, -1.0), torch.long)[None],
       'atom_pad_mask': t(_p(_np.ones(n_real, _np.float32)))[None],
       'atom_to_token': t(_p(a2t))[None],
+      # The two keys only the WHOLE score model reads (denoise_parity), both
+      # looked up unconditionally in `DiffusionModule.forward` -- so a missing
+      # key is a KeyError there and nothing here.
+      'token_pad_mask': torch.ones(1, n_tok),
+      'target_pair_mask': None,
   }
   return bf, n_real, pad_to, t(_p(d_r))[None]
 
