@@ -320,18 +320,36 @@ class DiffusionHead(hk.Module):
       )
     if self.global_config.model in model_config.PAIR_ONLY_TRUNK:
       # ESMFold2's s_inputs carries 33-class restype and profile blocks where
-      # AF3's carry 31 (ESM reserves two classes AF3 has no input for). Four
-      # dead columns -- and everywhere else in the port they are simply dropped
-      # from the weights, because a zero input column contributes nothing to a
-      # bias-free Linear. Here they cannot be: the LayerNorm below divides by
-      # the width and subtracts the mean over it, so normalising 447 channels
-      # instead of 451 rescales the ENTIRE diffusion conditioning. Same trap as
-      # OpenFold3's UNK_DNA columns above. The converter's weight rows are in
-      # this padded order to match.
+      # AF3's carry 31. The extra columns cannot simply be dropped from the
+      # weights the way a zero input column can be dropped from a bias-free
+      # Linear: the LayerNorm below divides by the width and subtracts the mean
+      # over it, so normalising 447 channels instead of 451 rescales the ENTIRE
+      # diffusion conditioning. Same trap as OpenFold3's UNK_DNA columns above.
+      #
+      # And the widening is a PERMUTATION, not a shift. ESMFold2 puts the gap at
+      # class 1, BELOW the residues, where AF3 puts it at 21 between UNK and the
+      # nucleic acids (`converters/esmfold2.esm_class_of_af3` carries the same
+      # table for the weight rows, and dev/oracles/esmfold2_msa_alphabet.py
+      # cross-checks the two). Padding with two leading zeros instead put AF3's
+      # gap column on ESMFold2's first NUCLEIC class and shifted every nucleic
+      # class down one -- which no single-sequence protein fold can see, since
+      # both the gap column and the nucleic columns are then identically zero.
       n = residue_names.POLYMER_TYPES_NUM_WITH_UNKNOWN_AND_GAP
-      pad = jnp.zeros_like(features_1d[..., :2])
+      esm_n = n + 2
+      zero = jnp.zeros_like(features_1d[..., :1])
+
+      def _widen(block):
+        # ESM slot 0 is unused, slot 1 is the gap, 2..22 the residues and UNK,
+        # 23..31 the nucleic acids; slot 32 is DN, which AF3's 31-class block
+        # does not carry.
+        cols = [zero, block[..., 21:22], block[..., :21], block[..., 22:n], zero]
+        out = jnp.concatenate(cols, axis=-1)
+        assert out.shape[-1] == esm_n, (out.shape[-1], esm_n)
+        return out
+
       features_1d = jnp.concatenate(
-          [pad, features_1d[..., :n], pad, features_1d[..., n:]], axis=-1)
+          [_widen(features_1d[..., :n]), _widen(features_1d[..., n:2 * n]),
+           features_1d[..., 2 * n:]], axis=-1)
     single_cond = hm.LayerNorm(
         use_fast_variance=False,
         # chai is AFFINE here (token_pair_proj.0 / token_in_proj.0 /

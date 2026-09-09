@@ -1057,17 +1057,35 @@ def af3_diffusion_conditioning(sd, prefix):
 # ---------------------------------------------------------------------------
 
 ESM_RESTYPE_OFFSET = 2          # ESMFold2 reserves classes 0 and 1
+ESM_MSA_GAP_CLASS = 1           # protein_utils.MSA_GAP_TOKEN_ID
+
+
+def esm_class_of_af3(n_af3):
+  """[AF3 restype/profile column -> ESMFold2 res_type class], length n_af3.
+
+  The two alphabets agree on the RESIDUES and disagree on where the GAP sits:
+
+      AF3   0..19 residues | 20 UNK | 21 '-' | 22.. nucleic
+      ESM   0 unused | 1 '-' | 2..21 residues | 22 UNK | 23.. nucleic
+
+  so it is a PERMUTATION, not the shift-by-two this used to be. Read as a slice
+  it put AF3's gap column on ESMFold2's FIRST NUCLEIC class and shifted every
+  nucleic class one slot down -- the rf3 G/C swap all over again
+  ([[rf3-rna-alphabet]]), and invisible to every gate we had, because a
+  single-sequence protein fold puts zero mass in the gap column and zero in the
+  nucleic ones. It takes a real MSA (`msa.profile` is 24% gap on 1STP) or a
+  nucleic chain to show up at all.
+  """
+  return [c + 2 if c < 21 else 1 if c == 21 else c + 1 for c in range(n_af3)]
 
 
 def _remap_restype_block(w, n_af3):
   """ESMFold2's 33-class residue block -> AF3's n_af3 classes.
 
-  Both order residues the same way -- ALA, ARG, ASN, ASP, ... , VAL, UNK, then
-  nucleic -- but ESMFold2 reserves two leading classes, so the whole block is
-  shifted by two and the remap is a SLICE rather than a permutation. Verified on
-  6MRR, whose res_type values run 3..21, i.e. inside the shifted protein range.
+  AF3's 31-class blocks have no DN, which is ESMFold2's last class, so that one
+  row is dropped -- the only class either alphabet cannot express.
   """
-  return w[ESM_RESTYPE_OFFSET:ESM_RESTYPE_OFFSET + n_af3]
+  return w[esm_class_of_af3(n_af3)]
 
 
 def _remap_vec(v):
@@ -1116,23 +1134,26 @@ def permute_s_inputs(w, c_atom=384, n_esm=33):
   return np.concatenate([rest, prof, tail, atom], axis=0)
 
 
-def remap_msa_feat(w, n_esm=33, gap_index=21):
+def remap_msa_feat(w, n_esm=33, n_af3=32):
   """(35, out) -> (34, out): [one-hot | has_deletion | deletion_value].
 
-  Unlike s_inputs this is NOT a plain slice. AF3's MSA alphabet is
-  POLYMER_TYPES_ORDER_WITH_ALL_UNKS_AND_GAP -- 32 classes with a GAP at index 21,
-  between UNK and the nucleic acids -- and ESMFold2 has no gap class of its own.
-  So the shifted block supplies AF3's 0..20 and 22..31, and index 21 is a ZERO
-  row: a gap contributes nothing rather than aliasing onto a residue.
+  AF3's MSA alphabet is POLYMER_TYPES_ORDER_WITH_ALL_UNKS_AND_GAP -- 32 classes
+  with the GAP at index 21, between UNK and the nucleic acids -- while ESMFold2
+  puts its gap FIRST, at class 1, below the residues
+  (`protein_utils.MSA_GAP_TOKEN_ID`). So this is a permutation, and reading it as
+  a shift threw the trained gap embedding away and filled AF3's gap slot with
+  ZEROS: every gap in the alignment then contributed nothing. Invisible on the
+  depth-1 self-MSA the released line runs (no gaps) and ruinous on a real one.
 
-  Getting this wrong would not raise -- 33 columns land in a 34-wide slot only if
-  something is inserted -- but every nucleic class would sit one slot low, which
-  is exactly the rf3 G/C swap that broke RNA while every protein gate passed.
+  Getting it wrong would not raise -- 33 columns land in a 34-wide slot however
+  they are ordered -- but every nucleic class sits one slot low, which is exactly
+  the rf3 G/C swap that broke RNA while every protein gate passed.
   """
-  block = w[ESM_RESTYPE_OFFSET:n_esm]                       # AF3 0..20, then 22..
-  head, tail = block[:gap_index], block[gap_index:]
-  gap = np.zeros((1,) + w.shape[1:], w.dtype)
-  return np.concatenate([head, gap, tail, w[n_esm:]], axis=0)
+  # The SAME permutation the restype/profile blocks take -- `esm_class_of_af3`
+  # -- so the alphabet lives in one place. The msa one-hot is the WIDER of AF3's
+  # two alphabets (32, with DN), so unlike s_inputs it can express every one of
+  # ESMFold2's classes and nothing is dropped.
+  return np.concatenate([w[esm_class_of_af3(n_af3)], w[n_esm:]], axis=0)
 
 
 def af3_atom_block(sd, prefix, c_atom, num_head):

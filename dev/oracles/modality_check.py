@@ -499,9 +499,19 @@ def main(argv=None):
               templates=list(getattr(c, 'templates', []) or []))
               if isinstance(c, folding_input.ProteinChain) else c
               for c in chains]
-        print('  input from %s: %d chains %s (msa: %s)'
+        if os.environ.get('NO_LIGAND'):
+          # The POLYMER alone, which is what `esmfold2_native_msa.py` folds --
+          # `prepare_protein_features(seq)` has no ligand. Worth being able to
+          # match, because AF3 puts a GAP on a non-polymer token in EVERY msa
+          # row, so adding a ligand changes the MSA the trunk sees and not just
+          # the token count. Scoring is unaffected: the polymer chain is scored
+          # by residue number and atom NAME.
+          chains = [c for c in chains
+                    if not isinstance(c, folding_input.Ligand)]
+        print('  input from %s: %d chains %s (msa: %s%s)'
               % (os.path.basename(case['json']), len(chains), sorted(have),
-                 'none' if os.environ.get('NO_MSA') else 'from json'))
+                 'none' if os.environ.get('NO_MSA') else 'from json',
+                 ', NO_LIGAND' if os.environ.get('NO_LIGAND') else ''))
       else:
         chains = [folding_input.ProteinChain(id='A', sequence=seq, ptms=[],
                                              unpaired_msa='', paired_msa='',
@@ -583,7 +593,7 @@ def main(argv=None):
   if args.write:
     check_output(args.model, batch, out, args.write, case, ref_seq)
 
-  if case['kind'] == 'ligand':
+  if case['kind'] == 'ligand' and not os.environ.get('NO_LIGAND'):
     # NOT `names`: that is the atom-name array `atom_name` closes over, and
     # shadowing it made every ligand run die inside the scorer.
     lig_names, elems, lref = ligand_coords(case)
