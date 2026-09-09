@@ -417,13 +417,13 @@ def apply(batch, spec, *, refeaturise=None, model_dir=None, esm=None,
   knobs = spec.featurise
   if cyclic:
     cyclic_period(batch, cyclic, fold_input=fold_input)
-  # BEFORE the early return: openfold3 has no featurise entry at all, so a
-  # knob in spec.featurise would silently skip the largest affected family.
-  # Imported locally, as this file's other cross-package imports are, rather
-  # than at module scope where it would be the only one.
+  # A KNOB, not a name test, and the registry derives it from
+  # model_config.CENTRE_REF_CONFORMERS so the two cannot drift. It has to be a
+  # knob because every caller guards this whole step on `if spec.featurise:` --
+  # a model with an empty entry never gets here at all, which silently skipped
+  # openfold3 and openbind0 when this was a name test.
   import os
-  from alphafold3.model import model_config as _mc
-  if (spec.name in _mc.CENTRE_REF_CONFORMERS
+  if (knobs.get('centre_conformers')
       and not os.environ.get('AF3_NO_CENTRE_CONFORMERS')):
     _centre_conformers(batch)
   if not knobs:

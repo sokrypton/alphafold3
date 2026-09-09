@@ -571,6 +571,19 @@ _FEATURISE = {
                   zero_msa_without_alignment=True, esm=True),
 }
 
+# Conformer centering rides in as a featurise KNOB as well as a
+# model_config list, and the knob is what makes it actually run: every caller
+# guards the whole step on `if spec.featurise:` (dev/oracles/fold_check.py,
+# and the runner), so a model with an EMPTY featurise entry never reaches
+# `model_features.apply` at all. openfold3 and openbind0 have no other knob, so
+# centering was silently skipped for exactly the two models it was most likely
+# to matter for -- caught because their folds came back BYTE-IDENTICAL while
+# boltz2's and protenix's moved.
+#
+# Derived from the list rather than restated, so the two cannot disagree.
+for _m in model_config.CENTRE_REF_CONFORMERS:
+  _FEATURISE.setdefault(_m, {})['centre_conformers'] = True
+
 
 # Where a converted model's weights are published. The file name is what
 # `converters/convert.py` writes; the repo is where we upload it. AlphaFold3
