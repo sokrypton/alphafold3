@@ -87,6 +87,90 @@ def native_protenix(model, batch, rng, n, noise):
   return (np.asarray(pair[0]), np.asarray(single[0, 0]), s_inputs_ours, s, z)
 
 
+_OF3_COND_CKPT = {'openfold3': 'of3-p2-155k.pt', 'openbind0': 'of3-ob-174k.pt'}
+
+
+def native_of3(model, batch, rng, n, noise):
+  """-> (pair_cond, single_cond, s_inputs(ours-layout), s, z) from OpenFold3.
+
+  Covers `openfold3` (preview-2) and `openbind0` (v0.5.0), which share the
+  implementation -- the same split `denoise_parity._OF3_CKPT` makes.
+
+  Unlike protenix's, of3's `DiffusionConditioning.forward` takes the whole
+  feature dict and builds its relative-position features INTERNALLY, so the
+  batch goes in rather than a precomputed `relp`. That is strictly better for a
+  gate: the relative encoding cannot be assumed away even by accident.
+
+  Its config object supplies the widths, and every one is cross-checked against
+  the checkpoint below -- of3's config carries defaults for releases it is not
+  loading, and taking a width from the config alone is how a gate ends up
+  comparing two differently-shaped modules.
+  """
+  import torch
+
+  _stub_layer_norm()
+  from openfold3.core.model.layers.diffusion_conditioning import (
+      DiffusionConditioning)
+  from openfold3.projects.of3_all_atom.config.model_config import model_config
+
+  ckpt = os.path.expanduser('~/' + _OF3_COND_CKPT[model])
+  sd = torch.load(ckpt, map_location='cpu', weights_only=False)
+  sd = sd.get('state_dict', sd.get('model', sd))
+  pre = 'diffusion_module.diffusion_conditioning.'
+  sub = {k[len(pre):]: v for k, v in sd.items() if k.startswith(pre)}
+  if not sub:
+    raise SystemExit('no %r keys in %s' % (pre, ckpt))
+
+  # Widths off the CHECKPOINT, and note which tensor gives which: of3's leaf
+  # names are NOT protenix's, and both of its LayerNorms are over a
+  # CONCATENATION rather than over the width they feed.
+  #   linear_z  (128, 267)  ->  c_z 128, input 128 + 139 relpos dims
+  #   linear_s  (384, 833)  ->  c_s 384, input 384 + 449 c_s_input
+  #   layer_norm_n  (256,)  ->  c_fourier_emb 256
+  # Reading c_z off layer_norm_z would give 267, and c_s off a
+  # `linear_no_bias_s` that does not exist at all.
+  c_z = sub['linear_z.weight'].shape[0]
+  c_s = sub['linear_s.weight'].shape[0]
+  c_s_input = sub['layer_norm_s.weight'].shape[0] - c_s
+  c_fourier = sub['layer_norm_n.weight'].shape[0]
+  n_relpos = sub['layer_norm_z.weight'].shape[0] - c_z
+  print('  checkpoint: c_z %d, c_s %d, c_s_input %d, c_fourier %d, relpos %d'
+        % (c_z, c_s, c_s_input, c_fourier, n_relpos))
+
+  cfg = model_config('initial_training')
+  dc = cfg.model.diffusion_module.diffusion_conditioning
+  kw = dict(c_s_input=c_s_input, c_s=c_s, c_z=c_z, c_fourier_emb=c_fourier,
+            sigma_data=16.0)
+  for k in ('max_relative_idx', 'max_relative_chain'):
+    if k in dc:
+      kw[k] = dc[k]
+  net = DiffusionConditioning(**kw)
+  missing, unexpected = net.load_state_dict(sub, strict=False)
+  print('  native: %d tensors, %d missing, %d unexpected %s'
+        % (len(sub), len(missing), len(unexpected), list(missing)[:2]))
+  assert not missing, 'native is missing %d tensors' % len(missing)
+  net.eval()
+
+  from converters.openfold3 import _AF3_TO_OF3_AATYPE as _remap
+  idx = np.concatenate([384 + np.asarray(_remap), 416 + np.asarray(_remap),
+                        [448], np.arange(384)])
+  s_inputs = (rng.normal(size=(n, c_s_input)) * 0.5).astype(np.float32)
+  s_inputs[:, np.setdiff1d(np.arange(c_s_input), idx)] = 0.0
+  s_inputs_ours = s_inputs[:, idx]
+  s = (rng.normal(size=(n, c_s)) * 0.5).astype(np.float32)
+  z = (rng.normal(size=(n, n, c_z)) * 0.5).astype(np.float32)
+
+  tf = batch.token_features
+  nb = {k: torch.tensor(np.asarray(getattr(tf, k)).astype(np.int64))[None]
+        for k in ('asym_id', 'residue_index', 'entity_id', 'token_index',
+                  'sym_id')}
+  with torch.no_grad():
+    single, pair = net(nb, torch.tensor(np.asarray([noise], np.float32)),
+                       torch.tensor(s_inputs)[None], torch.tensor(s)[None],
+                       torch.tensor(z)[None], True)
+  return (np.asarray(pair[0]), np.asarray(single[0]), s_inputs_ours, s, z)
+
+
 def native_opendde(model, batch, rng, n, noise):
   """-> (pair_cond, single_cond, s_inputs(ours-layout), s, z) from OpenDDE.
 
@@ -404,6 +488,7 @@ NATIVES = {m: native_protenix for m in _PROTENIX_CKPT}
 NATIVES['rosettafold3'] = native_rf3
 NATIVES['boltz2'] = native_boltz2
 NATIVES['opendde'] = native_opendde
+NATIVES.update({m: native_of3 for m in _OF3_COND_CKPT})
 # every ESMFold2 release, each against its OWN checkpoint
 NATIVES.update({m: native_esmfold2 for m in (
     'esmfold2', 'esmfold2_fast', 'esmfold2_exp', 'esmfold2_exp_fast',

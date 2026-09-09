@@ -64,3 +64,15 @@ for m in boltz2 opendde; do
     | grep -E "corr|checkpoint|native|Error|Traceback" | head -8
 done
 echo BADDIAGDONE
+
+echo "########## 6. the released line's 5.6e-03 MSA-path residual"
+# The three msa=0 variants are exact and the three msa=4 ones are not, so the
+# residual is the MSA path. Ours runs the stack on num_msa rows (1 real +
+# padding) where the reference runs on the 1 real row, so NUM_MSA=1 says whether
+# the padded rows are the difference.
+for nm in 1 4 1024; do
+  echo "===== esmfold2 NUM_MSA=$nm"
+  PYTHONPATH=src:. NUM_MSA=$nm ~/venv/bin/python dev/oracles/esmfold2_localise_trunk.py esmfold2 2>&1 \
+    | grep -E "corr|relerr|stage|Error" | head -5
+done
+echo BADDIAG6DONE
