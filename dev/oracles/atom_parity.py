@@ -854,6 +854,76 @@ def main(argv=None):
   return 0
 
 
+# Where each vendor's AtomAttentionDecoder lives, and which checkpoint holds
+# its weights. Every vendor in the panel names the class the same thing, and
+# protenix, opendde and openfold3 additionally agree on the leaf names and the
+# call signature -- so one helper serves them and a new model is one row here
+# rather than a new function.
+_DECODER_SRC = {
+    'protenix1': ('protenix.model.modules.transformer',
+                  '~/protenix_weights/protenix_base_default_v1.0.0.pt',
+                  'module.diffusion_module.atom_attention_decoder.'),
+    'protenix2': ('protenix.model.modules.transformer',
+                  '~/protenix_weights/protenix-v2.pt',
+                  'module.diffusion_module.atom_attention_decoder.'),
+    # opendde's decoder is protenix's: same prefix, same 84 tensors, same
+    # 3 blocks, same constructor (n_blocks, n_heads, c_token, c_atom,
+    # c_atompair, n_queries, n_keys).
+    'opendde': ('opendde.model.modules.transformer',
+                '~/opendde_weights/opendde.pt',
+                'module.diffusion_module.atom_attention_decoder.'),
+}
+
+
+def _native_decoder(model, feats, a, q_ref, c_ref, p_ref, n_atom, c_token):
+  """-> r_ref, the decoder's per-atom position update, from the vendor's own.
+
+  Split out of `_decoder` so the gate is not protenix-only: its `ours` half was
+  always model-generic (it runs `aca.atom_cross_att_encoder/decoder` off the
+  config), and only this side was hardcoded. That was 14 of the 39 remaining
+  holes -- the largest single group -- and most of them are one table row.
+
+  Widths come off the CHECKPOINT, never a default: `c_atompair` is read from the
+  reference pair tensor and `n_blocks` counted from the block keys, so a release
+  that changes either fails in load_state_dict rather than comparing quietly.
+  """
+  import importlib
+
+  import numpy as _np
+  import torch
+
+  mod_name, ckpt_path, pre = _DECODER_SRC[model]
+  AtomAttentionDecoder = getattr(importlib.import_module(mod_name),
+                                 'AtomAttentionDecoder')
+  ckpt = os.path.expanduser(ckpt_path)
+  sd = torch.load(ckpt, map_location='cpu', weights_only=False)
+  sd = sd.get('model', sd.get('state_dict', sd))
+  sub = {k[len(pre):]: v for k, v in sd.items() if k.startswith(pre)}
+  if not sub:
+    raise SystemExit('no %r keys in %s' % (pre, ckpt))
+  c_atom = sub['linear_no_bias_a.weight'].shape[0]
+  c_atompair = p_ref.shape[-1] if p_ref is not None else 16
+  bpre = 'atom_transformer.diffusion_transformer.blocks.'
+  n_blocks = 1 + max(int(k[len(bpre):].split('.')[0]) for k in sub
+                     if k.startswith(bpre))
+  print('  decoder checkpoint: c_atom %d, c_atompair %d, c_token %d, %d blocks'
+        % (c_atom, c_atompair, c_token, n_blocks))
+  net = AtomAttentionDecoder(c_token=c_token, c_atom=c_atom,
+                             c_atompair=c_atompair, n_blocks=n_blocks,
+                             n_heads=4)
+  missing, unexpected = net.load_state_dict(sub, strict=False)
+  print('  native: %d tensors, %d missing, %d unexpected'
+        % (len(sub), len(missing), len(unexpected)))
+  assert not missing, 'native decoder is missing %d tensors' % len(missing)
+  net.eval()
+  t = lambda x, d=torch.float32: torch.tensor(_np.asarray(x), dtype=d)
+  with torch.no_grad():
+    r = net(atom_to_token_idx=t(feats['atom_to_token_idx'], torch.long),
+            a=t(a)[None], q_skip=t(q_ref)[None], c_skip=t(c_ref)[None],
+            p_skip=t(p_ref)[None])
+  return _np.asarray(r).reshape(-1, 3)[:n_atom]
+
+
 def _decoder(model, cfg, model_dir, fb, feats, q_ref, c_ref, p_ref, a_ref,
              act_dense, s, z, n_atom, n_tok):
   """DECODER=1: the atom cross-attention DECODER, which nothing else gates.
@@ -884,41 +954,19 @@ def _decoder(model, cfg, model_dir, fb, feats, q_ref, c_ref, p_ref, a_ref,
   from alphafold3.model.network import atom_cross_attention as aca
 
   from diffusion_parity import _stub_layer_norm
-  from protenix.model.modules.transformer import AtomAttentionDecoder
 
   rng = _np.random.default_rng(1)
   c_token = a_ref.shape[-1]
   a = (rng.normal(size=(n_tok, c_token)) * 0.5).astype(_np.float32)
 
+  if model not in _DECODER_SRC:
+    raise SystemExit(
+        'no native DECODER for %r; have %s. The `ours` half below is already '
+        'model-generic -- what a new model needs is one _DECODER_SRC row, and '
+        'its checkpoint prefix and widths can be checked without a GPU.'
+        % (model, sorted(_DECODER_SRC)))
   _stub_layer_norm()
-  ckpt = os.path.expanduser('~/protenix_weights/' + _PROTENIX_CKPT[model])
-  sd = torch.load(ckpt, map_location='cpu', weights_only=False)
-  sd = sd.get('model', sd)
-  pre = 'module.diffusion_module.atom_attention_decoder.'
-  sub = {k[len(pre):]: v for k, v in sd.items() if k.startswith(pre)}
-  if not sub:
-    raise SystemExit('no %r keys in %s' % (pre, ckpt))
-  c_atom = sub['linear_no_bias_a.weight'].shape[0]
-  c_atompair = p_ref.shape[-1] if p_ref is not None else 16
-  bpre = 'atom_transformer.diffusion_transformer.blocks.'
-  n_blocks = 1 + max(int(k[len(bpre):].split('.')[0]) for k in sub
-                     if k.startswith(bpre))
-  print('  decoder checkpoint: c_atom %d, c_atompair %d, c_token %d, %d blocks'
-        % (c_atom, c_atompair, c_token, n_blocks))
-  net = AtomAttentionDecoder(c_token=c_token, c_atom=c_atom,
-                             c_atompair=c_atompair, n_blocks=n_blocks,
-                             n_heads=4)
-  missing, unexpected = net.load_state_dict(sub, strict=False)
-  print('  native: %d tensors, %d missing, %d unexpected'
-        % (len(sub), len(missing), len(unexpected)))
-  assert not missing, 'native decoder is missing %d tensors' % len(missing)
-  net.eval()
-  t = lambda x, d=torch.float32: torch.tensor(_np.asarray(x), dtype=d)
-  with torch.no_grad():
-    r_ref = net(atom_to_token_idx=t(feats['atom_to_token_idx'], torch.long),
-                a=t(a)[None], q_skip=t(q_ref)[None], c_skip=t(c_ref)[None],
-                p_skip=t(p_ref)[None])
-  r_ref = _np.asarray(r_ref).reshape(-1, 3)[:n_atom]
+  r_ref = _native_decoder(model, feats, a, q_ref, c_ref, p_ref, n_atom, c_token)
 
   cfg.global_config.bfloat16 = 'none'
   full = afp.get_model_haiku_params(model_dir=model_dir)
