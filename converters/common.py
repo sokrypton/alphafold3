@@ -543,6 +543,14 @@ def stack_blocks(block_fn, n_blocks):
   drops the absent keys via `if _has(...)` -- gets that slot zero-filled, matching
   the OF3/OpenDDE convention (the layer_stack param spans every block).
   """
+  if n_blocks <= 0:
+    # A stack of NO blocks has no parameters. ESMFold2's experimental line sets
+    # both `coda` and `lm_enc` to 0, so the reference map built two empty stacks
+    # and died on `blocks[0]` -- an IndexError that read as a broken adapter and
+    # skipped L2.atom_encoder / L2.atom_decoder for all six experimental
+    # releases. Returning {} is what a zero-length stack means; the callers
+    # `put`/`nest` it and add nothing.
+    return {}
   blocks = [block_fn(i) for i in range(n_blocks)]
   ref = blocks[0]
   return {k: np.stack([b.get(k, np.zeros_like(ref[k])) for b in blocks], axis=0)

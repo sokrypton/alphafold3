@@ -565,21 +565,37 @@ def confidence_head(sd, dims, prefix='confidence_head'):
       'plddt_norm/scale': _arr(g('plddt_ln.weight')),
       'plddt_norm/offset': _arr(g('plddt_ln.bias')),
       'plddt_weight': _arr(g('plddt_weight')),          # (max_atoms_per_token, c_s, bins)
-      'resolved_norm/scale': _arr(g('resolved_ln.weight')),
-      'resolved_norm/offset': _arr(g('resolved_ln.bias')),
-      'resolved_weight': _arr(g('resolved_weight')),
-      'pae_norm/scale': _arr(g('pae_ln.weight')),
-      'pae_norm/offset': _arr(g('pae_ln.bias')),
       'pae/weights': t(g('pae_head.weight')),
-      'pde_norm/scale': _arr(g('pde_ln.weight')),
-      'pde_norm/offset': _arr(g('pde_ln.bias')),
-      'pde/weights': t(g('pde_head.weight')),
       # dead in the released checkpoint -- carried for coverage only
       'unused_s_inputs_to_single/weights': t(g('s_inputs_to_single.weight')),
       'unused_s_input_to_s/weights': t(g('s_input_to_s.weight')),
       'unused_s_norm/scale': _arr(g('s_norm.weight')),
       'unused_s_norm/offset': _arr(g('s_norm.bias')),
   }
+  # The EXPERIMENTAL head has five submodules the released one has: no pae_ln,
+  # no pde_ln/pde_head, no resolved_ln/resolved_weight (93 confidence tensors
+  # against 101). The GRAPH already gates all three -- model_config's
+  # NO_PDE_HEAD, NO_RESOLVED_HEAD and NO_HEAD_NORM['...'] = ('pae_logits_ln',)
+  # -- and this is the second copy of that knowledge, which is why building the
+  # reference tree died on `KeyError: 'confidence_head.resolved_ln.weight'` and
+  # skipped every experimental L2 atom gate.
+  #
+  # Keyed on the checkpoint, like `_drops_msa_update` and `map_trunk`'s parcae
+  # test, rather than on a model name.
+  has = lambda leaf: '%s.%s' % (prefix, leaf) in sd
+  if has('pae_ln.weight'):
+    out['pae_norm/scale'] = _arr(g('pae_ln.weight'))
+    out['pae_norm/offset'] = _arr(g('pae_ln.bias'))
+  if has('pde_head.weight'):
+    out['pde/weights'] = t(g('pde_head.weight'))
+    if has('pde_ln.weight'):
+      out['pde_norm/scale'] = _arr(g('pde_ln.weight'))
+      out['pde_norm/offset'] = _arr(g('pde_ln.bias'))
+  if has('resolved_weight'):
+    out['resolved_weight'] = _arr(g('resolved_weight'))
+    if has('resolved_ln.weight'):
+      out['resolved_norm/scale'] = _arr(g('resolved_ln.weight'))
+      out['resolved_norm/offset'] = _arr(g('resolved_ln.bias'))
   out.update(nest('folding_trunk',
                   pair_only_stack(sd, prefix + '.folding_trunk', dims['n_conf'])))
   return out

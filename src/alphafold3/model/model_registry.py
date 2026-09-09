@@ -22,6 +22,8 @@ nothing here imports torch or knows what a checkpoint looks like.
 
 from __future__ import annotations
 
+import os
+
 from alphafold3.model import model_config
 
 # IntelliFold-v2's "full_fat" preset: the four channels it widens over stock AF3.
@@ -499,7 +501,16 @@ _FEATURISE = {
     # ESMFold2 attends +/-64 atoms by rank, which needs 32 + 2*64 = 160 keys of
     # context around a query block; AF3's default 128 is too narrow, so widen the
     # key subset and let the exact window ride in as a mask.
-    **{m: dict(atom_keys_subset_size=192, lm_pair=True)
+    # ...and its atom encoder was trained on ESMFold2's OWN idealised residue
+    # geometry (`constants/esmfold2_ref_pos.py`, from
+    # `protein_utils.PROTEIN_REF_POS`), which its featuriser writes into
+    # `ref_pos` with no centering and no augmentation -- not the CCD ideal
+    # values AF3 uses. Read off an env override so the two can be A/B'd:
+    # substituting it is what takes the family's L2.atom_encoder from
+    # a_token corr 0.9998 with max|d|/rms ~0.5 to parity, and the fold effect
+    # has to be measured rather than assumed.
+    **{m: dict(atom_keys_subset_size=192, lm_pair=True,
+               esmfold2_ref_pos=not os.environ.get('AF3_NO_ESM_REF_POS'))
        for m in model_config.ESMFOLD2_FAMILY},
     # boltz2 keeps a modified residue as ONE token holding all its atoms
     # (data/tokenize/boltz2.py: standard -> per residue, NONPOLYMER -> per atom,

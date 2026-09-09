@@ -424,6 +424,14 @@ def apply(batch, spec, *, refeaturise=None, model_dir=None, esm=None,
         batch, load_chai_conformers(
             os.path.join(os.path.expanduser(str(model_dir)),
                          knobs['std_conformers'])))
+  if knobs.get('esmfold2_ref_pos'):
+    # ESMFold2's atom encoder was trained on its OWN idealised geometry
+    # (`protein_utils.PROTEIN_REF_POS`), not on the CCD ideal values AF3 uses.
+    # Substituted by atom NAME through the same helper chai1's conformers use,
+    # so an atom the table does not carry -- AF3's terminal OXT -- keeps the
+    # coordinate it already had rather than being zeroed.
+    from alphafold3.constants import esmfold2_ref_pos
+    _override_ref_conformers(batch, esmfold2_ref_pos.as_conformers())
   if knobs.get('atom_keys_subset_size'):
     _wide_key_window(batch, knobs['atom_keys_subset_size'])
   if knobs.get('circular_keys'):

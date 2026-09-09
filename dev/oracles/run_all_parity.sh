@@ -118,7 +118,19 @@ gate () {
       echo "__GATE_EXIT $?" ) > "$log"
   fi
   local status; status=$(classify "$log")
+  # SKIP means two very different things: a module this model DOES NOT HAVE,
+  # and a module it has with no adapter written. Reported as one status, the
+  # summary has no denominator -- 88 SKIPs reads as 88 holes and most are not.
+  # gate_applies.py answers the question from the registry, so a variant that
+  # gains a module stops being n/a without anyone editing a list.
+  local na=
+  if [ "$status" = SKIP ]; then
+    na=$($PY "$ROOT/dev/oracles/gate_applies.py" "$tag" "$model" 2>/dev/null)
+    [ -n "$na" ] && status=N/A
+  fi
   local head; head=$(grep -E "$pat" "$log" | tail -1)
+  [ "$status" = N/A ] && head=$na
+  [ "$status" = SKIP ] && head="HOLE: applies to this model, no adapter"'' 
   printf '  %-24s %-30s %-8s %s\n' "$tag" "$model" "$status" "${head:0:88}"
   printf '%s\t%s\t%s\t%s\n' "$tag" "$model" "$status" "$head" >> "$SUMMARY"
 }
@@ -303,5 +315,8 @@ fi
 
 echo
 echo "summary: $SUMMARY"
+echo "  (SKIP now means a real HOLE -- a module the model HAS with no adapter."
+echo "   N/A means the model does not have that module, or it is gated by"
+echo "   another cell; dev/oracles/gate_applies.py decides, from the registry.)"
 awk -F'\t' 'NR>1 {n[$3]++} END {for (k in n) printf "  %-8s %d\n", k, n[k]}' "$SUMMARY"
 echo RUN_ALL_PARITY_DONE
