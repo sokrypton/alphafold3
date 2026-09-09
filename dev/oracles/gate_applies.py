@@ -28,6 +28,22 @@ def reason(gate, model):
   variants = getattr(mr, 'ESMFOLD2_VARIANTS', {})
   v = variants.get(model, {})
 
+  # --- models with no comparable native at all ----------------------------
+  # alphafold3 IS the reference implementation. There is no second
+  # implementation to gate it against, so every module cell is n/a by
+  # construction rather than by omission -- its L5/L6 folds are the real
+  # measurement.
+  if model == 'alphafold3' and not gate.startswith(('L5', 'L6')):
+    return 'alphafold3 IS the reference -- nothing to compare it against'
+  # chai-1 ships its modules inside TorchScript archives with no callable
+  # submodule forward, so a module gate cannot be built by importing it. The
+  # cells that ARE possible are the injection ones, built from verbatim I/O
+  # captured during the port (L4.confidence_inject).
+  if model == 'chai1' and not gate.startswith(('L0', 'L5', 'L6')) \
+     and not gate.endswith('_inject'):
+    return ('chai1 modules live in TorchScript archives with no callable '
+            'forward; only *_inject cells are possible')
+
   # --- modules a model does not have at all ------------------------------
   if gate.startswith('L1b.') and fam and not v.get('msa'):
     return '%s has no MSA encoder (ESMFOLD2_VARIANTS msa=0)' % model
