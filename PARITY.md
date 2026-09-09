@@ -2230,6 +2230,22 @@ eight residues. That is tokens 61..67 exactly.
 reason (its conformers carry no OXT either). Applied to the family, with
 `AF3_NO_ESM_DROP_OXT=1` as the A/B.
 
+**And the atom encoder is EXACT once the atom sets agree.** `SAME_ATOM_SET=1`,
+a knob that was already there, forces both sides onto the same atoms:
+
+    a_token      corr 1.000000  max|d| 0.00002  max|d|/rms 4.43e-06
+    q_atom       corr 1.000000  max|d| 0.00007  max|d|/rms 1.89e-05
+    c_atom_cond  corr 1.000000  max|d| 0.00000  max|d|/rms 1.26e-06
+
+So the OXT is the WHOLE residual, not part of it -- there is nothing else wrong
+in ESMFold2's atom encoder.
+
+`BLOCKS=1` confirms the mechanism rather than just the cause. With ONE atom
+block only token 67 is wrong (2.714; every other token is <= 0.106). With three,
+it has reached tokens 61..67. One spurious atom, spreading one window-hop per
+block -- which is what a +/-64-by-rank window does over three rounds of
+attention.
+
 **Four things were eliminated by reading before DIAG was believed**, and they
 are worth not re-doing: the SWA window semantics (native
 `abs(rank_i - rank_j) <= half_window`, `half_window = swa_window_size // 2 = 64`,
