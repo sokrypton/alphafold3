@@ -417,18 +417,26 @@ def native_esmfold2(model, msa, s_inputs, z, n_msa):
   tag = model + ('_nonuniform' if os.environ.get('NONUNIFORM') else '')
   if os.environ.get('ESM_FINAL_UPDATE'):
     tag += '_finalupd'
+  # MSA_BLOCKS truncates OUR stacked leaves (see `ours`), so it has to select a
+  # dump whose native stack was truncated to the same depth.
+  if os.environ.get('MSA_BLOCKS'):
+    tag += '_b%d' % int(os.environ['MSA_BLOCKS'])
   path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                       'esmfold2_msa_%s.npz' % tag)
   if not os.path.exists(path):
     raise SystemExit('run first:  ~/venv_esm/bin/python '
-                     'dev/oracles/esmfold2_msa_dump.py %s%s%s'
+                     'dev/oracles/esmfold2_msa_dump.py %s%s%s%s'
                      % (model,
                         ' --nonuniform' if os.environ.get('NONUNIFORM') else '',
                         ' --keep_final_update'
-                        if os.environ.get('ESM_FINAL_UPDATE') else ''))
+                        if os.environ.get('ESM_FINAL_UPDATE') else '',
+                        '' if not os.environ.get('MSA_BLOCKS')
+                        else ' --blocks %s' % os.environ['MSA_BLOCKS']))
   d = np.load(path)
-  print('  native npz: %s, %d blocks, final-block msa update %s'
-        % (os.path.basename(path), int(d['n_layers']),
+  print('  native npz: %s, %s class, %d blocks, final-block msa update %s'
+        % (os.path.basename(path),
+           'EXPERIMENTAL' if int(d.get('experimental', 0)) else 'released',
+           int(d['n_layers']),
            'ON' if int(d['final_update']) else 'OFF (native default)'))
   # The harness's own z is discarded in favour of the dump's, so the two sides
   # cannot drift apart through two different default_rng streams.

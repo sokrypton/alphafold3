@@ -2051,9 +2051,67 @@ not comparable to these):
 
 The released line is untouched by all of it: 0.491 before, **0.490** after.
 
-Still open: our no-MSA fold beating native's by 39x on this target (0.476
-against 18.728) has no explanation, and a fix that traded one for the other
-would not be a fix.
+### 4. "No MSA" is not no-MSA: it is the query TWICE (explains the 39x)
+
+The last oddity -- our no-MSA fold beating native's by 39x on 1STP, 0.478
+against 18.728 -- has an explanation, and it is at the FEATURE level.
+
+    esmfold2_exp, 1STP with unpaired_msa='' and 6MRR from a bare sequence
+      msa shape (16384, n)   real rows 2   and row 1 == row 0 exactly
+
+AF3's pipeline emits the query row PLUS a self row, so what we call "no MSA" is
+a depth-2 alignment of the query with itself. Native's no-MSA path
+(`prepare_protein_features`) is depth 1, which makes its `msa_track_mask` FALSE
+-- so native runs NO MSA track at all on a single sequence, and we run one on a
+duplicated query. On this target that is worth 0.478 against 18.728.
+
+Only `chai1` carries `zero_msa_without_alignment` (model_registry), which is the
+analogous fix for the analogous problem ([[chai-msa-of-one]]). ESMFold2 wants a
+different one: native's no-MSA `profile` is `res_type_oh`, i.e. exactly the
+query one-hot, so ZEROING the profile the way chai's knob does would be wrong
+here. The faithful change is to make the no-alignment MSA depth **1**: the
+profile then still equals the query one-hot, and `msa_track_mask` goes false on
+its own.
+
+**Deliberately not changed, because it is a trade, not a fix.** Being faithful
+here means giving up 0.478 for something near native's 18.728 on this target.
+That is a decision about what the port is FOR, not a bug to close quietly, and
+the blast radius is every single-sequence esmfold2 number.
+
+### A correction, and what the controls actually measured
+
+I first read this as a `msa_track_mask` bug -- we tested `rows.shape[0] > 1`,
+the PADDED depth, where native tests "any real non-query row" -- and predicted
+that fixing it would move the two single-sequence controls. It did not: with the
+rule implemented exactly as native has it, all four folds are unchanged
+(1STP+MSA 0.476, 1STP no-MSA 0.501, 6MRR 0.690, released 0.490). The reason is
+the depth-2 duplicate above: `mask[1:].any()` is TRUE for every input we have,
+so the proxy and the real rule agree on all of them. The fix stands as fidelity
+-- it implements native's rule instead of a proxy that happens to coincide --
+but it fixes nothing measurable, and the prediction was wrong.
+
+What actually moved those controls was the BLOCK ORDER fix, acting through that
+same depth-2 MSA: because the track runs on a single sequence, the order matters
+there too.
+
+| | before the order fix | after |
+|---|---|---|
+| `esmfold2_exp` 6MRR | 0.761 | **0.690** |
+| `esmfold2_exp` 1STP no-MSA | 0.478 / 0.488 | 0.501 / 0.790 |
+
+### The gate that certified the bug now says the module is NOT exact
+
+Re-running L1b against the EXPERIMENTAL class (8 rows, 68 tokens):
+
+    msa -> pair  corr 0.999836  rms ours/native 0.9953
+                 max|d| 134.07  p99.9 46.5  rms(native) 345.07  max|d|/rms 0.389
+
+That 1.000000 was never real. A residual remains, `max|d|/rms` 0.389 is a large
+local error, and the fold cannot see it at 0.477 A -- the pattern
+[[correlation-hides-bias]] warns about. `esmfold2_msa_dump.py --blocks n`
+truncates the native stack and `MSA_BLOCKS=n` truncates ours (BOTH sides -- the
+rule this file keeps re-learning), so the residual can be localised by depth.
+OPEN.
 
 ## chai1's first in-repo module gate: L4 by injection (2026-09-09)
 

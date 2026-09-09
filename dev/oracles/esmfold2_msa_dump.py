@@ -77,6 +77,13 @@ def main(argv=None):
   ap.add_argument('--n_tok', type=int, default=68)     # 6MRR, as msa_parity
   ap.add_argument('--n_msa', type=int, default=8)
   ap.add_argument('--nonuniform', action='store_true')
+  ap.add_argument('--blocks', type=int, default=None,
+                  help='truncate the native stack to the FIRST n blocks, to '
+                       'localise a residual by depth. msa_parity.py reads the '
+                       'matching npz when MSA_BLOCKS is set, and truncates our '
+                       'stacked leaves the same way -- truncating one side only '
+                       'compares a 1-block run against a 4-block one and reads '
+                       'as a catastrophic gap.')
   ap.add_argument('--keep_final_update', action='store_true',
                   help="run the last block's msa update, which native drops")
   ap.add_argument('--out', default=None)
@@ -139,6 +146,11 @@ def main(argv=None):
            if unexpected and not args.keep_final_update else ''))
   if missing:
     raise SystemExit('missing weights: %s' % sorted(missing)[:6])
+  if args.blocks is not None:
+    if not 1 <= args.blocks <= n_layers:
+      raise SystemExit('--blocks must be 1..%d' % n_layers)
+    net.blocks = net.blocks[:args.blocks]
+    print('  TRUNCATED to the first %d of %d blocks' % (args.blocks, n_layers))
   net = net.float().eval()
 
   n, m = args.n_tok, args.n_msa
@@ -172,16 +184,23 @@ def main(argv=None):
 
   path = args.out or os.path.join(
       os.path.dirname(os.path.abspath(__file__)),
-      'esmfold2_msa_%s%s%s.npz' % (args.model,
-                                   '_nonuniform' if args.nonuniform else '',
-                                   '_finalupd' if args.keep_final_update else ''))
+      'esmfold2_msa_%s%s%s%s.npz'
+      % (args.model,
+         '_nonuniform' if args.nonuniform else '',
+         '_finalupd' if args.keep_final_update else '',
+         '' if args.blocks is None else '_b%d' % args.blocks))
   np.savez(path,
            # (1, L, M, c) -> (M, L, c), the layout our msa_stack takes
            msa_emb=np.transpose(m_emb[0].float().numpy(), (1, 0, 2)),
            pair_out=out[0].float().numpy(),
            z=z, msa=msa, s_inputs=s_inputs, mask=mask,
            n_layers=np.int32(n_layers),
-           final_update=np.int32(bool(args.keep_final_update)))
+           # For the EXPERIMENTAL class this is always 1: its block has no
+           # is_final_block and runs the msa update in every block. Recording
+           # the module's behaviour, not the flag, so the reader of the npz is
+           # not told "OFF (native default)" about a block that ran it.
+           final_update=np.int32(bool(args.keep_final_update) or experimental),
+           experimental=np.int32(experimental))
   print('  wrote %s  pair_out %s' % (path, tuple(out.shape)))
   return 0
 
