@@ -54,6 +54,69 @@ feats = {k: v.cuda() for k, v in prepare_protein_features(SEQ).items()}
 cap = {}
 m.language_model.register_forward_pre_hook(
     lambda mod, i: cap.__setitem__('lm_hidden', i[0].detach().float().cpu().numpy()))
+
+# --- module I/O for the two gates that had no reference to compare against.
+#
+# L2.atom_decoder and L4.confidence were holes for the whole ESMFold2 family for
+# one reason: `esmfold2_dumps.native()` reads its inputs from an npz and the dump
+# carried the features, the LM hidden states and the final coordinates -- not the
+# intermediate module I/O. There is no way to run these two modules on OUR inputs
+# from this venv (the graph is JAX and lives in the other one), so the dump is
+# where the reference has to come from.
+#
+# Hooked by NAME on the submodule, with kwargs: both are called with keyword
+# arguments only (`self.atom_decoder(a_i=..., q_l=..., ...)`), so a hook without
+# `with_kwargs=True` would record an empty `args` and silently dump nothing.
+_IO = {}
+
+
+def _numpy(x):
+    import torch as _t
+    return x.detach().float().cpu().numpy() if _t.is_tensor(x) else None
+
+
+def _record(tag, args, kwargs, out):
+    for i, v in enumerate(args):
+        a = _numpy(v)
+        if a is not None:
+            _IO['%s.in.%d' % (tag, i)] = a
+    for k, v in kwargs.items():
+        a = _numpy(v)
+        if a is not None:
+            _IO['%s.in.%s' % (tag, k)] = a
+    outs = out if isinstance(out, (tuple, list)) else [out]
+    for i, v in enumerate(outs):
+        a = _numpy(v)
+        if a is not None:
+            _IO['%s.out.%d' % (tag, i)] = a
+        elif isinstance(v, dict):
+            for k, vv in v.items():
+                a = _numpy(vv)
+                if a is not None:
+                    _IO['%s.out.%s' % (tag, k)] = a
+
+
+def _hook(tag, suffix):
+    # FOUND BY WALKING named_modules(), not by attribute path. The two release
+    # lines nest these differently and the obvious guess was wrong: the decoder
+    # is not under a `structure_module` -- this model calls it `structure_head`
+    # -- and a getattr chain that misses returns None, which would have written
+    # a dump with the hole still in it and no error.
+    hits = [(n, mo) for n, mo in m.named_modules() if n.split('.')[-1] == suffix]
+    if not hits:
+        print('  no submodule named %r; the %s gate stays a hole' % (suffix, tag))
+        return
+    if len(hits) > 1:
+        print('  NOTE %d modules named %r: %s -- hooking all, later wins'
+              % (len(hits), suffix, [n for n, _ in hits]))
+    for name, mod in hits:
+        mod.register_forward_hook(
+            lambda mo, a, kw, o: _record(tag, a, kw, o), with_kwargs=True)
+        print('  hooked %s at %s (%s)' % (tag, name, type(mod).__name__))
+
+
+_hook('dec', 'atom_decoder')
+_hook('conf', 'confidence_head')
 torch.manual_seed(0)
 with torch.no_grad():
     o = m(**feats, num_loops=3, num_diffusion_samples=1, num_sampling_steps=200)
@@ -66,6 +129,12 @@ d['out.sample_atom_coords'] = o['sample_atom_coords'].float().cpu().numpy()
 # pass it just spent a minute on.
 if 'plddt' in o:
     d['out.plddt'] = o['plddt'].float().cpu().numpy()
+# The hooks fire once per sampling step for the decoder, so what lands in the
+# dump is the LAST step -- stated because a reader comparing against it needs to
+# know which step's inputs they hold, and the inputs are dumped alongside the
+# output precisely so the comparison does not depend on reproducing the step.
+d.update(_IO)
+print('module I/O captured: %s' % sorted(_IO))
 import os as _os
 _D = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), 'dumps')
 _os.makedirs(_D, exist_ok=True)
