@@ -1971,6 +1971,16 @@ The next step is that gate with REAL features: drive
 `converters/esmfold2.remap_msa_feat` to get back to ESM's 33-class layout) and
 compare against our msa_stack on the same z.
 
+The two harnesses this took are in-tree, not in a scratchpad
+(`dev/oracles/esmfold2_native_msa.py` builds native's MSA tensors and dumps its
+coordinates; `esmfold2_score_native.py` scores them through
+`modality_check.reference()`), and their docstrings carry the three things that
+cost a run each: `prepare_protein_features` already supplies a depth-1 self
+`msa` that a real one must REPLACE, a3m rows carry lowercase insertions that
+have to be stripped and counted, and the CA reference has to come from the
+in-repo scorer. The knobs the exclusions used are also in-tree: `NUM_MSA` and
+`NO_MSA` (`fold_check.py`, `modality_check.py`).
+
 **Not fixed, and deliberately not guessed at.** Our no-MSA fold being 39x better
 than native's on this target is a second oddity in the same place, and changing
 the MSA path while that is unexplained risks trading one for the other.
