@@ -171,7 +171,8 @@ if want L1; then
   # model would compare the wrong things rather than say it cannot.
   for m in $MODELS; do
     case $m in esmfold2*)
-      MODEL=$m gate L1.trunk_ref "$m" 'corr' dev/oracles/esmfold2_localise_trunk.py ;;
+      MODEL=$m gate L1.trunk_ref "$m" 'corr .*relerr' \
+        dev/oracles/esmfold2_localise_trunk.py ;;
     esac
   done
 fi
@@ -240,7 +241,10 @@ if want L3; then
   # ESMFold2's denoise step against the reference -- see the L1 note above.
   for m in $MODELS; do
     case $m in esmfold2*)
-      MODEL=$m gate L3.denoise_ref "$m" 'corr' dev/oracles/esmfold2_localise_denoise.py ;;
+      # 'rms diff' rather than 'corr': the LAST corr line in that harness is
+      # its conformer-substitution diagnostic, not its headline.
+      MODEL=$m gate L3.denoise_ref "$m" 'rms diff' \
+        dev/oracles/esmfold2_localise_denoise.py ;;
     esac
   done
 fi

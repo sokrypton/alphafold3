@@ -1180,7 +1180,20 @@ two stacks an identity:
 | encoder made an identity (decoder active) | 0.991137 | 1.2753 A |
 
 The whole residual was the decoder, and the encoder was already exact on its own
-gate. Fixed by carrying `swa_mask` / `rope_q` / `rope_k` on
+gate. With it fixed, the two RELEASED variants have real L1 and L3 cells against
+the reference for the first time:
+
+| | L1 trunk | L3 denoise |
+|---|---|---|
+| `esmfold2` | corr 0.999957, relerr 4.9e-03 | 0.2363 A, corr 0.999751 |
+| `esmfold2_fast` | corr 0.999850, relerr 2.4e-02 | 0.2027 A, corr 0.999872 |
+
+and both of those residuals are the two featurisation differences below, which
+go to 0.0000 A when equalised. The six EXPERIMENTAL releases cannot use this
+harness at all: the reference implements the parcae SSM recurrence and they
+carry `pair_loop_proj` instead (`ESMFOLD2_SSM_RECYCLE` is the released line
+only), so it raises `KeyError('parcae_log_delta')`. Their harness pair is
+`esmfold2_oracle_exp_trunk.py` + `esmfold2_localise_exp.py`. Fixed by carrying `swa_mask` / `rope_q` / `rope_k` on
 `AtomCrossAttEncoderOutput` and handing them to the decoder's transformer --
 they are gathers of the same flat atom list, so rebuilding them in the decoder
 is exactly where a subtle mismatch would go. `enc.swa_mask is None` for every
