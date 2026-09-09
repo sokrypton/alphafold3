@@ -32,24 +32,55 @@ _PROTENIX_CKPT = {
 }
 
 
+
+# Which vendor package implements a model's diffusion, and where its weights
+# are. protenix and opendde share the implementation -- opendde is protenix's
+# file with the package renamed -- so this is a row rather than a function, the
+# same shape `atom_parity._ENC_SRC` uses.
+_DIFF_SRC = {
+    'protenix1': ('protenix', '~/protenix_weights/'
+                  'protenix_base_default_v1.0.0.pt'),
+    'protenix2': ('protenix', '~/protenix_weights/protenix-v2.pt'),
+    'opendde': ('opendde', '~/opendde_weights/opendde.pt'),
+}
+
+
 def native_protenix(model, fb, feats, pos_noisy, noise, s_inputs_449, s, z):
-  """-> x_denoised (flat atoms) from protenix's own DiffusionModule."""
+  """-> x_denoised (flat atoms) from the vendor's own DiffusionModule.
+
+  Serves protenix1, protenix2 and opendde off `_DIFF_SRC`. Every width below
+  already came off the checkpoint, which is what makes the extra model free:
+  opendde's `layernorm_s` is 833 = 384 + 449, its relpe is 128-wide, and its
+  three stacks are 3 / 24 / 3, all read rather than defaulted.
+  """
+  import importlib
+
   import torch
 
   _stub_layer_norm()
-  from protenix.model.modules.diffusion import DiffusionModule
-  from protenix.model.modules.transformer import rearrange_qk_to_dense_trunk
+  pkg, ckpt_path = _DIFF_SRC[model]
+  DiffusionModule = getattr(
+      importlib.import_module(pkg + '.model.modules.diffusion'),
+      'DiffusionModule')
+  rearrange_qk_to_dense_trunk = getattr(
+      importlib.import_module(pkg + '.model.modules.transformer'),
+      'rearrange_qk_to_dense_trunk')
 
-  ckpt = os.path.expanduser('~/protenix_weights/' + _PROTENIX_CKPT[model])
+  ckpt = os.path.expanduser(ckpt_path)
   sd = torch.load(ckpt, map_location='cpu', weights_only=False)
-  sd = sd.get('model', sd)
+  sd = sd.get('model', sd.get('state_dict', sd))
   pre = 'module.diffusion_module.'
   sub = {k[len(pre):]: v for k, v in sd.items() if k.startswith(pre)}
   if not sub:
     raise SystemExit('no %r keys in %s' % (pre, ckpt))
 
   dc = 'diffusion_conditioning.'
-  c_z = sub[dc + 'relpe.linear_no_bias.weight'].shape[0]
+  c_z_pair = sub[dc + 'relpe.linear_no_bias.weight'].shape[0]
+  # c_z is the width of the pair this module is FED. opendde is fed the 384-wide
+  # trunk pair and compresses it; protenix is fed the same width it works in.
+  c_z = (sub[dc + 'layernorm_z_trunk.weight'].shape[0]
+         if dc + 'layernorm_z_trunk.weight' in sub else c_z_pair)
+  extra = ({'c_z_pair_diffusion': c_z_pair} if c_z != c_z_pair else {})
   c_s = sub[dc + 'linear_no_bias_s.weight'].shape[0]
   c_s_inputs = sub[dc + 'layernorm_s.weight'].shape[0] - c_s
   ae = 'atom_attention_encoder.'
@@ -60,9 +91,9 @@ def native_protenix(model, fb, feats, pos_noisy, noise, s_inputs_449, s, z):
                  if k.startswith('diffusion_transformer.blocks.'))
   heads = sub['diffusion_transformer.blocks.0.attention_pair_bias.'
               'linear_nobias_z.weight'].shape[0]
-  print('  checkpoint: c_z %d, c_s %d, c_atom %d, c_atompair %d, c_token %d, '
-        '%d token blocks, %d heads'
-        % (c_z, c_s, c_atom, c_atompair, c_token, n_dt, heads))
+  print('  checkpoint: c_z %d (pair width in the module %d), c_s %d, '
+        'c_atom %d, c_atompair %d, c_token %d, %d token blocks, %d heads'
+        % (c_z, c_z_pair, c_s, c_atom, c_atompair, c_token, n_dt, heads))
 
   t = lambda a, d=torch.float32: torch.tensor(np.asarray(a), dtype=d)
   n_atom = feats['ref_pos'].shape[0]
@@ -86,9 +117,19 @@ def native_protenix(model, fb, feats, pos_noisy, noise, s_inputs_449, s, z):
   # `atom_to_token_idx`, and `gather_pair_embedding_in_dense_trunk` asserts its
   # gather indices are exactly 2-D -- feed it a leading batch axis and that
   # assert is what fires, from inside the vendor's code.
+  # BATCHED for opendde, UNBATCHED for protenix, and the vendors' own pipelines
+  # are what say so. `update_input_feature_dict` (opendde/model/opendde.py) runs
+  # this same construction on a BATCHED ref_pos, so its d_lm/v_lm carry a leading
+  # axis and its local attention's `len(z.shape) == len(q.shape) + 2` holds.
+  # protenix instead windows a 1-D atom_to_token_idx and its
+  # `gather_pair_embedding_in_dense_trunk` asserts exactly 2-D gather indices, so
+  # a leading axis fires THAT assert from inside the vendor. Hand-batching d_lm
+  # and v_lm after the fact is not the same thing: `pad_info` is built here too,
+  # and it then describes the wrong rank.
+  _b = (lambda x: t(x)[None]) if model == 'opendde' else t
   q_list, k_list, pad_info = rearrange_qk_to_dense_trunk(
-      q=[t(feats['ref_pos']), t(feats['ref_space_uid'])],
-      k=[t(feats['ref_pos']), t(feats['ref_space_uid'])],
+      q=[_b(feats['ref_pos']), _b(feats['ref_space_uid'])],
+      k=[_b(feats['ref_pos']), _b(feats['ref_space_uid'])],
       dim_q=[-2, -1], dim_k=[-2, -1], n_queries=32, n_keys=128,
       compute_mask=True)
   d_lm = q_list[0][..., None, :] - k_list[0][..., None, :, :]
@@ -96,7 +137,9 @@ def native_protenix(model, fb, feats, pos_noisy, noise, s_inputs_449, s, z):
           ).unsqueeze(dim=-1)
 
   # protenix's own relative-position features, from OUR batch's token features.
-  from protenix.model.modules.embedders import RelativePositionEncoding
+  RelativePositionEncoding = getattr(
+      importlib.import_module(pkg + '.model.modules.embedders'),
+      'RelativePositionEncoding')
   tf = fb.token_features
   ifd = {k: t(getattr(tf, k), torch.long)[None]
          for k in ('asym_id', 'residue_index', 'entity_id', 'token_index',
@@ -125,7 +168,7 @@ def native_protenix(model, fb, feats, pos_noisy, noise, s_inputs_449, s, z):
              'blocks.')
   print('  atom stacks: encoder %d blocks, decoder %d blocks' % (n_enc, n_dec))
   net = DiffusionModule(c_atom=c_atom, c_atompair=c_atompair,
-                        c_token=c_token, c_s=c_s, c_z=c_z,
+                        c_token=c_token, c_s=c_s, c_z=c_z, **extra,
                         c_s_inputs=c_s_inputs,
                         atom_encoder={'n_blocks': n_enc, 'n_heads': 4},
                         transformer={'n_blocks': n_dt, 'n_heads': heads},
@@ -512,7 +555,7 @@ def native_of3(model, fb, feats, pos_noisy, noise, s_inputs_449, s, z):
   return np.asarray(x).reshape(-1, 3)
 
 
-NATIVES = {m: native_protenix for m in _PROTENIX_CKPT}
+NATIVES = {m: native_protenix for m in _DIFF_SRC}
 NATIVES['intellifold2'] = native_if2
 NATIVES['rosettafold3'] = native_rf3
 NATIVES.update({m: native_of3 for m in _OF3_CKPT})

@@ -89,16 +89,37 @@ def _stub_layer_norm():
                          _Ext('fast_layer_norm_cuda_v2'))
 
 
+
+# Which vendor package implements a model's diffusion, and where its weights
+# are. protenix and opendde share the implementation -- opendde is protenix's
+# file with the package renamed -- so this is a row rather than a function, the
+# same shape `atom_parity._ENC_SRC` uses.
+_DIFF_SRC = {
+    'protenix1': ('protenix', '~/protenix_weights/'
+                  'protenix_base_default_v1.0.0.pt'),
+    'protenix2': ('protenix', '~/protenix_weights/protenix-v2.pt'),
+    'opendde': ('opendde', '~/opendde_weights/opendde.pt'),
+}
+
+
 def native_protenix(model, n):
-  """-> (a, s, z, ref, n_blocks) from protenix's own DiffusionTransformer."""
+  """-> (a, s, z, ref, n_blocks) from the vendor's own DiffusionTransformer.
+
+  Serves protenix1, protenix2 and opendde off `_DIFF_SRC`.
+  """
+  import importlib
+
   import torch
 
   _stub_layer_norm()
-  from protenix.model.modules.transformer import DiffusionTransformer
+  pkg, ckpt_path = _DIFF_SRC[model]
+  DiffusionTransformer = getattr(
+      importlib.import_module(pkg + '.model.modules.transformer'),
+      'DiffusionTransformer')
 
-  ckpt = os.path.expanduser('~/protenix_weights/' + _PROTENIX_CKPT[model])
+  ckpt = os.path.expanduser(ckpt_path)
   sd = torch.load(ckpt, map_location='cpu', weights_only=False)
-  sd = sd.get('model', sd)
+  sd = sd.get('model', sd.get('state_dict', sd))
   pre = 'module.diffusion_module.diffusion_transformer.'
   sub = {k[len(pre):]: v for k, v in sd.items() if k.startswith(pre)}
   if not sub:
@@ -335,7 +356,7 @@ def native_rf3(model, n):
   return a, s, z, np.asarray(ref[0]), n_blocks
 
 
-NATIVES = {m: native_protenix for m in _PROTENIX_CKPT}
+NATIVES = {m: native_protenix for m in _DIFF_SRC}
 NATIVES['rosettafold3'] = native_rf3
 NATIVES['intellifold2'] = native_if2
 NATIVES.update({m: native_of3 for m in _OF3_CKPT})

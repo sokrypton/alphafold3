@@ -537,6 +537,10 @@ _FEATURISE = {
     # error sat at the chain ends (1.95 vs 0.53 interior) and in the final
     # partial window (2.93) -- the signature of sliding against padding.
     **{m: dict(padded_keys=True) for m in model_config.PROTENIX_FAMILY},
+    # EXPERIMENT (see the if2 tail investigation): align the atom key window's
+    # edge to the atom count rounded up to a whole query block, which is what
+    # if2's own reshape-into-windows forces.
+    'intellifold2': dict(qblock_keys=bool(__import__('os').environ.get('IF2_QBLOCK'))),
     # rf3 (atomworks) renames atomised atoms to their ELEMENT symbol, carries
     # chirality features, aligns restypes to its own alphabet, and calls an
     # atomised polymer token UNKNOWN where AlphaFold 3 keeps the parent residue

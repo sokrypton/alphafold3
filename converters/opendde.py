@@ -184,12 +184,25 @@ def convert_atom_encoder(sd, src_prefix, dst_prefix):
   The fused linear_no_bias_f (128,385) splits by size into ref_mask(1)+ref_element
   (128)+ref_atom_name(256) (unambiguous).
 
-  CRITICAL (from data-flow, atom_cross_attention.py:144): our encoder calls
-  _per_atom_conditioning and DISCARDS its pair output (`, _ =`), then RE-embeds the
-  pair conditioning itself -> those recomputed linears get haiku's _1 suffix and are
-  the ones ACTUALLY USED. So OpenDDE's single pair set (cl/cm/d/invd) maps to the
-  _1 names; the base single_to_pair_cond_row/col + embed_pair_offsets/distances are
-  DEAD params (their output is discarded) and are zero-filled just to satisfy loading.
+  THE PAIR SET IS WRITTEN TO BOTH NAMES, and the history is the reason. Our
+  encoder used to call `_per_atom_conditioning`, discard its pair output, and
+  re-embed the pair itself -- so haiku gave the SECOND set the `_1` suffix and
+  those were the live parameters. This converter therefore put the real weights
+  on `_1` and ZEROS on the base names.
+
+  Then the call site became `need_pair=False` (atom_cross_attention.py:301): the
+  first pair half is no longer built at all, so nothing creates `_1` and the
+  BASE names are what the forward reads. That change was checked for
+  bit-identity on models whose converters write the same weights to both names
+  (boltz2, intellifold2) and on models that write base names only (protenix,
+  of3) -- for opendde it silently moved the diffusion atom encoder onto the ZERO
+  base params, and four of the five atom-pair terms (offsets, inverse distances,
+  and both single->pair projections) stopped contributing. The atom pair kept
+  only `offsets_valid` and the MLP, which reads as rms 0.36 of native's with
+  positions alone, corr 0.33 -- and 0.464 A/atom on a whole denoise step.
+
+  Writing both names cannot be wrong under either convention, which is what
+  boltz2 and intellifold2 already did.
   """
   g = lambda n: np.asarray(sd[_k(src_prefix, n)])
   f = g('linear_no_bias_f.weight')                 # (128, 1+128+256)
@@ -202,7 +215,12 @@ def convert_atom_encoder(sd, src_prefix, dst_prefix):
       f'{P}_embed_ref_mask':      {'weights': T(f[:, 0:1])},
       f'{P}_embed_ref_element':   {'weights': C.fold_element_index_shift(T(f[:, 1:129]))},
       f'{P}_embed_ref_atom_name': {'weights': T(f[:, 129:385])},
-      # the USED pair conditioning is the _1 set (see docstring)
+      # BOTH the base and the _1 names, with the same weights. Which one the
+      # forward creates depends on whether `_per_atom_conditioning` built a pair
+      # half first, and that changed under this converter: the call site now
+      # passes `need_pair=False`, so nothing creates the _1 names any more and
+      # the base names are what the graph reads. Writing both is what boltz2 and
+      # intellifold2 already do, and it cannot be wrong under either naming.
       f'{P}_single_to_pair_cond_row_1': {'weights': T(cl)},
       f'{P}_single_to_pair_cond_col_1': {'weights': T(cm)},
       f'{P}_embed_pair_offsets_1':      {'weights': T(d)},
@@ -212,12 +230,10 @@ def convert_atom_encoder(sd, src_prefix, dst_prefix):
       f'{P}_pair_mlp_2': {'weights': T(g('small_mlp.3.weight'))},
       f'{P}_pair_mlp_3': {'weights': T(g('small_mlp.5.weight'))},
       f'{P}_project_atom_features_for_aggr': {'weights': T(g('linear_no_bias_q.weight'))},
-      # DEAD base pair linears (output discarded at _per_atom_conditioning caller) --
-      # zero-filled so the param set loads; they do not affect the forward.
-      f'{P}_single_to_pair_cond_row': {'weights': np.zeros_like(T(cl))},
-      f'{P}_single_to_pair_cond_col': {'weights': np.zeros_like(T(cm))},
-      f'{P}_embed_pair_offsets':      {'weights': np.zeros_like(T(d))},
-      f'{P}_embed_pair_distances':    {'weights': np.zeros_like(T(invd))},
+      f'{P}_single_to_pair_cond_row': {'weights': T(cl)},
+      f'{P}_single_to_pair_cond_col': {'weights': T(cm)},
+      f'{P}_embed_pair_offsets':      {'weights': T(d)},
+      f'{P}_embed_pair_distances':    {'weights': T(invd)},
   }
   return out
 

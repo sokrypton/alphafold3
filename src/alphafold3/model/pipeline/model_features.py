@@ -41,6 +41,16 @@ def _key_window(batch, policy, k_size=None, prefix=''):
     'pad'    opendde/protenix (rearrange_qk_to_dense_trunk): clip and mask, so
              edge blocks see fewer neighbours AND the ones they see sit at
              DIFFERENT key slots, which misaligns the per-slot pair bias too.
+    'slide_qblock'
+             IntelliFold-2: 'slide', but the edge is the atom count ROUNDED UP
+             to a whole query block, not the real atom count. if2 reshapes its
+             flat atom axis into windows (`b (n w) -> b n w`), so it must first
+             pad the axis to a multiple of 32 -- and its edge windows are then
+             aligned to THAT length. On 6MRR (574 real atoms) its last two
+             blocks take keys 448..575, where AF3's slide gives 446..573: two
+             extra REAL keys on our side, because 574 and 575 are padding for
+             if2 and masked. Two atoms, and it is the whole of if2's atom
+             encoder residual -- see the localisation in the commit message.
 
   Rewritten on the finished batch rather than threaded through AF3's
   featurisation: the key gathers are plain index arrays over the flat queries
@@ -60,11 +70,19 @@ def _key_window(batch, policy, k_size=None, prefix=''):
     # batch would silently reshape arrays the other two policies keep.
     k_size = min(k_size, n_padded)
   starts = np.arange(num_subsets) * q_size + (q_size - k_size) // 2
+  flat_mask = q_mask.reshape(-1)
   if policy == 'slide':
     starts = np.clip(starts, 0, n_padded - k_size)
+  elif policy == 'slide_qblock':
+    # The edge is the REAL atom count rounded up to a whole query block. Not
+    # `n_padded` (that is num_tokens * max_atoms, far past the real atoms, so
+    # nothing would ever slide) and not the real count itself (that is AF3's
+    # own convention, which features.py already applies).
+    n_real = int(flat_mask.sum())
+    bound = -(-n_real // q_size) * q_size
+    starts = np.clip(starts, 0, max(bound - k_size, 0))
   window = starts[:, None] + np.arange(k_size)[None, :]
 
-  flat_mask = q_mask.reshape(-1)
   if policy == 'wrap':
     window = window % n_padded
     keep = flat_mask[window]
@@ -72,7 +90,7 @@ def _key_window(batch, policy, k_size=None, prefix=''):
     in_bounds = (window >= 0) & (window < n_padded)
     window = np.clip(window, 0, n_padded - 1)
     keep = in_bounds & flat_mask[window]
-  elif policy == 'slide':
+  elif policy in ('slide', 'slide_qblock'):
     keep = flat_mask[window]
   else:
     raise ValueError(f'unknown key-window policy {policy!r}')
@@ -476,6 +494,8 @@ def apply(batch, spec, *, refeaturise=None, model_dir=None, esm=None,
     _override_ref_conformers(batch, esmfold2_ref_pos.as_conformers())
   if knobs.get('atom_keys_subset_size'):
     _wide_key_window(batch, knobs['atom_keys_subset_size'])
+  if knobs.get('qblock_keys'):
+    _key_window(batch, 'slide_qblock')
   if knobs.get('circular_keys'):
     _circular_key_window(batch)
   if knobs.get('padded_keys'):

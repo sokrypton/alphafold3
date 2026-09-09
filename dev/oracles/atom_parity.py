@@ -34,6 +34,30 @@ _PROTENIX_CKPT = {
     'protenix1': 'protenix_base_default_v1.0.0.pt',
 }
 
+# Where each vendor's AtomAttentionENCODER lives -- the same table shape as
+# `_DECODER_SRC` below, and for the same reason. opendde's encoder is
+# protenix's: 98 tensors on both, identical leaf names, identical shape
+# signature except c_z (128 against protenix2's 256), which the code reads off
+# the checkpoint anyway. So it is one row, not a function.
+_ENC_SRC = {
+    'protenix1': ('protenix.model.modules.transformer',
+                  '~/protenix_weights/protenix_base_default_v1.0.0.pt',
+                  'module.diffusion_module.atom_attention_encoder.'),
+    'protenix2': ('protenix.model.modules.transformer',
+                  '~/protenix_weights/protenix-v2.pt',
+                  'module.diffusion_module.atom_attention_encoder.'),
+    'opendde': ('opendde.model.modules.transformer',
+                '~/opendde_weights/opendde.pt',
+                'module.diffusion_module.atom_attention_encoder.'),
+}
+
+# Tensors an adapter produces for an adapter downstream, NOT for a comparison.
+# `native_if2` returns `p_lm` as None on purpose -- if2 windows the atom pair
+# over an axis whose windows hold different atoms than ours, so comparing them
+# would mislead -- but the DECODER consumes that same tensor as an input. Parked
+# here rather than changing the return contract every caller reads.
+_RAW = {}
+
 
 def zero_other_features(fb, feats, keep):
   """Zero every per-atom reference feature except `keep`, on BOTH sides.
@@ -86,17 +110,25 @@ def flat_atom_features(fb):
 
 
 def native_protenix(model, fb, feats, pos_noisy, s, z, n_tok):
-  """-> (a_token, q_l) from protenix's own AtomAttentionEncoder."""
+  """-> (a_token, q_l) from the vendor's own AtomAttentionEncoder.
+
+  Serves protenix1, protenix2 and opendde off `_ENC_SRC` -- the module path is
+  the only thing that differs, and `opendde.model.modules.transformer` is
+  protenix's file with the package renamed.
+  """
+  import importlib
+
   import torch
 
   _stub_layer_norm()
-  from protenix.model.modules.transformer import (AtomAttentionEncoder,
-                                                  rearrange_qk_to_dense_trunk)
+  mod_name, ckpt_path, pre = _ENC_SRC[model]
+  _vend = importlib.import_module(mod_name)
+  AtomAttentionEncoder = _vend.AtomAttentionEncoder
+  rearrange_qk_to_dense_trunk = _vend.rearrange_qk_to_dense_trunk
 
-  ckpt = os.path.expanduser('~/protenix_weights/' + _PROTENIX_CKPT[model])
+  ckpt = os.path.expanduser(ckpt_path)
   sd = torch.load(ckpt, map_location='cpu', weights_only=False)
-  sd = sd.get('model', sd)
-  pre = 'module.diffusion_module.atom_attention_encoder.'
+  sd = sd.get('model', sd.get('state_dict', sd))
   sub = {k[len(pre):]: v for k, v in sd.items() if k.startswith(pre)}
   if not sub:
     raise SystemExit('no %r keys in %s' % (pre, ckpt))
@@ -140,15 +172,35 @@ def native_protenix(model, fb, feats, pos_noisy, s, z, n_tok):
   # `atom_to_token_idx`, and `gather_pair_embedding_in_dense_trunk` asserts its
   # gather indices are exactly 2-D -- feed it a leading batch axis and that
   # assert is what fires, from inside the vendor's code.
+  # BATCHED for opendde, UNBATCHED for protenix, and the vendors' own pipelines
+  # are what say so. `update_input_feature_dict` (opendde/model/opendde.py) runs
+  # this same construction on a BATCHED ref_pos, so its d_lm/v_lm carry a leading
+  # axis and its local attention's `len(z.shape) == len(q.shape) + 2` holds.
+  # protenix instead windows a 1-D atom_to_token_idx and its
+  # `gather_pair_embedding_in_dense_trunk` asserts exactly 2-D gather indices, so
+  # a leading axis fires THAT assert from inside the vendor. Hand-batching d_lm
+  # and v_lm after the fact is not the same thing: `pad_info` is built here too,
+  # and it then describes the wrong rank.
+  _b = (lambda x: t(x)[None]) if model == 'opendde' else t
   q_list, k_list, pad_info = rearrange_qk_to_dense_trunk(
-      q=[t(feats['ref_pos']), t(feats['ref_space_uid'])],
-      k=[t(feats['ref_pos']), t(feats['ref_space_uid'])],
+      q=[_b(feats['ref_pos']), _b(feats['ref_space_uid'])],
+      k=[_b(feats['ref_pos']), _b(feats['ref_space_uid'])],
       dim_q=[-2, -1], dim_k=[-2, -1], n_queries=32, n_keys=128,
       compute_mask=True)
   d_lm = q_list[0][..., None, :] - k_list[0][..., None, :, :]
   v_lm = (q_list[1][..., None].int() == k_list[1][..., None, :].int()
           ).unsqueeze(dim=-1)
 
+  # HOW MANY LEADING AXES the windowed atom-pair tensor and the trunk inputs
+  # carry. Both vendors' local attention asserts
+  # `len(z.shape) == len(q.shape) + 2` (transformer.py:714), where z is the
+  # WINDOWED atom pair and q the per-atom activation -- but they build the atom
+  # pair from d_lm/v_lm differently, so the same inputs give different ranks.
+  # protenix expands it internally and wants two leading axes on the trunk
+  # tensors; opendde does not, so the windowed pair has to be batched here and
+  # the trunk tensors carry one. Derived by reading the assert, not by guessing:
+  # 0, 1 and 2 leading axes on the trunk tensors alone all fire it.
+  _n_lead = int(os.environ.get('N_LEAD', 1 if model == 'opendde' else 2))
   net = AtomAttentionEncoder(c_atom=c_atom, c_atompair=c_atompair,
                              c_token=c_token, c_s=c_s, c_z=c_z,
                              n_blocks=n_blocks, n_heads=heads,
@@ -167,7 +219,15 @@ def native_protenix(model, fb, feats, pos_noisy, s, z, n_tok):
         ref_atom_name_chars=t(ref_chars)[None],
         ref_element=t(ref_element)[None],
         d_lm=d_lm, v_lm=v_lm, pad_info=pad_info,
-        r_l=t(pos_noisy)[None][None], s=t(s)[None][None], z=t(z)[None][None])
+        # HOW MANY LEADING AXES. protenix's encoder wants two (a diffusion-batch
+        # axis inside a batch axis) and threads both through to the atom pair,
+        # so its local attention's `len(z.shape) == len(q.shape) + 2` holds.
+        # opendde carries the same assert but does NOT thread the second axis
+        # into p_lm, so two axes fire it from inside the vendor's code
+        # (transformer.py:714). One axis is what its own pipeline passes.
+        **{k: (t(v)[None][None] if _n_lead == 2 else
+               t(v)[None] if _n_lead == 1 else t(v))
+           for k, v in (('r_l', pos_noisy), ('s', s), ('z', z))})
   # c_l and p_lm are the encoder's INPUTS -- the per-atom conditioning and the
   # windowed atom-pair features. Returned so the harness can tell "our features
   # differ" from "our atom stack differs", which the outputs alone cannot.
@@ -367,6 +427,14 @@ def native_if2(model, fb, feats, pos_noisy, s, z, n_tok):
   print('  native: %d tensors, %d missing, %d unexpected %s'
         % (len(sub), len(missing), len(unexpected), list(missing)[:2]))
   assert not missing, 'native is missing %d tensors' % len(missing)
+  # BLOCKS truncates BOTH sides (ours in `ours()`), which is what separates a
+  # per-block difference from its accumulation: a tail difference in the key
+  # window propagates one window backwards per block, so three blocks turn an
+  # edge into what looks like a gradient.
+  _nb = os.environ.get('BLOCKS')
+  if _nb:
+    net.atom_transformer.blocks = net.atom_transformer.blocks[:int(_nb)]
+    print('  native atom stack truncated to %s block(s)' % _nb)
   net.eval()
   with torch.no_grad():
     a, q_l, c_l, p_lm = net(
@@ -385,6 +453,7 @@ def native_if2(model, fb, feats, pos_noisy, s, z, n_tok):
   # windows hold different atoms than ours -- not comparable, and returned as
   # None rather than compared misleadingly.
   keep = np.ones(q_l.shape[-2], bool) if packed else mask.reshape(-1)
+  _RAW['if2_p'] = np.asarray(p_lm)
   return (np.asarray(a)[0], q_l.reshape(-1, q_l.shape[-1])[keep],
           c_l.reshape(-1, c_l.shape[-1])[keep], None, None)
 
@@ -579,7 +648,7 @@ def native_esmfold2(model, fb, feats, pos_noisy, s, z, n_tok):
   return (np.asarray(a), sel(q), sel(c0), None, None)
 
 
-NATIVES = {m: native_protenix for m in _PROTENIX_CKPT}
+NATIVES = {m: native_protenix for m in _ENC_SRC}
 NATIVES.update({m: native_of3 for m in _OF3_CKPT})
 NATIVES['intellifold2'] = native_if2
 NATIVES['rosettafold3'] = native_rf3
@@ -682,7 +751,10 @@ def main(argv=None):
 
   rng = np.random.default_rng(0)
   c_s = cfg.evoformer.seq_channel
-  c_z = cfg.evoformer.pair_channel
+  c_z = cfg.heads.diffusion.conditioning.pair_channel
+  if c_z != cfg.evoformer.pair_channel:
+    print('  NOTE this model compresses the trunk pair for the diffusion: '
+          '%d in the trunk, %d here' % (cfg.evoformer.pair_channel, c_z))
   s = (rng.normal(size=(n_tok, c_s)) * 0.5).astype(np.float32)
   z = (rng.normal(size=(n_tok, n_tok, c_z)) * 0.5).astype(np.float32)
   # The localisation ladder, same idea as confidence_parity's: switch off one
@@ -799,6 +871,22 @@ def main(argv=None):
   n_cmp = q_ref.shape[0]
   q_got = np.asarray(skip).reshape(-1, np.asarray(skip).shape[-1])[:n_cmp]
   _cmp('q_atom', q_got, q_ref)
+  if os.environ.get('DIAG'):
+    # WHICH ATOMS, in window terms. The per-token breakdown above says which
+    # tokens, and a residual that is ~0 for most of a structure and rises at one
+    # END is about the atom LIST or the key window, not the arithmetic -- the
+    # lesson the ESMFold2 OXT taught. This says whether the atoms that disagree
+    # are exactly the ones in the LAST window(s), where our flat axis is padded
+    # to num_tokens * max_atoms and native's is not.
+    _d = np.abs(np.asarray(q_got, np.float64)
+                - np.asarray(q_ref, np.float64)).max(-1)
+    _w = np.arange(n_cmp) // 32
+    print('  DIAG q per-window max|d| (32 atoms each): %s'
+          % [(int(w), round(float(_d[_w == w].max()), 4))
+             for w in range(int(_w.max()) + 1)])
+    _bad = np.flatnonzero(_d > 0.01 * max(_d.max(), 1e-9))
+    print('  DIAG q atoms above 1%% of the worst: %d of %d, first %s last %s'
+          % (len(_bad), n_cmp, _bad[:6].tolist(), _bad[-6:].tolist()))
   # The two INPUTS to the atom stack.
   c_flat = np.asarray(c_got).reshape(-1, np.asarray(c_got).shape[-1])[:n_cmp]
   print('  c_l ours %s -> %s | native %s'
@@ -939,6 +1027,162 @@ def _native_decoder(model, feats, a, q_ref, c_ref, p_ref, n_atom, c_token):
   return _np.asarray(r).reshape(-1, 3)[:n_atom]
 
 
+def _native_decoder_of3(model, feats, a, q_ref, c_ref, p_ref, n_atom, c_token):
+  """-> r_ref from OpenFold3's own AtomAttentionDecoder (openfold3, openbind0).
+
+  Not a `_DECODER_SRC` row because of3 differs from protenix in all three ways
+  a row cannot express: the submodule is `atom_attn_dec` not
+  `atom_attention_decoder`, the leaves are `linear_q_in`/`linear_q_out` not
+  `linear_no_bias_a`/`linear_no_bias_q`, and `forward` takes a feature dict
+  plus keyword tensors rather than an `atom_to_token_idx`.
+
+  The atom->token broadcast is the one thing to get right: of3 does NOT gather
+  through an index, it calls `broadcast_token_feat_to_atoms(token_mask,
+  num_atoms_per_token, ...)`, which assumes each token's atoms are contiguous.
+  Ours are -- that is what makes `c_atom_cond` exact under `[:n_atom]` slicing
+  -- so `feats['mask'].sum(1)` is the right lens vector, and it sums to exactly
+  the atom count `q_ref` carries. Asserted below rather than trusted.
+
+  Construction comes from of3's own model_config subtree (the same `_find` walk
+  `denoise_parity.native_of3` uses) so nothing is retyped; the widths are then
+  overridden from the CHECKPOINT, and c_atom_pair from the reference pair
+  tensor, so a release that moved either fails in load_state_dict.
+  """
+  import copy
+
+  import numpy as _np
+  import torch
+
+  from openfold3.core.model.layers.sequence_local_atom_attention import (
+      AtomAttentionDecoder)
+  from openfold3.projects.of3_all_atom.config.model_config import model_config
+
+  ckpt = os.path.expanduser('~/' + _OF3_CKPT[model])
+  sd = torch.load(ckpt, map_location='cpu', weights_only=False)
+  sd = sd.get('state_dict', sd.get('model', sd))
+  pre = 'diffusion_module.atom_attn_dec.'
+  sub = {k[len(pre):]: v for k, v in sd.items() if k.startswith(pre)}
+  if not sub:
+    raise SystemExit('no %r keys in %s' % (pre, ckpt))
+
+  def _find(cfg, key):
+    if hasattr(cfg, 'keys'):
+      if key in cfg and 'atom_attn_dec' in cfg[key]:
+        return cfg[key]
+      for k in cfg:
+        got = _find(cfg[k], key) if hasattr(cfg[k], 'keys') else None
+        if got is not None:
+          return got
+    return None
+
+  dcfg = _find(copy.deepcopy(model_config), 'diffusion_module')
+  if dcfg is None:
+    raise SystemExit('no diffusion_module subtree in of3 model_config')
+  kw = dict(dcfg['atom_attn_dec'])
+  bpre = 'atom_transformer.blocks.'
+  kw['no_blocks'] = 1 + max(int(k[len(bpre):].split('.')[0]) for k in sub
+                            if k.startswith(bpre))
+  kw['c_atom'], kw['c_token'] = sub['linear_q_in.weight'].shape
+  kw['c_atom_pair'] = (p_ref.shape[-1] if p_ref is not None
+                       else sub['atom_transformer.layer_norm_z.weight'].shape[0])
+  print('  decoder checkpoint: c_atom %d, c_atom_pair %d, c_token %d, %d blocks'
+        % (kw['c_atom'], kw['c_atom_pair'], kw['c_token'], kw['no_blocks']))
+  net = AtomAttentionDecoder(**kw)
+  missing, unexpected = net.load_state_dict(sub, strict=False)
+  print('  native: %d tensors, %d missing, %d unexpected'
+        % (len(sub), len(missing), len(unexpected)))
+  assert not missing, 'native decoder is missing %d tensors' % len(missing)
+  net.eval()
+
+  lens = _np.asarray(feats['mask']).sum(1).astype(int)
+  n_flat = q_ref.shape[0]
+  assert int(lens.sum()) == n_flat, (
+      'of3 broadcasts by per-token atom COUNTS, so the lens must sum to the '
+      'atom axis the skips carry: %d lens vs %d atoms'
+      % (int(lens.sum()), n_flat))
+  t = lambda x, d=torch.float32: torch.tensor(_np.asarray(x), dtype=d)
+  batch = {
+      'token_mask': torch.ones(1, len(lens)),
+      'num_atoms_per_token': t(lens, torch.long)[None],
+      'atom_mask': torch.ones(1, n_flat),
+  }
+  with torch.no_grad():
+    r = net(batch, ai=t(a)[None], ql=t(q_ref)[None], cl=t(c_ref[:n_flat])[None],
+            plm=t(p_ref)[None])
+  return _np.asarray(r).reshape(-1, 3)[:n_atom]
+
+
+def _native_decoder_if2(model, feats, a, q_ref, c_ref, p_ref, n_atom, c_token):
+  """-> r_ref from IntelliFold-2's own AtomAttentionDecoder.
+
+  Two vendor facts drive this one. First, the leaves are `linear_a`,
+  `layer_norm_q`, `linear_q` where protenix has `linear_no_bias_a` -- same
+  prefix, different names, so it cannot be a `_DECODER_SRC` row.
+
+  Second, and the reason this needed a stash: `native_if2` deliberately returns
+  `p_lm` as None, because if2 windows the atom pair over an axis whose windows
+  hold different atoms than ours and comparing them would mislead. The DECODER
+  still needs that tensor as `p_skip` -- it is an input, not a comparison -- so
+  `native_if2` now also parks the raw tensor in `_RAW`. Feeding native its own
+  p is exactly the rule the encoder gate already follows: each side gets its
+  own encoder's skips, legitimate here because the encoder is gated exact.
+
+  `advanced_conversion` must match the encoder's -- the packed layout of the v2
+  inference config, see [[if2-atom-layout]] -- because the decoder does the
+  same atom<-token broadcast the encoder does.
+  """
+  import numpy as _np
+  import torch
+
+  from intellifold.openfold.model.diffusion import AtomAttentionDecoder
+
+  if _RAW.get('if2_p') is None:
+    raise SystemExit(
+        'the if2 decoder needs the encoder\'s p_lm and native_if2 did not park '
+        'one in _RAW -- it returns None for the COMPARISON, which is correct, '
+        'but the decoder consumes it as an input.')
+  p_skip = _RAW['if2_p']
+  ckpt = os.path.expanduser('~/model_v2/intellifold_v2.pt')
+  sd = torch.load(ckpt, map_location='cpu', weights_only=False)
+  sd = sd.get('state_dict', sd.get('model', sd))
+  pre = 'diffusion_module.atom_attention_decoder.'
+  sub = {k[len(pre):]: v for k, v in sd.items() if k.startswith(pre)}
+  if not sub:
+    raise SystemExit('no %r keys in %s' % (pre, ckpt))
+  bpre = 'atom_transformer.blocks.'
+  n_blocks = 1 + max(int(k[len(bpre):].split('.')[0]) for k in sub
+                     if k.startswith(bpre))
+  c_atom, c_tok_ck = sub['linear_a.weight'].shape
+  c_atompair = sub['atom_transformer.layer_norm_z.weight'].shape[0]
+  print('  decoder checkpoint: c_atom %d, c_atompair %d, c_token %d, %d blocks'
+        % (c_atom, c_atompair, c_tok_ck, n_blocks))
+  assert c_tok_ck == c_token, (c_tok_ck, c_token)
+  packed = not os.environ.get('IF2_DENSE')
+  net = AtomAttentionDecoder(
+      c_atom=c_atom, c_atompair=c_atompair, c_token=c_token,
+      no_blocks=n_blocks, no_heads=4, window_size_row=32, window_size_col=128,
+      advanced_conversion=packed)
+  missing, unexpected = net.load_state_dict(sub, strict=False)
+  print('  native: %d tensors, %d missing, %d unexpected'
+        % (len(sub), len(missing), len(unexpected)))
+  assert not missing, 'native decoder is missing %d tensors' % len(missing)
+  net.eval()
+  t = lambda x, d=torch.float32: torch.tensor(_np.asarray(x), dtype=d)
+  mask = _np.asarray(feats['mask'])
+  n_flat = q_ref.shape[0]
+  with torch.no_grad():
+    r = net(a=t(a)[None], q_skip=t(q_ref)[None], c_skip=t(c_ref[:n_flat])[None],
+            p_skip=t(p_skip), atom_mask=torch.ones(1, n_flat),
+            molecule_atom_lens=t(mask.sum(1), torch.long)[None],
+            chunk_size=None, use_deepspeed_evo_attention=False,
+            inplace_safe=False)
+  return _np.asarray(r).reshape(-1, 3)[:n_atom]
+
+_DECODER_FN = {'openfold3': _native_decoder_of3,
+               'openbind0': _native_decoder_of3,
+               'intellifold2': _native_decoder_if2}
+
+
 def _decoder(model, cfg, model_dir, fb, feats, q_ref, c_ref, p_ref, a_ref,
              act_dense, s, z, n_atom, n_tok):
   """DECODER=1: the atom cross-attention DECODER, which nothing else gates.
@@ -974,14 +1218,18 @@ def _decoder(model, cfg, model_dir, fb, feats, q_ref, c_ref, p_ref, a_ref,
   c_token = a_ref.shape[-1]
   a = (rng.normal(size=(n_tok, c_token)) * 0.5).astype(_np.float32)
 
-  if model not in _DECODER_SRC:
+  fn = _DECODER_FN.get(model)
+  if fn is None and model in _DECODER_SRC:
+    fn = _native_decoder
+  if fn is None:
     raise SystemExit(
         'no native DECODER for %r; have %s. The `ours` half below is already '
-        'model-generic -- what a new model needs is one _DECODER_SRC row, and '
-        'its checkpoint prefix and widths can be checked without a GPU.'
-        % (model, sorted(_DECODER_SRC)))
+        'model-generic -- what a new model needs is one _DECODER_SRC row (if it '
+        'is protenix-shaped) or one _DECODER_FN entry, and its checkpoint '
+        'prefix and widths can be checked without a GPU.'
+        % (model, sorted(set(_DECODER_SRC) | set(_DECODER_FN))))
   _stub_layer_norm()
-  r_ref = _native_decoder(model, feats, a, q_ref, c_ref, p_ref, n_atom, c_token)
+  r_ref = fn(model, feats, a, q_ref, c_ref, p_ref, n_atom, c_token)
 
   cfg.global_config.bfloat16 = 'none'
   full = afp.get_model_haiku_params(model_dir=model_dir)

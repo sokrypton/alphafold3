@@ -53,6 +53,7 @@ def write_params_blob(output_dir, filename, params, *, add_meta=True,
   the first OF3 conversion used. Returns the path.
   """
   output_dir = os.path.expanduser(str(output_dir))
+  _check_no_dead_sibling(params, filename)
   os.makedirs(output_dir, exist_ok=True)
   out_path = os.path.join(output_dir, filename)
   with zstandard.ZstdCompressor(level=level).stream_writer(open(out_path, 'wb')) as comp:
@@ -77,6 +78,57 @@ def write_params_blob(output_dir, filename, params, *, add_meta=True,
       for name in sorted(params[scope]):
         comp.write(encode_record(scope, name, np.asarray(params[scope][name], dtype=dtype)))
   return out_path
+
+
+def _check_no_dead_sibling(params, filename):
+  """Refuse a blob where one of a `X` / `X_1` pair is ZERO and the other is not.
+
+  Haiku appends `_1` when a transform creates the same module name twice, so a
+  converter that has to satisfy both names writes both -- and a converter that
+  believes only one of them is live may zero the other. That belief is a
+  property of the FORWARD, not of the checkpoint, and the forward changes.
+
+  It changed under `converters/opendde.py`: our atom encoder used to build the
+  atom pair twice (the first output discarded), so the live parameters were the
+  `_1` set and the base names were zero-filled "just to satisfy loading". Then
+  the discarded call became `need_pair=False`, nothing created `_1` any more,
+  and opendde's diffusion atom encoder silently moved onto the ZERO base
+  params: four of the five atom-pair terms stopped contributing, which cost
+  0.464 A/atom on a denoise step that is 0.0054 A/atom with them.
+
+  Nothing failed. Both names were present, so the loader was satisfied and the
+  gate reported 0 unmapped. The only signal was the numbers, and the cell that
+  would have shown it had no adapter. Hence a check at WRITE time, where the
+  intent is expressible: if one sibling is all zeros while the other is not,
+  the converter is asserting which one the graph reads, and it should not.
+  """
+  flat = {}
+  for scope in params:
+    for name in params[scope]:
+      flat['%s/%s' % (scope, name)] = params[scope][name]
+  bad = []
+  for key, arr in flat.items():
+    scope, _, name = key.rpartition('/')
+    if not scope.endswith('_1'):
+      continue
+    sibling = '%s/%s' % (scope[:-2], name)
+    other = flat.get(sibling)
+    if other is None:
+      continue
+    a, b = np.asarray(arr), np.asarray(other)
+    if a.shape != b.shape:
+      continue
+    za, zb = not a.any(), not b.any()
+    if za != zb:
+      bad.append((sibling if zb else key, 'zero'))
+  if bad:
+    raise ValueError(
+        '%s: %d parameter(s) are all-zero while their haiku sibling is not:\n'
+        '  %s\n'
+        'One of a `X` / `X_1` pair being zeroed asserts which one the FORWARD '
+        'creates, and that is not a property of the checkpoint. Write the real '
+        'weights to BOTH names -- see _check_no_dead_sibling.'
+        % (filename, len(bad), '\n  '.join(k for k, _ in sorted(bad))))
 
 
 def write_records_blob(out_path, records, *, level=10, identifier=None):
