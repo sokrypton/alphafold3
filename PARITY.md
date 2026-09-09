@@ -2301,6 +2301,46 @@ CRASHING, both because the reference/oracle path knew only the released line:
 `coda=0` and `lm_enc=0`), and `confidence_head` assumed the released head's five
 extra submodules. Both now read the checkpoint.
 
+## The real-features MSA gate exists after all: L1.trunk_ref (2026-09-09)
+
+The session opened wanting a gate that drives the MSA encoder from REAL msa
+features rather than from native's already-embedded rows. Enabling
+`L1.trunk_ref` for the experimental line turned out to BE that gate, and it
+splits the family perfectly:
+
+| variant | trunk / msa | corr | relerr |
+|---|---|---|---|
+| `esmfold2_fast` | 24 / 0 | **1.000000** | 9.4e-06 |
+| `esmfold2_exp_fast` | 24 / 0 | **1.000000** | 4.4e-06 |
+| `esmfold2_exp_fast_cutoff2025` | 24 / 0 | **1.000000** | 2.0e-06 |
+| `esmfold2` | 48 / 4 | 0.999956 | 5.6e-03 |
+| `esmfold2_exp` | 48 / 4 | 0.998229 | 4.1e-02 |
+| `esmfold2_exp_cutoff2025` | 48 / 4 | 0.996692 | 8.3e-02 |
+
+`esmfold2_localise_trunk.py` passes `msa = self_msa(f) if dims['n_msa'] else
+None`, so the three exact rows are precisely the ones that DO NOT run the MSA
+encoder. The MSA path is where the trunk residual lives, and L1b.msa's
+1.000000 does not cover it -- L1b injects native's embedded rows.
+
+**But part of that gap is the REFERENCE, not the port**, and it is worth being
+explicit that a wrong reference is indistinguishable from a wrong port unless
+you look. My experimental branch called `msa_encoder` unconditionally, where the
+experimental encoder multiplies its whole output by `msa_track_mask` --
+`msa_attention_mask[:, :, 1:].any()`, false on a depth-1 self-MSA, so native
+contributes exactly zero and our graph correctly skips it. The numbers said so:
+the two EXPERIMENTAL rows (4.1e-02, 8.3e-02) are far worse than the RELEASED
+one (5.6e-03), and the released line is the one with no track mask at all.
+
+Fixed, with one trap worth recording: this file's msa tensors are **[L, M]**
+(`self_msa` returns mask `(L, 1)`) while `batch.msa.mask` is **[M, L]**. So the
+non-query rows are `[:, 1:]` in the reference and `[1:]` in the graph, and the
+two spellings look identical while meaning different things -- `mask[1:]` there
+slices TOKENS and answers True for any structure longer than one residue.
+
+What remains after that is the released line's 5.6e-03, against a reference
+whose released msa_encoder is the old validated one. That is a real residual in
+our graph's MSA path and it is the next thing to localise.
+
 ## The atom gate is BLIND to a featurisation difference, by construction (2026-09-09)
 
 Worth knowing before trusting it for anything input-shaped. `atom_parity.py`
