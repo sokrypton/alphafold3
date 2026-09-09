@@ -2301,6 +2301,37 @@ CRASHING, both because the reference/oracle path knew only the released line:
 `coda=0` and `lm_enc=0`), and `confidence_head` assumed the released head's five
 extra submodules. Both now read the checkpoint.
 
+## The atom gate is BLIND to a featurisation difference, by construction (2026-09-09)
+
+Worth knowing before trusting it for anything input-shaped. `atom_parity.py`
+builds the features from OUR batch and hands them to the VENDOR's code -- which
+is what makes it a clean module gate, and what makes it unable to see a
+disagreement in the features themselves. Both sides get our `ref_pos`, so:
+
+    openfold3 centred    a_token 1.24e-05   c_atom_cond 0.00000   p_atom_pair 23.43513
+    openfold3 uncentred  a_token 1.20e-05   c_atom_cond 0.00000   p_atom_pair 23.43513
+
+byte-identical. The conformer-centering question below therefore **cannot be
+answered by this gate**, and the six models' atom cells reading 1.000000 says
+nothing about it either way. The test is the FOLD, or a comparison against the
+vendor's own featuriser output.
+
+This is the same shape as the ESMFold2 MSA bug -- a gate that is exact because
+of what it injects, not because the port is right ([[ungated-modules]]). The
+ESMFold2 atom cells are the exception: `esmfold2_ref_pos` and the OXT drop DID
+move them, because `native_esmfold2` reads its inputs from a DUMP rather than
+from our batch, so the two sides really can disagree about the atom list.
+
+### NEW: openfold3's atom PAIR conditioning has a real residual
+
+    openfold3  p_atom_pair  corr 0.999816  max|d| 23.43513  rms(native) 16.808
+                            max|d|/rms 1.39
+
+max|d| larger than the rms of the reference is not noise, and it is identical
+centred or not, so it is nothing to do with `ref_pos` offsets. `a_token`,
+`q_atom` and `c_atom_cond` are all 1.000000 for this model, so it is isolated to
+the pair half. Untouched and OPEN.
+
 ## OPEN: six vendors CENTRE their reference conformers and we do not (2026-09-09)
 
 Found by following the boltz2 lead below, and it is not boltz2-specific. Our
