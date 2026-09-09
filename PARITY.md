@@ -1,3 +1,47 @@
+# STATE OF PLAY -- 2026-09-09 (overnight session)
+
+Two tools now measure parity, because the driver could not:
+
+  * `dev/oracles/gate_applies.py` -- is a SKIP a hole, or does the model simply
+    not have that module? (79 of the cells are n/a for reasons that are
+    properties of the model.)
+  * `dev/oracles/parity_audit.py` -- do the cells that RAN actually agree?
+    `classify()` only ever asked whether a matching line EXISTS.
+
+**Module levels L0-L4, every model (`parity_runs/2026-09-09-full`):**
+
+    236 cells:  116 OK   79 N/A   39 HOLE   2 FAIL     (holes were 66 at the start)
+    171 comparisons inside them:  PARITY 124  CLOSE 16  LOOSE 12  BAD 19
+
+Of the 19 BAD, **7 are closed** and every one was the ORACLE, not the port:
+six were the alphabet permutation's fourth copy (`single_cond` 3.74 ->
+4.4e-06 across the esmfold2 family), one was the rf3 gate feeding native two
+columns that are zero in all real data (0.124 -> 2.7e-05).
+
+Port bugs fixed today, with the evidence in the sections below:
+
+  * ESMFold2's two release lines are DIFFERENT MSA encoders, and the gate had
+    imported the wrong one -- 1STP with a real MSA 14.364 A -> 0.477 A.
+  * the restype/profile alphabet is a permutation, not a shift -- 1EHZ RNA
+    21.508 A -> 1.662 A, and it needed fixing in FOUR places.
+  * the experimental outer product adds its bias after the divide.
+  * ESMFold2's atom encoder wants its own ref_pos table and no terminal OXT --
+    now EXACT on both lines (a_token corr 1.000000).
+  * six vendors centre their reference conformers and we did not; neutral on
+    the folds, and it was silently skipped for openfold3/openbind0 until the
+    knob was made real.
+
+**Open, with the next step written down in each case:** `dev/oracles/HOLES.md`
+lists the 39 holes and the 12 remaining BAD comparisons, what each needs, and
+which hypotheses are already eliminated. `p_atom_pair` (4 cells, one lineage)
+has a specific prediction to test with `DIAG=1` before anything is changed.
+
+**Do not trust an "OK" without reading its numbers**, and do not trust a
+byte-identical A/B -- that is what exposed the openfold3 centering being skipped
+entirely.
+
+---
+
 # Parity testing: what is gated, at which level, for which model
 
 A port can be wrong in places a fold never reveals. This is the map of what is

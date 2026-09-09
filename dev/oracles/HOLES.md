@@ -141,3 +141,24 @@ import cleanly beside jax, so neither needs the npz-dump machinery esmfold2
 does. Start with `L2.conditioning` for those two: it is the same module for
 both, `native_protenix` is a working template, and it unblocks the reasoning for
 `L2.diffusion`/`L3.denoise`, which consume its output.
+
+
+## Gate BLINDNESS, separate from holes and from disagreements
+
+Cases where a gate is exact because of what it injects, not because the port is
+right. These are not counted anywhere and each needs its own answer:
+
+  * **`atom_parity` feeds the vendor OUR features.** So it cannot see a
+    featurisation difference at all: the conformer-centering A/B came back
+    byte-identical for all six vendors. Only a fold, or a comparison against
+    the vendor's own featuriser, can judge that class of change. ESMFold2's
+    atom cells are the exception because `native_esmfold2` reads a DUMP.
+  * **rf3's `ref_pos_ground_truth` (3 cols) and `has_atom_level_embedding`
+    (1 col)** are fed as ZEROS on both sides, "the same thing the port does".
+    Consistent, therefore exact -- but `has_atom_level_embedding` is 1 in
+    native whenever a residue descriptor cache is present, so if rf3's shipped
+    inference provides one, our port drops a learned per-atom term and the gate
+    cannot tell. Worth answering by running rf3's own featuriser.
+  * **`p_lm` is "not compared" for esmfold2** (native windows the dense atom
+    axis, ours the packed one), so the atom PAIR conditioning has no gate at all
+    for that family.
