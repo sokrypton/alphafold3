@@ -89,13 +89,14 @@ Module levels L0-L4, every model: **236 cells -- 116 OK, 79 N/A, 39 HOLE,
 
 | gate | models | what it needs |
 |---|---|---|
-| `L2.atom_decoder` | esmfold2 x8 | a dump-based decoder reference; `native_esmfold2` reads inputs from an npz and the dump does not currently carry decoder I/O |
-| `L2.atom_decoder` | openfold3, openbind0 | a function, not a row: prefix is `diffusion_module.atom_attn_dec.` and the class is `sequence_local_atom_attention.AtomAttentionDecoder`, whose `__init__` wants c_atom, c_atom_pair, c_token, c_hidden, no_heads, no_blocks, n_transition, n_query, n_key, use_ada_layer_norm -- take them from of3's own config the way `denoise_parity.native_of3` does with its `_find` helper. `forward(batch, ai, ql, cl, plm)` needs a batch carrying `token_mask` and `num_atoms_per_token`. |
-| `L2.atom_decoder` | intellifold2 | prefix matches protenix's but the leaves are `linear_a` / `layer_norm_q` / `linear_q` against `linear_no_bias_a` |
+| `L2.atom_decoder` | esmfold2 x4 | a dump-based decoder reference; `native_esmfold2` reads inputs from an npz and the dump does not currently carry decoder I/O |
+| `L2.atom_decoder` | openfold3, openbind0 | ADAPTER WRITTEN (`_native_decoder_of3`), awaiting a GPU slot to verify. The one thing to watch: of3 does not gather through an index, it broadcasts by per-token atom COUNTS (`broadcast_token_feat_to_atoms`), which assumes each token's atoms are contiguous -- ours are, and the adapter asserts the lens sum to the atom axis. |
+| `L2.atom_decoder` | intellifold2 | ADAPTER WRITTEN (`_native_decoder_if2`), awaiting a GPU slot. Needed one new mechanism: `native_if2` returns `p_lm` as None because its windows hold different atoms than ours, but the decoder CONSUMES that tensor, so the encoder now parks the raw one in `_RAW`. |
 | `L2.atom_decoder` | rosettafold3, boltz2 | not yet looked at |
-| `L4.confidence` | esmfold2 x6 | no adapter; native lives in ~/venv_esm so it needs a dump |
+| `L4.confidence` | esmfold2 x2 (the two with a confidence head) | no adapter; native lives in ~/venv_esm so it needs a dump |
 | `L4.confidence` | boltz2 | converter is done (66 -> 11); the rest is forward branches, recipe in `boltz2-confidence-port` |
-| `L2.atom_encoder` | boltz2, opendde | no adapter |
+| `L2.atom_encoder` | opendde | ADAPTER WRITTEN, and it is one table row: opendde's atom encoder IS protenix's -- 98 tensors on both, identical leaf names, identical shape signature except c_z (128 against 256), which is read off the checkpoint. `_ENC_SRC` now drives `native_protenix` the way `_DECODER_SRC` drives the decoder. |
+| `L2.atom_encoder` | boltz2 | no adapter |
 | `L2.diffusion`, `L3.denoise` | boltz2, opendde | no adapter |
 | `L1.trunk` | rosettafold3 | no adapter |
 

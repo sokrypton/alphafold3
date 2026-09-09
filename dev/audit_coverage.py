@@ -184,10 +184,6 @@ _LOADERS = {
        for m, hub in (
            ('esmfold2', 'ESMFold2'),
            ('esmfold2_fast', 'ESMFold2-Fast'),
-           ('ESMFold2-Experimental'),
-           ('ESMFold2-Experimental-Fast'),
-           ('ESMFold2-Experimental-Cutoff2025'),
-           ('ESMFold2-Experimental-Fast-Cutoff2025'),
            ('esmfold2_lm600m',
             'ESMFold2-Experimental-Fast-base600M-step1500k'),
            # lm300m was missing, so L0 had never run on it -- the same omission
