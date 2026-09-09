@@ -517,10 +517,25 @@ def native_esmfold2(model, batch, rng, n, noise):
         % (c_z, c_s, c_in_esm))
 
   # ESM layout -> ours. 447 = [restype 31 | profile 31 | deletion 1 | atom 384].
+  #
+  # A PERMUTATION, not a shift past "ESM's two extras". ESMFold2 puts the GAP at
+  # res_type class 1, BELOW the residues, where AF3 puts it at 21 between UNK
+  # and the nucleic acids -- so AF3's column 21 comes from ESM slot 1 and its
+  # 22..30 from ESM 23..31, leaving slots 0 and 32 (DN) unused.
+  #
+  # Read as a shift this zeroed ESM slot 1 and fed native a value at slot 32
+  # that our side never puts there, which is the whole `single_cond` residual:
+  # 0.997315 at max|d|/rms 3.74 for esmfold2 while `pair_cond` -- which does not
+  # consume s_inputs -- was exact at 1.95e-06. Six BAD cells, one wrong index.
+  #
+  # `converters/esmfold2.esm_class_of_af3` is the single source of truth for this
+  # mapping; the converter, the graph's widening in diffusion_head and
+  # remap_msa_feat all use it, and this was the fourth copy.
   n_rt = 31
+  _esm_of_af3 = np.asarray(CV.esm_class_of_af3(n_rt))
   idx = np.concatenate([
-      384 + 2 + np.arange(n_rt),               # restype, past ESM's two extras
-      384 + 33 + 2 + np.arange(n_rt),          # profile, same offset
+      384 + _esm_of_af3,                       # restype, permuted
+      384 + 33 + _esm_of_af3,                  # profile, the same permutation
       [384 + 33 + 33],                         # deletion mean
       np.arange(384)])                         # the atom block
   s_inputs = (rng.normal(size=(n, c_in_esm)) * 0.5).astype(np.float32)
