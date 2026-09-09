@@ -136,6 +136,129 @@ def native_protenix(model, n, mask, blocks=None):
   return s, z, s_ref[0].numpy(), z_ref[0].numpy(), n_blocks
 
 
+def native_boltz2(model, n, mask, blocks=None):
+  """-> (s, z, s_ref, z_ref, n_blocks) from Boltz-2's own PairformerModule.
+
+  boltz's module takes (s, z, mask, pair_mask) rather than protenix's
+  (s, z, pair_mask), and its blocks live under `layers.` not `blocks.`. Widths
+  come off the checkpoint: token_s and token_z from the layer norms, the pair
+  head count and width from the triangle attention, since boltz's defaults
+  (16 heads, 32-wide, 4 pair heads) are not universal across its releases.
+  """
+  import torch
+
+  # `boltz.model.modules.trunk` pulls fairscale, which is not in this venv and
+  # must not be installed into it. `boltz.model.layers.pairformer` holds the
+  # same PairformerModule without that import -- the same route msa_parity.py
+  # takes to reach MSAModule through trunkv2.
+  from boltz.model.layers.pairformer import PairformerModule
+
+  ckpt = os.path.expanduser('~/boltz2_weights/boltz2_conf.ckpt')
+  raw = torch.load(ckpt, map_location='cpu', weights_only=False)
+  raw = raw.get('state_dict', raw)
+  pre = 'pairformer_module.'
+  sub = {k[len(pre):]: v for k, v in raw.items() if k.startswith(pre)}
+  if not sub:
+    raise SystemExit('no %r keys in %s' % (pre, ckpt))
+
+  n_blocks = 1 + max(int(k.split('.')[1])
+                     for k in sub if k.startswith('layers.'))
+  token_s = sub['layers.0.pre_norm_s.weight'].shape[0]
+  token_z = sub['layers.0.tri_mul_out.norm_in.weight'].shape[0]
+  # The triangle attention's head count and width, off its own projections:
+  # proj_q is (heads*width, token_z). boltz's defaults (4 heads x 32) are not
+  # universal across its releases, so they are derived, and a wrong pair fails
+  # in load_state_dict rather than comparing quietly.
+  pnh = int(sub['layers.0.tri_att_start.linear.weight'].shape[0])
+  pw = int(sub['layers.0.tri_att_start.mha.linear_q.weight'].shape[0])
+  head_w = pw // pnh
+  print('  checkpoint: %d blocks, token_s %d, token_z %d, tri proj %d '
+        '(%d heads x %d)' % (n_blocks, token_s, token_z, pw, pnh, head_w))
+
+  rng = np.random.default_rng(0)
+  s = (rng.normal(size=(n, token_s)) * 0.5).astype(np.float32)
+  z = (rng.normal(size=(n, n, token_z)) * 0.5).astype(np.float32)
+
+  # v2=True: boltz2's blocks carry `pre_norm_s`, the v2 AttentionPairBias. The
+  # v1 default builds `norm_s` instead and reports 96 missing tensors -- two per
+  # block, which is the tell that the class is right and the variant is not.
+  net = PairformerModule(token_s=token_s, token_z=token_z, num_blocks=n_blocks,
+                         dropout=0.0, pairwise_head_width=head_w,
+                         pairwise_num_heads=pnh, v2=True)
+  missing, unexpected = net.load_state_dict(sub, strict=False)
+  print('  native: %d tensors, %d missing, %d unexpected %s'
+        % (len(sub), len(missing), len(unexpected), list(missing)[:2]))
+  assert not missing, 'native is missing %d tensors' % len(missing)
+  # TRUNCATE THE NATIVE STACK TOO -- see native_protenix.
+  if blocks is not None and blocks < n_blocks:
+    net.layers = net.layers[:blocks]
+    n_blocks = blocks
+  net.eval()
+  with torch.no_grad():
+    s_ref, z_ref = net(torch.tensor(s)[None], torch.tensor(z)[None],
+                       torch.tensor(mask.max(-1))[None].float(),
+                       torch.tensor(mask)[None])
+  return s, z, s_ref[0].numpy(), z_ref[0].numpy(), n_blocks
+
+
+def native_opendde(model, n, mask, blocks=None):
+  """-> (s, z, s_ref, z_ref, n_blocks) from OpenDDE's own PairformerStack.
+
+  opendde is protenix-lineage and its stack takes the same arguments, so this is
+  native_protenix with a different checkpoint and prefix. `hidden_scale_up` is
+  read off the checkpoint rather than assumed: `PairformerBlock` builds its
+  triangle hidden width from c_z only when that flag is set, so a wrong value
+  fails in load_state_dict -- which is the good outcome -- but a value that
+  loads is not automatically the right one, and protenix2 needed True where AF3
+  needs False.
+  """
+  import torch
+
+  from opendde.model.modules.pairformer import PairformerStack
+
+  ckpt = os.path.expanduser('~/opendde_weights/opendde.pt')
+  sd = torch.load(ckpt, map_location='cpu', weights_only=False)
+  sd = sd.get('model', sd.get('state_dict', sd))
+  pre = 'module.pairformer_stack.'
+  sub = {k[len(pre):]: v for k, v in sd.items() if k.startswith(pre)}
+  if not sub:
+    raise SystemExit('no %r keys in %s' % (pre, ckpt))
+
+  n_blocks = 1 + max(int(k.split('.')[1])
+                     for k in sub if k.startswith('blocks.'))
+  c_z = sub['blocks.0.pair_transition.layernorm1.weight'].shape[0]
+  heads = sub['blocks.0.attention_pair_bias.linear_nobias_z.weight'].shape[0]
+  c_s = sub['blocks.0.attention_pair_bias.layernorm_a.weight'].shape[0]
+  # the triangle hidden width says which convention this checkpoint was built
+  # with: c_z when scaled up, 128 otherwise
+  tri_hidden = sub['blocks.0.tri_mul_out.linear_z.weight'].shape[0]
+  hsu = tri_hidden == c_z
+  print('  checkpoint: %d blocks, c_z %d, c_s %d, %d heads, tri hidden %d '
+        '(hidden_scale_up %s)' % (n_blocks, c_z, c_s, heads, tri_hidden, hsu))
+
+  rng = np.random.default_rng(0)
+  s = (rng.normal(size=(n, c_s)) * 0.5).astype(np.float32)
+  z = (rng.normal(size=(n, n, c_z)) * 0.5).astype(np.float32)
+
+  net = PairformerStack(n_blocks=n_blocks, n_heads=heads, c_z=c_z, c_s=c_s,
+                        hidden_scale_up=hsu)
+  missing, unexpected = net.load_state_dict(sub, strict=False)
+  print('  native: %d tensors, %d missing, %d unexpected'
+        % (len(sub), len(missing), len(unexpected)))
+  assert not missing, 'native is missing %d tensors' % len(missing)
+  # TRUNCATE THE NATIVE STACK TOO -- see native_protenix.
+  if blocks is not None and blocks < n_blocks:
+    net.blocks = net.blocks[:blocks]
+    if hasattr(net, 'n_blocks'):
+      net.n_blocks = blocks
+    n_blocks = blocks
+  net.eval()
+  with torch.no_grad():
+    s_ref, z_ref = net(torch.tensor(s)[None], torch.tensor(z)[None],
+                       torch.tensor(mask)[None])
+  return s, z, s_ref[0].numpy(), z_ref[0].numpy(), n_blocks
+
+
 _OF3_CKPT = {'openfold3': 'of3-p2-155k.pt', 'openbind0': 'of3-ob-174k.pt'}
 
 
@@ -204,6 +327,8 @@ def native_of3(model, n, mask, blocks=None):
 
 NATIVES = {m: native_protenix for m in _PROTENIX_CKPT}
 NATIVES.update({m: native_of3 for m in _OF3_CKPT})
+NATIVES['opendde'] = native_opendde
+NATIVES['boltz2'] = native_boltz2
 
 
 def ours(model, s, z, mask, n_blocks, model_dir=None):

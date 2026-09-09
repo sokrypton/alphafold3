@@ -1900,6 +1900,35 @@ pair reads 0.998994 for the same reason). Its template stack is the widened
 every width is read off the checkpoint; hardcoding AF3's numbers fails in
 load_state_dict with eight size mismatches rather than comparing quietly.
 
+## L1 for boltz2 and opendde: two more cells, both exact (2026-09-09)
+
+`trunk_parity.py` had adapters for protenix and of3 only, so `boltz2` and
+`opendde` read SKIP at L1 -- the level the whole document treats as the baseline.
+Both vendors' pairformers are importable, so both are now adapters:
+
+| model | blocks | single | pair |
+|---|---|---|---|
+| `boltz2` | 64 | **1.000000** | **1.000000** |
+| `opendde` | 48 | **1.000000** | **1.000000** |
+
+Three things each needed, and each would have read as a port bug:
+
+  * **opendde's widths are not AF3's.** c_z 384 (not 128) and
+    `hidden_scale_up=True`, both read off the checkpoint -- the triangle hidden
+    width equals c_z when scaled up and 128 otherwise, which is what decides it.
+  * **boltz2 runs the v2 attention.** Its blocks carry `pre_norm_s`; the v1
+    default builds `norm_s` and reports 96 missing tensors -- two per block,
+    which is the tell that the class is right and the VARIANT is not. Passing
+    `v2=True` closes it.
+  * **`boltz.model.modules.trunk` pulls fairscale**, absent from the GPU venv and
+    not installable into it. `boltz.model.layers.pairformer` holds the same
+    `PairformerModule` without that import -- the route `msa_parity.py` already
+    takes to reach `MSAModule` through `trunkv2`.
+
+Both adapters truncate the NATIVE stack when `--blocks` is given, which is the
+rule this file keeps re-learning: dropping it once made a 1-block comparison run
+against native's full 48 and read corr -0.019.
+
 ## chai1's first in-repo module gate: L4 by injection (2026-09-09)
 
 chai1 had L0, L5 and L6 and nothing in between -- every module cell a SKIP,
