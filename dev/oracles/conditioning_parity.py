@@ -87,6 +87,65 @@ def native_protenix(model, batch, rng, n, noise):
   return (np.asarray(pair[0]), np.asarray(single[0, 0]), s_inputs_ours, s, z)
 
 
+def native_if2(model, batch, rng, n, noise):
+  """-> (pair_cond, single_cond, s_inputs(ours-layout), s, z) from IntelliFold.
+
+  if2's `DiffusionConditioning.forward` takes the five relative-position id
+  features as SEPARATE arguments and builds the encoding itself, so like of3's
+  the relative encoding is inside the gate rather than precomputed.
+
+  Its diffusion pair is WIDER than its trunk pair: `linear_z` is (512, 651) with
+  651 = 512 + 139, so c_z here is 512. Taking 128 because every other model in
+  the panel uses it would build a differently-shaped module and compare noise.
+  """
+  import torch
+
+  _stub_layer_norm()
+  from intellifold.openfold.model.diffusion import DiffusionConditioning
+
+  ckpt = os.path.expanduser('~/model_v2/intellifold_v2.pt')
+  sd = torch.load(ckpt, map_location='cpu', weights_only=False)
+  sd = sd.get('state_dict', sd.get('model', sd))
+  pre = 'diffusion_module.diffusion_conditioning.'
+  sub = {k[len(pre):]: v for k, v in sd.items() if k.startswith(pre)}
+  if not sub:
+    raise SystemExit('no %r keys in %s' % (pre, ckpt))
+
+  # Every width off the checkpoint. Both LayerNorms are over a CONCATENATION --
+  # layer_norm_z (651,) is [z_trunk, relpos] and layer_norm_s (831,) is
+  # [s_trunk, s_inputs] -- so neither gives the width it feeds.
+  c_z = sub['linear_z.weight'].shape[0]
+  c_s = sub['linear_s.weight'].shape[0]
+  c_s_inputs = sub['layer_norm_s.weight'].shape[0] - c_s
+  c_fourier = sub['layer_norm_f.weight'].shape[0]
+  n_relpos = sub['layer_norm_z.weight'].shape[0] - c_z
+  print('  checkpoint: c_z %d, c_s %d, c_s_inputs %d, c_fourier %d, relpos %d'
+        % (c_z, c_s, c_s_inputs, c_fourier, n_relpos))
+
+  net = DiffusionConditioning(c_s=c_s, c_z=c_z, c_s_inputs=c_s_inputs,
+                              c_fourier=c_fourier)
+  missing, unexpected = net.load_state_dict(sub, strict=False)
+  print('  native: %d tensors, %d missing, %d unexpected %s'
+        % (len(sub), len(missing), len(unexpected), list(missing)[:2]))
+  assert not missing, 'native is missing %d tensors' % len(missing)
+  net.eval()
+
+  s_inputs = (rng.normal(size=(n, c_s_inputs)) * 0.5).astype(np.float32)
+  s = (rng.normal(size=(n, c_s)) * 0.5).astype(np.float32)
+  z = (rng.normal(size=(n, n, c_z)) * 0.5).astype(np.float32)
+
+  tf = batch.token_features
+  ids = [torch.tensor(np.asarray(getattr(tf, k)).astype(np.int64))[None]
+         for k in ('asym_id', 'residue_index', 'entity_id', 'token_index',
+                   'sym_id')]
+  with torch.no_grad():
+    single, pair = net(*ids, torch.tensor(np.asarray([noise], np.float32)),
+                       torch.tensor(s)[None], torch.tensor(s_inputs)[None],
+                       torch.tensor(z)[None])
+  # if2's s_inputs is already 447, i.e. AF3's own layout (no OF3 remap).
+  return (np.asarray(pair[0]), np.asarray(single[0]), s_inputs, s, z)
+
+
 _OF3_COND_CKPT = {'openfold3': 'of3-p2-155k.pt', 'openbind0': 'of3-ob-174k.pt'}
 
 
@@ -489,6 +548,7 @@ NATIVES['rosettafold3'] = native_rf3
 NATIVES['boltz2'] = native_boltz2
 NATIVES['opendde'] = native_opendde
 NATIVES.update({m: native_of3 for m in _OF3_COND_CKPT})
+NATIVES['intellifold2'] = native_if2
 # every ESMFold2 release, each against its OWN checkpoint
 NATIVES.update({m: native_esmfold2 for m in (
     'esmfold2', 'esmfold2_fast', 'esmfold2_exp', 'esmfold2_exp_fast',
