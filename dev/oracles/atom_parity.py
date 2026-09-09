@@ -821,6 +821,29 @@ def main(argv=None):
   nw = min(pg.shape[0], pr.shape[0])
   if pg.shape[1:] == pr.shape[1:]:
     _cmp('p_atom_pair', pg[:nw], pr[:nw])
+    # WHERE the disagreement lives, because the claim above -- "the leading
+    # windows hold the same atoms in the same order" -- is an assumption, and
+    # p_atom_pair reads corr 0.9678 for protenix2 while q_atom, which is
+    # computed FROM p, reads 1.000000. Both cannot be true of the same tensor,
+    # so either the comparison is misaligned or p is not what feeds q.
+    #
+    # Per WINDOW says whether it is the trailing windows (an alignment
+    # artifact, since ours has more of them); per KEY POSITION says whether it
+    # is the padded end of each window. The same breakdown found the ESMFold2
+    # OXT in one run.
+    if os.environ.get('DIAG'):
+      d = np.abs(np.asarray(pg[:nw], np.float64)
+                 - np.asarray(pr[:nw], np.float64))
+      per_w = d.reshape(nw, -1).max(-1)
+      order = np.argsort(-per_w)
+      print('  DIAG p per-window max|d|: worst %s'
+            % [(int(i), round(float(per_w[i]), 3)) for i in order[:6]])
+      print('  DIAG p            median %.4f  n windows %d (native %d, ours %d)'
+            % (float(np.median(per_w)), nw, pr.shape[0], pg.shape[0]))
+      per_k = d.reshape(-1, d.shape[-2], d.shape[-1]).max(0).max(-1)
+      print('  DIAG p per-key-position max|d|: first 8 %s  last 8 %s'
+            % ([round(float(x), 3) for x in per_k[:8]],
+               [round(float(x), 3) for x in per_k[-8:]]))
     if pad_mask is not None:
       m = np.asarray(pad_mask).reshape(pr.shape[:3])[:nw] > 0
       print('  pad mask keeps %d of %d (block, query, key) slots'
