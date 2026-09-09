@@ -2106,12 +2106,54 @@ Re-running L1b against the EXPERIMENTAL class (8 rows, 68 tokens):
     msa -> pair  corr 0.999836  rms ours/native 0.9953
                  max|d| 134.07  p99.9 46.5  rms(native) 345.07  max|d|/rms 0.389
 
-That 1.000000 was never real. A residual remains, `max|d|/rms` 0.389 is a large
-local error, and the fold cannot see it at 0.477 A -- the pattern
-[[correlation-hides-bias]] warns about. `esmfold2_msa_dump.py --blocks n`
-truncates the native stack and `MSA_BLOCKS=n` truncates ours (BOTH sides -- the
-rule this file keeps re-learning), so the residual can be localised by depth.
-OPEN.
+That 1.000000 was never real. And the residual turned out to be a FOURTH
+per-line divergence -- the outer product's bias placement.
+
+**How it was localised.** `--blocks n` on the dump truncates the native stack
+and `MSA_BLOCKS=n` truncates ours (BOTH sides -- the rule this file keeps
+re-learning). The residual was there at ONE block (`max|d|/rms` 0.220) and only
+grew to 0.389 by four, so it was per-block, not accumulation. The dump then
+taps block 0's msa half, and `COMPARE=msa` compares the msa rows instead of the
+pair -- everything the msa side does reaches the pair only through the outer
+product, so the pair output alone cannot apportion blame:
+
+    msa rows after the pair-weighted averaging + transition
+      corr 1.000000  max|d| 0.0156  rms(native) 1413  max|d|/rms 1.11e-05
+
+Exact. So the msa side was clean and the fault was on the pair side.
+`COMPARE=opm` then runs `modules.OuterProductMean` ALONE on native's own
+post-transition rows against the dump's `pair_after_opm - z`:
+
+    OPM alone   corr 0.999779  max|d| 1.38470  p99.9|d| 1.38e+00
+
+**`max|d|` == `p99.9|d|` is the tell:** the error is the same everywhere, i.e. a
+per-channel CONSTANT, which is what [[correlation-hides-bias]] says corr cannot
+see.
+
+**The cause, in ESMFold2's own words.** `OuterProductMean` takes
+`divide_outer_before_proj`, and its docstring says "different ESMFold2
+checkpoints were trained with different orderings":
+
+    False (default): Wout(outer) / n_valid   the bias IS scaled by 1/n_valid
+    True:            Wout(outer / n_valid)   the bias is added unscaled
+
+The released line takes the default; the experimental block hardcodes
+`True` (`modeling_esmfold2_experimental.py:366`). The two differ by exactly
+`output_b * (1 - 1/n)`. We had the released behaviour for both, so the
+experimental line carried a constant per-channel offset on every OPM output.
+
+`model_config.OPM_BIAS_AFTER_NORM` now names it, and the released variant is
+deliberately NOT a member. After:
+
+    OPM alone            corr 1.000000  max|d|/rms 1.28e-05   (was 1.16e-01)
+    the module, 4 blocks corr 1.000000  max|d|/rms 9.43e-05   (was 3.89e-01)
+
+**And this one defeats the sweep in section 3.** `OuterProductMean` lives in the
+SHARED `modeling_esmfold2_common.py`: the two release lines do not differ by
+class here, they differ by the ARGUMENT each block passes when instantiating it.
+Enumerating duplicated class NAMES cannot find that. The sweep has to be:
+duplicated classes, AND every constructor argument a shared class is
+instantiated with differently.
 
 ## chai1's first in-repo module gate: L4 by injection (2026-09-09)
 

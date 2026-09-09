@@ -546,10 +546,12 @@ class OuterProductMean(hk.Module):
         init=hk.initializers.Constant(0.0),
     )
 
-    # boltz2 divides BEFORE the output projection, so its bias must not be
-    # added inside the chunk -- see model_config.OPM_ROW_COUNT_NORM.
+    # boltz2 and ESMFold2's EXPERIMENTAL line both divide BEFORE the output
+    # projection, so their bias must not be added inside the chunk -- see
+    # model_config.OPM_BIAS_AFTER_NORM for the algebra and for why ESMFold2's
+    # two release lines disagree about it.
     bias_after_norm = (
-        self.global_config.model in model_config.OPM_ROW_COUNT_NORM)
+        self.global_config.model in model_config.OPM_BIAS_AFTER_NORM)
 
     def compute_chunk(left_act):
       # Make sure that the 'b' dimension is the most minor batch like dimension

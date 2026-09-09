@@ -405,6 +405,17 @@ def native_boltz2(model, msa, s_inputs, z, n_msa):
 
 
 
+def path_of_dump(model):
+  """The npz `native_esmfold2` would read, for callers that need it directly."""
+  tag = model + ('_nonuniform' if os.environ.get('NONUNIFORM') else '')
+  if os.environ.get('ESM_FINAL_UPDATE'):
+    tag += '_finalupd'
+  if os.environ.get('MSA_BLOCKS'):
+    tag += '_b%d' % int(os.environ['MSA_BLOCKS'])
+  return os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                      'esmfold2_msa_%s.npz' % tag)
+
+
 def native_esmfold2(model, msa, s_inputs, z, n_msa):
   """ESMFold2's MSAEncoder, read from an npz -- see esmfold2_msa_dump.py.
 
@@ -490,6 +501,8 @@ def main(argv=None):
   s_inputs = (rng.normal(size=(n_tok, 449)) * 0.5).astype(np.float32)
   if os.environ.get('LAYER'):
     return boltz2_layer_split(cfg, model_dir, args.num_msa, n_tok)
+  if os.environ.get('COMPARE') == 'opm':
+    return esmfold2_opm_split(args.model, cfg, model_dir, args.num_msa, n_tok)
   out = NATIVES[args.model](args.model, msa, s_inputs, z, args.num_msa)
   # The esmfold2 adapter also hands back the z it was actually run on (it comes
   # from a dump, not from this harness's rng), so ours runs on the same tensor.
@@ -501,8 +514,27 @@ def main(argv=None):
   print('  embedded msa from native: %s' % (msa_emb.shape,))
   got = ours(args.model, cfg, model_dir, msa_emb, z, args.num_msa, n_tok,
              msa_mask=msa_mask)
+  if os.environ.get('COMPARE') == 'msa':
+    # The dump taps block 0's msa half: after the pair-weighted averaging, and
+    # after the transition on top of it.
+    d = np.load(path_of_dump(args.model))
+    # Only the post-TRANSITION tap is comparable to a 1-block run of ours: our
+    # EvoformerIteration does the pair-weighted averaging AND the transition,
+    # and there is no way to stop between them. COMPARE_STEP=pwa is therefore
+    # refused rather than silently compared -- reading a 2-step result against
+    # a 1-step reference is the harness fault this file has hit five times.
+    if os.environ.get('COMPARE_STEP') == 'pwa':
+      raise SystemExit('COMPARE_STEP=pwa needs our transition ablated; a plain '
+                       '1-block run has already applied it, so the comparison '
+                       'would be 2 steps against 1')
+    key = 'msa_after_transition'
+    if key not in d:
+      raise SystemExit('%s has no %s -- re-run the dump, it taps block 0 now'
+                       % (os.path.basename(path_of_dump(args.model)), key))
+    ref = d[key]
   print('  shapes: ours %s native %s' % (np.asarray(got).shape, ref.shape))
-  _cmp('msa -> pair', np.asarray(got), ref)
+  _cmp('msa rows' if os.environ.get('COMPARE') == 'msa' else 'msa -> pair',
+       np.asarray(got), ref)
   return 0
 
 
@@ -556,10 +588,74 @@ def ours(model, cfg, model_dir, msa_emb, z, n_msa, n_tok, msa_mask=None):
                                not in model_config.PAIR_ONLY_TRUNK),
       )(activations=x, masks=masks)
     out = hk.experimental.layer_stack(depth)(blk)({'msa': m_, 'pair': z_})
-    return out['pair']
+    # COMPARE=msa returns the MSA rows instead of the pair. Everything the MSA
+    # side does reaches the pair only through the outer product, so the pair
+    # output cannot say whether a residual came from the pair-weighted
+    # averaging, the transition, or the outer product itself. The msa rows
+    # separate the first two from the third.
+    return out['msa'] if os.environ.get('COMPARE') == 'msa' else out['pair']
 
   return hk.transform(fwd).apply(mp, jax.random.PRNGKey(0),
                                  jnp.asarray(m_emb), jnp.asarray(z))
+
+
+def esmfold2_opm_split(model, cfg, model_dir, n_msa, n_tok):
+  """The outer product ALONE, against the dump's own tap. COMPARE=opm.
+
+  The pair output cannot separate the outer product from the two triangle
+  multiplications and the pair transition that follow it in the same block, and
+  our EvoformerIteration offers no way to stop between them. So this runs
+  `modules.OuterProductMean` on its own, on NATIVE's post-transition msa
+  (`msa_after_transition` from the dump), and compares against native's own
+  `pair_after_opm - z`. Both sides then see the identical msa rows and the
+  identical mask, and the only thing under test is the outer product.
+
+  This is the split `boltz2_layer_split` does in-process; ESMFold2 needs the npz
+  because its implementation lives in ~/venv_esm.
+  """
+  import haiku as hk
+  import jax
+  import jax.numpy as jnp
+
+  from alphafold3.model import params as afp
+  from alphafold3.model.network import modules
+
+  d = np.load(path_of_dump(model))
+  for k in ('msa_after_transition', 'pair_after_opm', 'z', 'mask'):
+    if k not in d:
+      raise SystemExit('%s has no %s -- re-run the dump with --blocks 1'
+                       % (os.path.basename(path_of_dump(model)), k))
+  m2 = np.asarray(d['msa_after_transition'], np.float32)      # (M, L, c_m)
+  ref = np.asarray(d['pair_after_opm'], np.float32) - np.asarray(d['z'],
+                                                                 np.float32)
+  msa_mask = np.asarray(d['mask'], np.float32)                # (M, L)
+  print('  OPM alone: msa %s, mask %s, ref %s'
+        % (m2.shape, msa_mask.shape, ref.shape))
+
+  cfg.global_config.bfloat16 = 'none'
+  p = afp.get_model_haiku_params(model_dir=model_dir)
+  ms = cfg.evoformer.msa_stack
+
+  def fwd(m_):
+    return modules.OuterProductMean(
+        ms.outer_product_mean, cfg.global_config,
+        num_output_channel=cfg.evoformer.pair_channel,
+        name='outer_product_mean')(m_, jnp.asarray(msa_mask))
+
+  key = 'diffuser/evoformer/__layer_stack_no_per_layer/msa_stack/'
+  op = {}
+  for k, v in p.items():
+    if k.startswith(key) and 'outer_product_mean' in k:
+      # BLOCK 0 only: slice the layer_stack axis off, the same way the
+      # block-truncating path above does.
+      op[k[len(key):]] = {kk: (vv[0] if hasattr(vv, 'ndim') and vv.ndim
+                               and vv.shape[0] == ms.num_layer else vv)
+                          for kk, vv in v.items()}
+  if not op:
+    raise SystemExit('no outer_product_mean params under %r' % key)
+  got = hk.transform(fwd).apply(op, jax.random.PRNGKey(0), jnp.asarray(m2))
+  _cmp('OPM alone', np.asarray(got), ref)
+  return 0
 
 
 def boltz2_layer_split(cfg, model_dir, n_msa, n_tok):

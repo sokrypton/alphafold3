@@ -181,6 +181,19 @@ def main(argv=None):
     m_feat = torch.cat([oh, hd.unsqueeze(-1), dv.unsqueeze(-1)], -1)
     m_emb = net.embed(m_feat) + net.project_inputs(T(s_inputs)[None]).unsqueeze(2)
     out = net(T(z)[None], T(s_inputs)[None], oh, hd, dv, am)
+    # The MSA half of block 0, as its own tensor. The pair output alone cannot
+    # separate the three msa-side steps (pair-weighted averaging, transition,
+    # outer product) from the pair-side ones, because everything reaches the
+    # pair only through the outer product. Comparing the msa rows isolates
+    # steps 1-2, which is the "compare the UPDATE, not the output" rule
+    # [[esmfold2-trunk-per-block-method]].
+    tok = am[:, :, 0]
+    pam = tok.unsqueeze(2) * tok.unsqueeze(1)
+    m0 = m_emb
+    m1 = m0 + net.blocks[0].msa_pair_weighted_averaging(m0, T(z)[None], pam)
+    m2 = m1 + net.blocks[0].msa_transition(m1)
+    # and the pair after ONLY the outer product, so step 3 is separable too
+    z_opm = T(z)[None] + net.blocks[0].outer_product_mean(m2, am)
 
   path = args.out or os.path.join(
       os.path.dirname(os.path.abspath(__file__)),
@@ -192,6 +205,10 @@ def main(argv=None):
   np.savez(path,
            # (1, L, M, c) -> (M, L, c), the layout our msa_stack takes
            msa_emb=np.transpose(m_emb[0].float().numpy(), (1, 0, 2)),
+           # (1, L, M, c) -> (M, L, c), same layout as msa_emb
+           msa_after_pwa=np.transpose(m1[0].float().numpy(), (1, 0, 2)),
+           msa_after_transition=np.transpose(m2[0].float().numpy(), (1, 0, 2)),
+           pair_after_opm=z_opm[0].float().numpy(),
            pair_out=out[0].float().numpy(),
            z=z, msa=msa, s_inputs=s_inputs, mask=mask,
            n_layers=np.int32(n_layers),

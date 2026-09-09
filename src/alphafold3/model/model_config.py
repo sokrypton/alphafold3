@@ -344,6 +344,26 @@ CLAMPED_OPM_NORM = ESMFOLD2_FAMILY
 # single-sequence 6MRR fold was exact throughout while its MSA module was not.
 OPM_ROW_COUNT_NORM = ('boltz2',)
 
+# Models whose outer product adds the OUTPUT BIAS AFTER the divide, i.e.
+# `Wout(outer) / n` against `Wout(outer / n)`. Algebraically the two differ by
+# exactly `output_b * (1 - 1/n)` -- a per-CHANNEL CONSTANT, which is why corr
+# cannot see it ([[correlation-hides-bias]]) and why it showed up as
+# max|d| == p99.9|d| (1.3847 vs 1.38): the error is the same everywhere.
+#
+# ESMFold2 makes this a per-CHECKPOINT choice and says so in its own docstring
+# ("different ESMFold2 checkpoints were trained with different orderings"):
+# `OuterProductMean.divide_outer_before_proj` is False by default, which the
+# RELEASED line takes, and the EXPERIMENTAL block hardcodes True
+# (modeling_esmfold2_experimental.py:366). So the released line wants the bias
+# INSIDE the divide -- which is what CLAMPED_OPM_NORM already gives it -- and
+# the experimental line wants it outside.
+#
+# Note what this one defeats: `OuterProductMean` lives in the SHARED
+# modeling_esmfold2_common.py, so the two lines do not differ by CLASS at all.
+# They differ by the ARGUMENT one instantiates it with, which an audit of
+# duplicated class names cannot see ([[esmfold2-two-file-sweep]]).
+OPM_BIAS_AFTER_NORM = OPM_ROW_COUNT_NORM + ESMFOLD2_EXPERIMENTAL
+
 
 # Models whose ATOM attention is a sliding window with 3D rotary positions
 # instead of AF3's windowed pair bias.
