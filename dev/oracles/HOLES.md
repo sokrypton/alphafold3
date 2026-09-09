@@ -72,6 +72,42 @@ the numbers are byte-identical centred or not.
 model in the panel.
 
 
+
+# rosettafold3's atom encoder: a source-derived hypothesis to test
+
+`q_atom` 0.84 and `a_token` 0.57 are the worst remaining numbers in the panel.
+Read off rf3's own source rather than guessed at, while the matrix held the GPU:
+
+  * ITS KEY WINDOW IS CLAMP+MASK, NOT SLIDE, and that is almost certainly it.
+    `AttentionPairBiasDiffusion.atom_attention` builds
+    `Cs = arange(nq)*32 + 16`, `patchk = arange(128) - 64`, so window i takes
+    keys `32i-48 .. 32i+79` -- byte-identical to our `_key_window` 'pad' policy
+    -- then CLAMPS out-of-range indices to [0, L-1] and masks them
+    (`-1e9 * (maskQ | maskK)`). Our default for rf3 is AF3's SLIDE, which
+    shifts the whole window inside the real atom count instead. rf3 is already
+    in KEY_MASKED_ATOM_ATTENTION but has NO `padded_keys` knob, and the note
+    there explains why: it was reasoned to "reach the same place through a short
+    atom count". That reasoning is about the MASK, not about where the window
+    SITS. So: give rf3 `padded_keys=True` and re-measure.
+  * NOT the offset sign. `D_LL = ref_pos.unsqueeze(-2) - ref_pos.unsqueeze(-3)`
+    is queries - keys, the same as AF3 -- unlike boltz2.
+  * NOT the inverse-distance form. rf3_net.yaml sets
+    `use_inv_dist_squared: true` at both call sites, i.e. `1/(1+|d|^2)`, ours.
+  * NOT the fused-feature column split, which `c_atom_cond` 0.051 would
+    otherwise point at. The 393-wide `process_input_features` weight has a norm
+    signature that confirms the converter's assumed order exactly: three TINY
+    columns at 0-2 (ref_pos, barely used), two large scalars at 3-4 (charge,
+    mask), 128 element columns at 5-132, four structured 64-wide character
+    groups at 133-388 with decreasing means (1.56 / 2.37 / 1.02 / 0.55), then
+    three tiny columns at 389-391 (ref_pos_ground_truth) and one large at 392
+    (has_atom_level_embedding). Both are fed as zeros and dropped by the
+    converter, which is what rf3 does with them.
+
+What the forensic could NOT settle is rf3's ELEMENT indexing: the column norms
+are scattered (top classes 4, 34, 20, 45, 26) with median 2.30, so they do not
+rank by element frequency and cannot say whether class 6 is carbon. That needs
+a gate, not a weight histogram.
+
 # The trunk z-INIT had no gate at all, and now it does
 
 `dev/oracles/trunk_init_parity.py` (L1i). `trunk_parity` feeds the pairformer
