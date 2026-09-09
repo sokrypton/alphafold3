@@ -2385,6 +2385,45 @@ What remains after that is the released line's 5.6e-03, against a reference
 whose released msa_encoder is the old validated one. That is a real residual in
 our graph's MSA path and it is the next thing to localise.
 
+## Conformer centering: the fold-level verdict (2026-09-09)
+
+The module gates could not judge this -- `atom_parity` feeds the vendor OUR
+features, so the A/B was byte-identical for all six vendors by construction.
+The folds can, and for these four models centering is the ONLY behaviour change
+of the day (the alphabet, OXT and MSA work is all esmfold2-gated), with
+intellifold2 as an untouched control.
+
+| case | openfold3 | opendde | openbind0 | protenix1 | intellifold2 (control) |
+|---|---|---|---|---|---|
+| complex_1lmb | **12.697 -> 7.517** | 17.855 -> 16.368 | 16.711 -> 16.327 | 10.332 -> 10.555 | 12.155 -> 12.155 |
+| plain_5k9p | 1.388 -> 1.392 | **1.794 -> 1.582** | 10.388 -> 10.396 | 10.983 -> 11.489 | 1.669 -> 1.669 |
+| rna_1ehz | 1.331 -> 1.334 | 1.326 -> 1.323 | 1.497 -> 1.496 | **1.801 -> 1.707** | 1.469 -> 1.470 |
+| dna_1lmb | 1.916 -> 1.916 | 1.987 -> 1.991 | 2.206 -> 2.211 | 1.695 -> 1.689 | 1.585 -> 1.579 |
+| ptm_5k9p | 1.499 -> 1.499 | 1.811 -> 1.942 | 11.542 -> 11.542 | 2.085 -> 2.697 | 1.554 -> 1.554 |
+| protein_6mrr | 1.540 -> 1.545 | 0.769 -> 0.766 | 1.650 -> 1.648 | 1.696 -> 1.696 | 1.512 -> 1.512 |
+
+**The four-chain COMPLEX is where it matters, and it matters a lot**: openfold3
+gains 5.2 A, opendde 1.5 A, openbind0 0.4 A. That is the case with the most
+conformer groups and the largest spread of group centroids, which is exactly
+where a per-group offset the model never saw in training should hurt most. It
+is also one of this file's long-standing open leads.
+
+Everything else is within noise except protenix1's two 5K9P cases, which get
+worse (ptm 2.085 -> 2.697, plain 10.983 -> 11.489). Worth keeping in
+proportion: protenix1's plain_5k9p was ALREADY an open lead at 10.98 A, so 11.49
+is "still wrong", not "newly wrong".
+
+**The control is what makes this readable.** intellifold2 passes
+`centering=False` and applies its rotation globally, so it is deliberately not
+a member -- and every one of its six numbers is unchanged to three decimals.
+Without that row, "the folds moved" would not distinguish centering from
+anything else in the day's diff.
+
+Kept, on this evidence. openfold3's and openbind0's rows above are from the run
+in which the knob had ALREADY been fixed; their `L5.fold` cells earlier in the
+same run predate it, which is why 6MRR reads 1.540 -> 1.545 here and identical
+in the L5 comparison.
+
 ## The atom gate is BLIND to a featurisation difference, by construction (2026-09-09)
 
 Worth knowing before trusting it for anything input-shaped. `atom_parity.py`
