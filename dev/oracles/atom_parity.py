@@ -743,6 +743,17 @@ def _boltz2_modules(need_decoder=False):
     return stack
 
   enc_bias = _bias(bias_pre, n_enc, heads)
+  if os.environ.get('NO_LN_OFFSET'):
+    # ZERO THE PER-BLOCK LayerNorm OFFSET on the NATIVE side, which is what our
+    # converter's baked form silently does: it folds each block's LN SCALE into
+    # that block's Linear and sets the shared LN to normalise-only, on the
+    # argument that the offset becomes a per-head constant and cancels in the
+    # softmax. This is that argument as an experiment.
+    import torch as _t
+    with _t.no_grad():
+      for l in enc_bias:
+        l[0].bias.zero_()
+    print('  NO_LN_OFFSET: native per-block pair-bias LN offsets zeroed')
   dec_bias = _bias(dbias_pre, n_dec, d_heads) if need_decoder else None
 
   for mod, sub, label in mods:
@@ -877,12 +888,23 @@ def native_boltz2(model, fb, feats, pos_noisy, s, z, n_tok):
   # p_atom_pair comparison over all slots is dominated by numbers neither model
   # looks at; this is the same mask protenix's `pad_info` supplies, built here
   # from boltz's own `to_keys` so it cannot drift from the window it describes.
-  with torch.no_grad():
-    am = bf['atom_pad_mask']
-    K = am.shape[-1] // 32
-    mq = am.view(1, K, 32, 1)
-    mk = to_keys(am.unsqueeze(-1).float()).view(1, K, 1, -1)
-    pm = (mq * mk)[0]
+  am = _np.asarray(bf['atom_pad_mask'])[0]
+  n_pad = am.shape[-1]
+  K = n_pad // 32
+  # BOTH criteria, and the second is the one that mattered. A slot is a real
+  # atom pair only if the atom is real AND the window index was IN RANGE.
+  # boltz's leading windows hold index 0 in their out-of-range slots -- 48 of
+  # them in window 0 -- and index 0 is a REAL atom, so an atom-mask test keeps
+  # those slots. Native pads its tensor BEFORE windowing, so it has zeros there
+  # while we clamp onto atom 0's real features: the per-key-position DIAG showed
+  # the last eight slots differing by exactly 3.707, the same number every time,
+  # which is what one constant in a masked slot looks like.
+  idx = (_np.arange(K)[:, None] * 32 - 48) + _np.arange(128)[None, :]
+  in_range = (idx >= 0) & (idx < n_pad)
+  real_key = am[_np.clip(idx, 0, n_pad - 1)] > 0
+  mk = (in_range & real_key)[:, None, :]
+  mq = (am.reshape(K, 32) > 0)[:, :, None]
+  pm = (mq & mk).astype(_np.float32)
   return (_np.asarray(a)[0], qn, cn,
           _np.asarray(p).reshape(*_np.asarray(p).shape[-4:]),
           _np.asarray(pm))
@@ -1215,6 +1237,29 @@ def main(argv=None):
       print('  pad mask keeps %d of %d (block, query, key) slots'
             % (int(m.sum()), m.size))
       _cmp('p_pair_valid', pg[:nw][m], pr[:nw][m])
+      if os.environ.get('DIAG'):
+        # The same breakdown ON THE VALID SLOTS ONLY. Over all slots it is
+        # dominated by the padded ones -- ours clamps the key onto a real atom
+        # where native holds a zero -- so a residual that is genuinely inside
+        # the attended window can only be seen here.
+        d = np.abs(np.asarray(pg[:nw], np.float64)
+                   - np.asarray(pr[:nw], np.float64)).max(-1)
+        d = np.where(m, d, 0.0)
+        per_w = d.reshape(nw, -1).max(-1)
+        print('  DIAG p(valid) per-window max|d|: worst %s'
+              % [(int(i), round(float(per_w[i]), 3))
+                 for i in np.argsort(-per_w)[:6]])
+        print('  DIAG p(valid)            median %.4f' % float(np.median(per_w)))
+        per_k = d.max(0).max(0) if d.ndim == 3 else d.max(0)
+        print('  DIAG p(valid) per-key-position max|d|: first 8 %s  last 8 %s'
+              % ([round(float(x), 3) for x in per_k[:8]],
+                 [round(float(x), 3) for x in per_k[-8:]]))
+        # AND per QUERY position inside the 32-atom block, which separates "the
+        # window edge" from "particular atoms".
+        per_q = d.max(0).max(-1) if d.ndim == 3 else None
+        if per_q is not None:
+          print('  DIAG p(valid) per-query-position max|d|: %s'
+                % [round(float(x), 3) for x in per_q])
   else:
     print('  p_lm trailing shapes differ, not compared')
   return 0

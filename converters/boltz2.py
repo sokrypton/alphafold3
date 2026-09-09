@@ -380,7 +380,20 @@ def map_atom_encoder(sd, params):
   params.setdefault(P, {})[f'{pfx}embed_atom_features_bias'] = C._arr(
       sd[f'{ae}.embed_atom_features.bias'])
   # --- per-atom pair (double-applied: base + _1 to same Boltz weight, of3 convention) ---
-  ofs = C.t(sd[f'{ae}.embed_atompair_ref_pos.weight'])   # (3,16)
+  # THE OFFSET SIGN IS FLIPPED, and it folds into the weight.
+  #
+  # boltz computes `d = atom_ref_pos_KEYS - atom_ref_pos_QUERIES`
+  # (encodersv2.py: `d = atom_ref_pos_keys - atom_ref_pos_queries`); AF3,
+  # protenix and opendde all compute queries - keys. `W(-d) == (-W)(d)`, so this
+  # is a weight transform and needs no graph branch -- see [[branch-vs-weight-fold]].
+  #
+  # Only the OFFSET term flips: the distance term is `1/(1+|d|^2)`, which is
+  # sign-invariant. That is what made it findable. Both position terms are
+  # multiplied by the same-conformer mask `v`, so the error lived ONLY on
+  # same-residue pairs -- and the valid-slot DIAG showed exactly that: the first
+  # eight and last eight key positions of every window agreed to 0.000 while the
+  # middle (where a query's own residue sits) disagreed by up to 2.6.
+  ofs = -C.t(sd[f'{ae}.embed_atompair_ref_pos.weight'])   # (3,16), NEGATED
   dst = C.t(sd[f'{ae}.embed_atompair_ref_dist.weight'])  # (1,16)
   msk = C.t(sd[f'{ae}.embed_atompair_mask.weight'])      # (1,16)
   S('embed_pair_offsets', 'weights', ofs);   S('embed_pair_offsets_1', 'weights', ofs)
@@ -432,7 +445,9 @@ def map_diffusion_atom_conditioning(sd, params):
   S('embed_ref_mask', 'weights', np.zeros_like(C.t(W[:, 0:1])))
   params.setdefault(DH, {})['diffusion_embed_atom_features_bias'] = C._arr(
       sd[f'{ac}.embed_atom_features.bias'])
-  ofs = C.t(sd[f'{ac}.embed_atompair_ref_pos.weight']); dst = C.t(sd[f'{ac}.embed_atompair_ref_dist.weight'])
+  # NEGATED, same reason as the input embedder's copy above (d = keys - queries).
+  ofs = -C.t(sd[f'{ac}.embed_atompair_ref_pos.weight'])
+  dst = C.t(sd[f'{ac}.embed_atompair_ref_dist.weight'])
   msk = C.t(sd[f'{ac}.embed_atompair_mask.weight'])
   S('embed_pair_offsets', 'weights', ofs);   S('embed_pair_offsets_1', 'weights', ofs)
   S('embed_pair_distances', 'weights', dst); S('embed_pair_distances_1', 'weights', dst)
