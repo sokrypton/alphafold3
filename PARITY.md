@@ -2230,8 +2230,22 @@ eight residues. That is tokens 61..67 exactly.
 reason (its conformers carry no OXT either). Applied to the family, with
 `AF3_NO_ESM_DROP_OXT=1` as the A/B.
 
-**And the atom encoder is EXACT once the atom sets agree.** `SAME_ATOM_SET=1`,
-a knob that was already there, forces both sides onto the same atoms:
+**CONFIRMED through the registry, not the gate knob.** With
+`drop_atoms=('OXT',)` in the family's featurise entry:
+
+| | `a_token` | `q_atom` | `c_atom_cond` |
+|---|---|---|---|
+| `esmfold2` OXT dropped | **1.000000** (3.4e-06) | **1.000000** (1.3e-05) | **1.000000** |
+| `esmfold2` OXT kept | 0.999846 (0.479) | 0.999933 (0.496) | 1.000000 |
+| `esmfold2_exp` OXT dropped | **1.000000** (3.6e-06) | **1.000000** (1.7e-05) | **1.000000** |
+| `esmfold2_exp` OXT kept | 0.999868 (0.835) | 0.999993 (0.357) | 1.000000 |
+
+`DIAG` reads **p90 0.0000** afterwards, not just median 0.0000: every token is
+exact, not most of them. **ESMFold2's atom encoder is at parity on both release
+lines.**
+
+The same conclusion arrived at independently first, via `SAME_ATOM_SET=1` --
+a knob that was already there, which forces both sides onto the same atoms:
 
     a_token      corr 1.000000  max|d| 0.00002  max|d|/rms 4.43e-06
     q_atom       corr 1.000000  max|d| 0.00007  max|d|/rms 1.89e-05
