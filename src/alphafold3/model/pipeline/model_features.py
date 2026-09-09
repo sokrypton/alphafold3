@@ -377,6 +377,12 @@ def _centre_conformers(batch):
   keeps zero afterwards, because the mask is what every consumer reads and a
   nonzero coordinate there would put real numbers where the graph expects none.
   """
+  if 'ref_pos' not in batch:
+    # Nothing to centre. A real featurised batch always carries the reference
+    # structure, but a caller can hand `apply` a partial batch -- the unit
+    # tests build atom-window-only batches -- and a featurisation step should
+    # skip a convention it has no input for rather than raise.
+    return
   pos = np.array(batch['ref_pos'], dtype=np.float32)
   mask = np.asarray(batch['ref_mask']) > 0
   uid = np.asarray(batch['ref_space_uid'])

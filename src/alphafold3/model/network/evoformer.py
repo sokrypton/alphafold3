@@ -792,14 +792,19 @@ class Evoformer(hk.Module):
         pair_activations = self._embed_bonds(
             batch=batch, pair_activations=pair_activations
         )
-        msa_after = (self.global_config.model
-                     in model_config.MSA_AFTER_RECYCLE)
-        if self.config.msa_stack.num_layer and not msa_after:
+        if self.config.msa_stack.num_layer:
           # ESMFold2-Fast disables the MSA encoder outright
           # (msa_encoder.enabled false); it folds from ESM-C alone. Skipping the
           # CALL, not just the stack, is what keeps msa_activations and
           # extra_msa_target_feat out of a parameter tree that has no weights
           # for them.
+          #
+          # The ESMFold2-EXPERIMENTAL arm that used to live here -- msa AFTER
+          # the recycle and ADDED, gated by MSA_AFTER_RECYCLE, with native's
+          # msa_track_mask -- went with those releases on 2026-09-09. The two
+          # lm-tier survivors set msa=0, so no ESMFold2 model reaches an MSA
+          # block at all now. git history has it if a msa=4 experimental
+          # release is ever restored.
           pair_activations, key = self._embed_process_msa(
               msa_batch=batch.msa,
               pair_activations=pair_activations,
@@ -814,38 +819,6 @@ class Evoformer(hk.Module):
             batch=batch, pair_activations=pair_activations,
             pair_mask=pair_mask, key=key, use_dropout=use_dropout)
         pair_activations = _add_prev(pair_activations, None)
-        if self.config.msa_stack.num_layer and msa_after:
-          # the experimental line: after the recycle, and ADDED. Its encoder
-          # returns the updated pair, so `z + encoder(z)` double-counts z --
-          # the same shape as boltz2's and chai's, and the weights were trained
-          # with it.
-          # native's `msa_track_mask`:
-          #     msa_track_mask = msa_attention_mask[:, :, 1:].any(dim=(1, 2))
-          # "is there ANY real non-query row", and the encoder multiplies its
-          # WHOLE output by it. Reading it off `rows.shape[0]` instead was
-          # wrong: that is the PADDED depth (16384 here), so it is true for a
-          # query-only alignment too -- we ran the whole MSA track on ~1023
-          # all-gap padding rows where native runs nothing at all. It showed up
-          # as a single-sequence fold MOVING when the block order was fixed,
-          # which for a target with no MSA it must not.
-          #
-          # A traced multiply, not a Python branch: the answer depends on the
-          # mask's VALUES. The shape test stays as a static early-out for a
-          # batch that provably cannot have a second row.
-          if batch.msa.rows.shape[0] > 1:
-            msa_out, key = self._embed_process_msa(
-                msa_batch=batch.msa,
-                pair_activations=pair_activations,
-                pair_mask=pair_mask,
-                key=key,
-                target_feat=target_feat,
-                use_dropout=use_dropout,
-                is_ligand=batch.token_features.is_ligand,
-                asym_id=batch.token_features.asym_id,
-            )
-            msa_track = jnp.any(batch.msa.mask[1:] > 0).astype(
-                msa_out.dtype)
-            pair_activations = pair_activations + msa_out * msa_track
       elif chai:
         pair_activations = self._relative_encoding(batch, pair_activations)
         pair_init = pair_activations

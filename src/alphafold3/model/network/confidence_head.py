@@ -400,16 +400,11 @@ class ConfidenceHead(hk.Module):
       # between the input prediction and the ground truth.
       pred_distance_error = None
       average_pred_distance_error = None
-      no_pde = self.global_config.model in model_config.NO_PDE_HEAD
-
+      # NO_PDE_HEAD went with the ESMFold2-Experimental releases on 2026-09-09:
+      # the only other members were the lm-tier pair, which build no confidence
+      # head at all (NO_CONFIDENCE_HEAD), so the branch was unreachable.
       # Shape (num_res, num_res, num_bins)
-      if no_pde:
-        # ESMFold2's experimental line has no PDE head at all -- no pde_head and
-        # no pde_ln. Same reasoning as the missing resolved head below: building
-        # it would leave three parameters at random init and emit a `full_pde`
-        # that reads like a prediction.
-        pass
-      elif self.global_config.model == 'boltz2':
+      if self.global_config.model == 'boltz2':
         # boltz2 has use_separate_heads=True: SEPARATE intra- and inter-chain heads for
         # both PDE and PAE, each hard-masked to its half of the pair matrix. On a
         # monomer the inter head never fires, which is why the intra head alone was
@@ -451,15 +446,14 @@ class ConfidenceHead(hk.Module):
           [bin_centers, bin_centers[-1:] + step], axis=0
       )
 
-      if not no_pde:
-        distance_probs = jax.nn.softmax(distance_logits, axis=-1)
+      distance_probs = jax.nn.softmax(distance_logits, axis=-1)
 
-        pred_distance_error = (
-            jnp.sum(distance_probs * bin_centers, axis=-1) * pair_mask
-        )
-        average_pred_distance_error = jnp.sum(
-            pred_distance_error, axis=[-2, -1]
-        ) / jnp.sum(pair_mask, axis=[-2, -1])
+      pred_distance_error = (
+          jnp.sum(distance_probs * bin_centers, axis=-1) * pair_mask
+      )
+      average_pred_distance_error = jnp.sum(
+          pred_distance_error, axis=[-2, -1]
+      ) / jnp.sum(pair_mask, axis=[-2, -1])
 
       # Predicted aligned error
       pae_outputs = {}

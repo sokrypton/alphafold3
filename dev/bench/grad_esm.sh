@@ -18,8 +18,7 @@ run() {  # model, hidden-file
   printf '%-32s %s\n' "$1" "${l:-NO OUTPUT}" >> $OUT
   [ -n "$g" ] && printf '%-32s   %s\n' "" "$g" >> $OUT
 }
-for m in esmfold2 esmfold2_fast esmfold2_exp esmfold2_exp_fast \
-         esmfold2_exp_cutoff2025 esmfold2_exp_fast_cutoff2025; do
+for m in esmfold2 esmfold2_fast esmfold2_lm600m esmfold2_lm300m; do
   run $m hid_6b.npz
 done
 run esmfold2_lm600m hid_new.npz

@@ -7,19 +7,19 @@ only in `~/venv_esm`, and installing it beside JAX is not an option here. So the
 native side runs there and writes the comparison inputs AND its output to an
 npz that `msa_parity.py` reads with numpy alone.
 
-  ~/venv_esm/bin/python dev/oracles/esmfold2_msa_dump.py esmfold2_exp
+  ~/venv_esm/bin/python dev/oracles/esmfold2_msa_dump.py esmfold2
   JAX_DEFAULT_MATMUL_PRECISION=highest PYTHONPATH=src:. \
-    ~/venv/bin/python dev/oracles/msa_parity.py esmfold2_exp
+    ~/venv/bin/python dev/oracles/msa_parity.py esmfold2
 
 The npz carries the EMBEDDED msa (embed(m_feat) + project_inputs(x_inputs)),
 not the raw rows, for the same reason every other adapter here returns it: both
 sides then enter the stack on an identical activation, and a random activation
 on our side reads corr 0.468 and means nothing.
 
-Only three of the eight ESMFold2 releases have an MSA encoder at all --
-`msa=4` in `model_registry.ESMFOLD2_VARIANTS` (esmfold2, esmfold2_exp,
-esmfold2_exp_cutoff2025). The five `*_fast`/`lm*` rows set `msa_encoder.enabled`
-false and carry no such weights, so they are n/a rather than ungated.
+Only `esmfold2` has an MSA encoder now -- `msa=4` in
+`model_registry.ESMFOLD2_VARIANTS`. The `_fast` and `lm*` rows set
+`msa_encoder.enabled` false and carry no such weights, so they are n/a rather
+than ungated. (The two experimental msa=4 releases were dropped on 2026-09-09.)
 """
 import argparse
 import glob
@@ -29,29 +29,21 @@ import sys
 import numpy as np
 import torch
 
-# ESMFold2 ships TWO MSAEncoders, one per line, and they are NOT the same
-# module: the released block runs the outer product FIRST and skips the msa
-# update in its last block, while the experimental block updates the msa first
-# and runs every block. Importing the released one for all three variants is
-# what made this gate read 1.000000 while `model_config.MSA_UPDATE_BEFORE_OPM`
-# had the experimental releases in the wrong branch -- it was comparing us
-# against the wrong native module and agreeing with it. `_encoder_class` picks
-# by variant.
-from transformers.models.esmfold2 import modeling_esmfold2 as _released
-from transformers.models.esmfold2 import modeling_esmfold2_experimental as _exp
+# ESMFold2 ships TWO MSAEncoders, one per release line, and they are NOT the
+# same module -- the released block runs the outer product FIRST and skips the
+# msa update in its last block, where the experimental block updates first and
+# runs every block. Importing the released one for an EXPERIMENTAL variant is
+# what once made this gate read 1.000000 against a module that release does not
+# run.
+#
+# Only `esmfold2` survives with an MSA encoder (the experimental msa=4 releases
+# were dropped on 2026-09-09), so the released class is now the only correct
+# choice and the per-variant dispatch is gone. If an experimental msa=4 release
+# is ever restored, restore the dispatch WITH it -- see git history.
+from transformers.models.esmfold2.modeling_esmfold2 import (MSAEncoder,
+                                                            MSAEncoderBlock)
 
-_HUB = {'esmfold2': 'ESMFold2',
-        'esmfold2_exp': 'ESMFold2-Experimental',
-        'esmfold2_exp_cutoff2025': 'ESMFold2-Experimental-Cutoff2025'}
-
-# Which module the release actually runs. Keyed on the same split
-# model_config.ESMFOLD2_EXPERIMENTAL uses.
-_EXPERIMENTAL = ('esmfold2_exp', 'esmfold2_exp_cutoff2025')
-
-
-def _encoder_class(model):
-  mod = _exp if model in _EXPERIMENTAL else _released
-  return mod.MSAEncoder, mod.MSAEncoderBlock, mod is _exp
+_HUB = {'esmfold2': 'ESMFold2'}
 
 
 def _state_dict(model):
@@ -106,11 +98,9 @@ def main(argv=None):
         'opm hidden %d, %d heads x %d' % (n_layers, d_msa, msa_in, d_inputs,
                                           d_pair, d_hidden, n_heads, head_w))
 
-  MSAEncoder, MSAEncoderBlock, experimental = _encoder_class(args.model)
-  print('  native module: modeling_esmfold2%s (%s)'
-        % ('_experimental' if experimental else '',
-           'msa update BEFORE the outer product, every block'
-           if experimental else 'outer product first, last block skips it'))
+  experimental = False           # only the released line still has an MSA
+  print('  native module: modeling_esmfold2 '
+        '(outer product first, last block skips it)')
   net = MSAEncoder(d_msa=d_msa, d_pair=d_pair, d_inputs=d_inputs,
                    d_hidden=d_hidden, n_layers=n_layers, n_heads_msa=n_heads,
                    msa_head_width=head_w)

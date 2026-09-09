@@ -32,10 +32,6 @@ DUMPS = os.path.join(HERE, 'dumps')
 _HUB = {
     'esmfold2': 'ESMFold2',
     'esmfold2_fast': 'ESMFold2-Fast',
-    'esmfold2_exp': 'ESMFold2-Experimental',
-    'esmfold2_exp_fast': 'ESMFold2-Experimental-Fast',
-    'esmfold2_exp_cutoff2025': 'ESMFold2-Experimental-Cutoff2025',
-    'esmfold2_exp_fast_cutoff2025': 'ESMFold2-Experimental-Fast-Cutoff2025',
     'esmfold2_lm600m': 'ESMFold2-Experimental-Fast-base600M-step1500k',
     'esmfold2_lm300m': 'ESMFold2-Experimental-Fast-base300M-step1500k',
 }

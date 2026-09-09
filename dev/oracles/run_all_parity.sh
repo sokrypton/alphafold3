@@ -62,28 +62,11 @@ mkdir -p "$LOGDIR"
 SUMMARY=$LOGDIR/summary.tsv
 [ -f "$SUMMARY" ] || printf 'gate\tmodel\tstatus\theadline\n' > "$SUMMARY"
 
-# The sweep set: every model the graph knows, MINUS the esmfold2 releases we
-# have chosen not to spend debugging time on. Four of the eight are swept --
-# esmfold2, esmfold2_fast, esmfold2_lm600m, esmfold2_lm300m -- which between
-# them still cover both trunk lines (esmfold2/_fast are the released
-# parcae+coda+lm_encoder path; the lm rows are experimental-line, coda 0 and
-# lm_enc 0), the released MSA encoder (esmfold2, msa 4), and all three ESM-C
-# tower sizes (esmc, esmc_600m, esmc_300m).
-#
-# What the exclusion COSTS, so it is not rediscovered as a surprise: the four
-# dropped releases are the only ones with msa=4 on the EXPERIMENTAL line, so
-# nothing in the sweep exercises the experimental MSA encoder any more -- that
-# is `model_config.MSA_UPDATE_BEFORE_OPM` and the experimental half of
-# `OPM_BIAS_AFTER_NORM`, both of which were fixed on 2026-09-09 (1STP with a
-# real MSA, 14.364 A -> 0.477 A) and are now covered by no model here.
-#
-# These are excluded from the SWEEP only. They remain in the registry, in
-# converters, and published -- set MODELS explicitly to test one.
-PARITY_SKIP=${PARITY_SKIP:-"esmfold2_exp esmfold2_exp_fast esmfold2_exp_cutoff2025 esmfold2_exp_fast_cutoff2025"}
-MODELS=${MODELS:-$($PY -c 'import os, sys; sys.path.insert(0,"src")
-from alphafold3.model import model_config as c
-skip = set(os.environ.get("PARITY_SKIP", "").split())
-print(" ".join(m for m in c.MODELS if m not in skip))')}
+# The sweep set: every model the graph knows. The four ESMFold2-Experimental
+# releases were removed from the project on 2026-09-09, so there is nothing to
+# exclude here any more -- model_config.MODELS is the list.
+MODELS=${MODELS:-$($PY -c 'import sys; sys.path.insert(0,"src")
+from alphafold3.model import model_config as c; print(" ".join(c.MODELS))')}
 
 # gate <name> <script+args...> -- runs one gate for one model.
 #   $1 log tag   $2 model   $3 grep pattern for the headline   rest: argv
@@ -236,7 +219,7 @@ if want L1b; then
   # runs there first and writes an npz (inputs included, so both sides compare
   # on identical tensors) that msa_parity.py reads with numpy alone.
   for m in $MODELS; do
-    case $m in esmfold2|esmfold2_exp|esmfold2_exp_cutoff2025)
+    case $m in esmfold2)
       $PY_ESM dev/oracles/esmfold2_msa_dump.py "$m" > "$LOGDIR/L1b.esmdump.$m.log" 2>&1
       $PY_ESM dev/oracles/esmfold2_msa_dump.py "$m" --nonuniform \
         >> "$LOGDIR/L1b.esmdump.$m.log" 2>&1 ;;

@@ -14,7 +14,8 @@ built here from the same a3m our own fold reads.
 This produced the measurement that turned esmfold2's MSA problem from a guess
 into a direction (PARITY.md, "the experimental line's MSA path is INVERTED"):
 
-    esmfold2_exp on 1STP    no MSA      with MSA
+    ESMFold2-Experimental on 1STP (release dropped 2026-09-09)
+                            no MSA      with MSA
       native                18.728 A    3.184 A   (improves)
       ours                   0.476 A   14.364 A   (degrades)
 

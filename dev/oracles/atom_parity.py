@@ -584,9 +584,7 @@ NATIVES.update({m: native_of3 for m in _OF3_CKPT})
 NATIVES['intellifold2'] = native_if2
 NATIVES['rosettafold3'] = native_rf3
 NATIVES.update({m: native_esmfold2 for m in (
-    'esmfold2', 'esmfold2_fast', 'esmfold2_exp', 'esmfold2_exp_fast',
-    'esmfold2_exp_cutoff2025', 'esmfold2_exp_fast_cutoff2025',
-    'esmfold2_lm600m', 'esmfold2_lm300m')})
+    'esmfold2', 'esmfold2_fast', 'esmfold2_lm600m', 'esmfold2_lm300m')})
 
 
 def _truncate_atom_blocks(p, nb, which='diffusion_atom_transformer'):

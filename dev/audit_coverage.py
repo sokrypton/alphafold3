@@ -184,11 +184,10 @@ _LOADERS = {
        for m, hub in (
            ('esmfold2', 'ESMFold2'),
            ('esmfold2_fast', 'ESMFold2-Fast'),
-           ('esmfold2_exp', 'ESMFold2-Experimental'),
-           ('esmfold2_exp_fast', 'ESMFold2-Experimental-Fast'),
-           ('esmfold2_exp_cutoff2025', 'ESMFold2-Experimental-Cutoff2025'),
-           ('esmfold2_exp_fast_cutoff2025',
-            'ESMFold2-Experimental-Fast-Cutoff2025'),
+           ('ESMFold2-Experimental'),
+           ('ESMFold2-Experimental-Fast'),
+           ('ESMFold2-Experimental-Cutoff2025'),
+           ('ESMFold2-Experimental-Fast-Cutoff2025'),
            ('esmfold2_lm600m',
             'ESMFold2-Experimental-Fast-base600M-step1500k'),
            # lm300m was missing, so L0 had never run on it -- the same omission
@@ -210,9 +209,7 @@ _MAPPERS = {
     'opendde': 'convert_opendde',
     'chai1': 'map_chai1_to_af3',
     **{m: 'map_esmfold2_to_af3_graph' for m in (
-        'esmfold2', 'esmfold2_fast', 'esmfold2_exp', 'esmfold2_exp_fast',
-        'esmfold2_exp_cutoff2025', 'esmfold2_exp_fast_cutoff2025',
-        'esmfold2_lm600m', 'esmfold2_lm300m')},
+        'esmfold2', 'esmfold2_fast', 'esmfold2_lm600m', 'esmfold2_lm300m')},
 }
 
 

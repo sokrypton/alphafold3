@@ -1,14 +1,15 @@
 """Our trunk vs NATIVE's, for one experimental variant, with the LM injected.
 
-esmfold2_exp_fast folds 8.8 A where native reaches 0.885, while its
-architectural twin esmfold2_exp_fast_cutoff2025 folds 1.560 against native's
+Written when ESMFold2-Experimental-Fast folded 8.8 A where native reached
+0.885 while its architectural twin -Fast-Cutoff2025 folded 1.560 against
+native's
 1.494 -- same code path, same key set, same shapes. So the divergence is not
 structural and has to be localised on activations.
 
 Native's own `lm_z` is fed in as our lm_pair, which takes ESM-C and the shim out
 of the comparison entirely: what is left is the trunk.
 
-  MODEL=esmfold2_exp_fast NATIVE=<npz> PYTHONPATH=src:. python dev/oracles/esmfold2_localise_exp.py
+  MODEL=esmfold2_lm600m NATIVE=<npz> PYTHONPATH=src:. python dev/oracles/esmfold2_localise_exp.py
 """
 import os
 import sys
@@ -31,7 +32,10 @@ from alphafold3.model import feat_batch
 from alphafold3.model.network import evoformer as ev
 from dev.oracles.fold_check import parse_ca
 
-MODEL = os.environ.get('MODEL', 'esmfold2_exp_fast')
+# Retargeted to esmfold2_lm600m: it is experimental-LINE (pair_loop_proj
+# recycle, no coda, no lm_encoder), which is the architecture this harness
+# was built for, and it is one of the four releases still in the project.
+MODEL = os.environ.get('MODEL', 'esmfold2_lm600m')
 NATIVE = os.environ.get(
     'NATIVE', os.path.join(
         os.path.dirname(os.path.abspath(__file__)), 'dumps',

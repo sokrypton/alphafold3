@@ -114,7 +114,8 @@ def _fold_setup(model_name, seq, model_dir=None, templates=None, seed=0,
   # same experiment.
   # NUM_MSA caps the MSA depth the trunk consumes (evoformer truncates to
   # config.num_msa, default 1024). A knob because depth is a real variable for
-  # the models that HAVE an MSA encoder: esmfold2_exp folds 1STP at 14.4 A on a
+  # the models that HAVE an MSA encoder. ESMFold2-Experimental (dropped
+  # 2026-09-09) folded 1STP at 14.4 A on a
   # 2145-row MSA and 0.476 A on none, so the response to depth is the
   # measurement that localises it.
   if os.environ.get('NUM_MSA'):

@@ -578,9 +578,7 @@ NATIVES.update({m: native_of3 for m in _OF3_COND_CKPT})
 NATIVES['intellifold2'] = native_if2
 # every ESMFold2 release, each against its OWN checkpoint
 NATIVES.update({m: native_esmfold2 for m in (
-    'esmfold2', 'esmfold2_fast', 'esmfold2_exp', 'esmfold2_exp_fast',
-    'esmfold2_exp_cutoff2025', 'esmfold2_exp_fast_cutoff2025',
-    'esmfold2_lm600m', 'esmfold2_lm300m')})
+    'esmfold2', 'esmfold2_fast', 'esmfold2_lm600m', 'esmfold2_lm300m')})
 
 
 def ours(model, cfg, model_dir, batch, s_inputs, s, z, noise):

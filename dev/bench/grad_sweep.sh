@@ -6,8 +6,7 @@ cd /home/ubuntu/alphafold3
 OUT=$1; : > $OUT
 for m in alphafold3 openfold3 openbind0 protenix05 protenix1 protenix1_20250630 \
          protenix_mini protenix_tiny protenix2 intellifold2 opendde boltz2 \
-         rosettafold3 chai1 esmfold2 esmfold2_fast esmfold2_exp esmfold2_exp_fast \
-         esmfold2_exp_cutoff2025 esmfold2_exp_fast_cutoff2025 esmfold2_lm600m \
+         rosettafold3 chai1 esmfold2 esmfold2_fast esmfold2_lm600m \
          esmfold2_lm300m af2_ptm af2_multimer; do
   log=/home/ubuntu/alphafold3/dev/bench/out/grad.$m.log
   PYTHONPATH=src:. timeout 1800 ~/venv/bin/python dev/oracles/grad_check.py "$m" > "$log" 2>&1

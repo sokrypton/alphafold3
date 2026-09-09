@@ -3,7 +3,7 @@
 The dump every ESMFold2 localiser compares against. Run it from the vendor venv
 (`~/venv_esm/bin/python`), which is the only one with transformers.
 
-  MODEL=esmfold2_exp ~/venv_esm/bin/python dev/oracles/esmfold2_oracle_6mrr.py
+  MODEL=esmfold2 ~/venv_esm/bin/python dev/oracles/esmfold2_oracle_6mrr.py
 
 MODEL selects the release and NAMES THE OUTPUT, because every variant has its
 own weights and its own shim: handing one variant another's reads corr 0.026
@@ -20,10 +20,6 @@ from transformers.models.esmfold2.protein_utils import prepare_protein_features
 MODEL = os.environ.get('MODEL', 'esmfold2')
 _HUB = {
     'esmfold2': 'ESMFold2', 'esmfold2_fast': 'ESMFold2-Fast',
-    'esmfold2_exp': 'ESMFold2-Experimental',
-    'esmfold2_exp_fast': 'ESMFold2-Experimental-Fast',
-    'esmfold2_exp_cutoff2025': 'ESMFold2-Experimental-Cutoff2025',
-    'esmfold2_exp_fast_cutoff2025': 'ESMFold2-Experimental-Fast-Cutoff2025',
     'esmfold2_lm600m': 'ESMFold2-Experimental-Fast-base600M-step1500k',
     'esmfold2_lm300m': 'ESMFold2-Experimental-Fast-base300M-step1500k',
 }

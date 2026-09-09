@@ -1,12 +1,13 @@
 """Fold with NATIVE's trunk z through OUR diffusion. Trunk or diffusion?
 
-esmfold2_exp_fast folds 8.8 A where native reaches 0.885, and its trunk already
+Written when ESMFold2-Experimental-Fast (dropped 2026-09-09) folded 8.8 A
+where native reached 0.885, and its trunk already
 agrees with native's at corr 0.988 (its working twin reads 0.9975). That gap is
 real but small; this settles whether it is the cause. Hand our diffusion the
 trunk NATIVE computed: a good fold means the residual trunk error was being
 amplified, a bad one means the diffusion is wrong.
 
-  MODEL=esmfold2_exp_fast NATIVE=<npz> PYTHONPATH=src:. python \
+  MODEL=esmfold2_lm600m NATIVE=<npz> PYTHONPATH=src:. python \
       dev/oracles/esmfold2_fold_from_native_z.py
 """
 import os
@@ -31,7 +32,10 @@ from alphafold3.model import feat_batch
 from alphafold3.model.network import diffusion_head
 from dev.oracles.fold_check import parse_ca, kabsch_rmsd
 
-MODEL = os.environ.get('MODEL', 'esmfold2_exp_fast')
+# Retargeted to esmfold2_lm600m: it is experimental-LINE (pair_loop_proj
+# recycle, no coda, no lm_encoder), which is the architecture this harness
+# was built for, and it is one of the four releases still in the project.
+MODEL = os.environ.get('MODEL', 'esmfold2_lm600m')
 # NATIVE names the per-pass trunk dump `esmfold2_oracle_exp_trunk.py` writes.
 # Defaulted into dev/oracles/dumps/ rather than a scratchpad literal: this used
 # to point at a path that stopped existing when its session ended.

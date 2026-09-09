@@ -226,24 +226,21 @@ def esmc_hidden_states(ids, p, dims):
 # against 20-22 A without -- even on a depth-1 self MSA.  Layout is TOKEN-major
 # [L, M, c], unlike AF3's [M, L, c].
 
-def outer_product_mean(m, mmask, q, bias_after_norm=False):
-  """`divide_outer_before_proj`, which ESMFold2 sets PER RELEASE LINE.
+def outer_product_mean(m, mmask, q):
+  """`Wout(outer) / n_valid`, so the projection BIAS is scaled by 1/n_valid too.
 
-  False (the released default): `Wout(outer) / n_valid`, so the bias is scaled
-  by 1/n_valid along with the outer product. True (hardcoded by the
-  experimental block, `modeling_esmfold2_experimental.py:366`):
-  `Wout(outer / n_valid)`, so the bias is added unscaled. The two differ by
-  `output_b * (1 - 1/n)` -- a per-CHANNEL CONSTANT, which corr cannot see
-  ([[correlation-hides-bias]]) and which read as max|d| == p99.9|d| when it was
-  found in the graph.
+  ESMFold2 makes this a per-release choice (`divide_outer_before_proj`), and the
+  other setting -- `Wout(outer / n_valid)`, bias added unscaled -- belonged to
+  the EXPERIMENTAL line, dropped on 2026-09-09. The two differ by
+  `output_b * (1 - 1/n)`, a per-CHANNEL CONSTANT that corr cannot see; it read
+  as max|d| == p99.9|d| when it was found in the graph. Only the released order
+  is reachable now.
   """
   mn = layer_norm(m, q['layer_norm/scale'], q['layer_norm/offset'])
   a = (mn @ q['left_projection/weights']) * mmask[..., None]
   b = (mn @ q['right_projection/weights']) * mmask[..., None]
   n_valid = jnp.maximum(mmask @ mmask.T, 1.0)[..., None]
   outer = jnp.einsum('imc,jmd->ijcd', a, b).reshape(a.shape[0], b.shape[0], -1)
-  if bias_after_norm:
-    return (outer @ q['output/weights']) / n_valid + q['output/bias']
   return (outer @ q['output/weights'] + q['output/bias']) / n_valid
 
 
@@ -261,7 +258,7 @@ def msa_pair_weighted_averaging(m, z, pair_mask, q):
 
 
 def msa_encoder(z, s_inputs, msa_oh, has_deletion, deletion_value, mmask, p,
-                dims, experimental=False):
+                dims):
   q = {k[len('msa_encoder/'):]: v for k, v in p.items() if k.startswith('msa_encoder/')}
   feat = jnp.concatenate([msa_oh, has_deletion[..., None], deletion_value[..., None]], -1)
   m = feat @ q['embed/weights'] + (s_inputs @ q['project_inputs/weights'])[:, None]
@@ -270,10 +267,10 @@ def msa_encoder(z, s_inputs, msa_oh, has_deletion, deletion_value, mmask, p,
   n = dims['n_msa']
   for i in range(n):
     sub = lambda pre, d: {k[len(pre):]: v for k, v in d.items() if k.startswith(pre)}
-    # The released line's LAST block has its own scope and no msa update at all
-    # (`is_final_block`); the experimental line runs every block the same way,
-    # so all n come out of the stacked `blocks/` axis.
-    last = (not experimental) and i == n - 1
+    # The LAST block has its own scope and no msa update at all
+    # (`is_final_block`). The experimental line ran every block the same way,
+    # but those releases were dropped on 2026-09-09.
+    last = i == n - 1
     blk = (sub('final_block/', q) if last else
            {k[len('blocks/'):]: v[i] for k, v in q.items()
             if k.startswith('blocks/')})
@@ -287,17 +284,9 @@ def msa_encoder(z, s_inputs, msa_oh, has_deletion, deletion_value, mmask, p,
                      t['input_layer_norm/offset']),
           t['transition1/weights'], t['transition2/weights'])
 
-    if experimental:
-      # msa update FIRST, on the PRE-update pair, then the outer product on the
-      # UPDATED msa -- and the bias after the divide. Both are the experimental
-      # block, and both are opposite to the released one.
+    z = z + outer_product_mean(m, mmask, sub('outer_product_mean/', blk))
+    if not last:
       m = _update(m, z)
-      z = z + outer_product_mean(m, mmask, sub('outer_product_mean/', blk),
-                                 bias_after_norm=True)
-    else:
-      z = z + outer_product_mean(m, mmask, sub('outer_product_mean/', blk))
-      if not last:
-        m = _update(m, z)
     z = pair_block(z, blk, pair_mask)
   return z
 
@@ -367,28 +356,12 @@ def trunk(f, lm_hidden, p, dims, n_loops=3, key=None, lm_dropout=0.25, msa=None)
           z, p['pair_loop_proj_norm/scale'],
           p['pair_loop_proj_norm/offset']) @ p['pair_loop_proj/weights']
       TAPS.setdefault('z_inject', []).append(z)
-      if msa is not None:
-        # ADDED, not overwritten, and the encoder returns the UPDATED pair --
-        # the same double count the graph makes (model_config.MSA_AFTER_RECYCLE).
-        #
-        # ...times `msa_track_mask`, which the experimental encoder applies to
-        # its WHOLE output: `msa_attention_mask[:, :, 1:].any()`, i.e. "is there
-        # any real NON-QUERY row". On a depth-1 self-MSA that is False and
-        # native contributes exactly zero. Omitting it here made this reference
-        # run an encoder the graph correctly skips, and the gate then blamed the
-        # graph -- the reference being wrong is indistinguishable from the port
-        # being wrong unless you look.
-        # NOTE THE AXIS. This file's msa tensors are [L, M] -- `self_msa`
-        # returns mask (L, 1) -- while the graph's `batch.msa.mask` is
-        # [M, L]. So the non-query rows are `[:, 1:]` here and `[1:]` there,
-        # and the two spellings look identical while meaning different things:
-        # `mask[1:]` would slice TOKENS and answer True for any structure
-        # longer than one residue.
-        track = jnp.any(msa['mask'][:, 1:] > 0).astype(z.dtype)
-        z = z + track * msa_encoder(z, s_inputs, msa['oh'],
-                                    msa['has_deletion'],
-                                    msa['deletion_value'], msa['mask'], p, dims,
-                                    experimental=True)
+      # No MSA arm here. The experimental line's releases with an MSA encoder
+      # were dropped on 2026-09-09; the two that remain on this recycle
+      # (esmfold2_lm600m, esmfold2_lm300m) set msa=0, so `msa` is always None
+      # for this branch and `esmfold2_localise_trunk` passes None accordingly.
+      # git history has the arm, with native's msa_track_mask and the [L, M]
+      # vs [M, L] axis trap that cost a wrong reading.
       TAPS.setdefault('z_parcae', []).append(z)
       z = pair_stack(z, p, 'folding_trunk/', dims['n_trunk'], pm)
     # no parcae_readout and no coda: the trunk's own output IS the result.

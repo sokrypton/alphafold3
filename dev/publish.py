@@ -36,9 +36,7 @@ def _registry():
 # `_folder`'s registry cross-check covers drift in the folder; a variant missing
 # HERE ships a model whose shim is unpublished, so keep the two in step.
 _COMPANIONS = {m: ('%s.lm.npz' % m,) for m in (
-    'esmfold2', 'esmfold2_fast', 'esmfold2_exp', 'esmfold2_exp_fast',
-    'esmfold2_exp_cutoff2025', 'esmfold2_exp_fast_cutoff2025',
-    'esmfold2_lm600m', 'esmfold2_lm300m')}
+    'esmfold2', 'esmfold2_fast', 'esmfold2_lm600m', 'esmfold2_lm300m')}
 
 
 # Which folder each model publishes into. This mirrors
@@ -49,10 +47,7 @@ _COMPANIONS = {m: ('%s.lm.npz' % m,) for m in (
 # drift silently.
 _FOLDERS = {
     **{m: 'protenix' for m in ('protenix1', 'protenix2')},
-    **{m: 'esmfold2' for m in ('esmfold2', 'esmfold2_fast', 'esmfold2_exp',
-                               'esmfold2_exp_fast', 'esmfold2_exp_cutoff2025',
-                               'esmfold2_exp_fast_cutoff2025',
-                               'esmfold2_lm600m', 'esmfold2_lm300m')},
+    **{m: 'esmfold2' for m in ('esmfold2', 'esmfold2_fast', 'esmfold2_lm600m', 'esmfold2_lm300m')},
     'openfold3': 'openfold3',
     'openbind0': 'openfold3',
     # Models whose folder IS their own name still have to be listed: `_folder`

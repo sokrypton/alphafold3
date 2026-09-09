@@ -1,7 +1,8 @@
 """Fold 6MRR with NATIVE ESMFold2, one variant at a time.
 
-Two of the six converted variants fold badly (esmfold2_exp_fast 11.7 A,
-esmfold2_exp_cutoff2025 7.7 A) while siblings with the SAME architecture fold
+Two of the then-six converted variants folded badly (the -Experimental-Fast
+line at 11.7 A, -Experimental-Cutoff2025 at 7.7 A -- both releases dropped on
+2026-09-09) while siblings with the SAME architecture folded
 well. That is not something our own numbers can settle: it separates "the port
 is wrong for these two" from "these two checkpoints are weaker", and only the
 reference implementation can say which.

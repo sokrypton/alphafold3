@@ -102,7 +102,12 @@ class KeyWindowTest(absltest.TestCase):
 class ApplyTest(absltest.TestCase):
 
   def test_a_model_with_no_conventions_is_untouched(self):
-    for name in ('alphafold3', 'openfold3', 'intellifold2'):
+    # openfold3 used to be in this list and is not any more: it declares
+    # `centre_conformers` (model_config.CENTRE_REF_CONFORMERS). That knob had to
+    # become a real featurise entry precisely BECAUSE openfold3 had none --
+    # every caller guards the whole step on `if spec.featurise:`, so an empty
+    # entry meant the convention never ran for the model it mattered most for.
+    for name in ('alphafold3', 'intellifold2'):
       with self.subTest(model=name):
         before = _atom_window_batch()
         after = model_features.apply(_atom_window_batch(),

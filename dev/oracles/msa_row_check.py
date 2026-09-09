@@ -1,7 +1,7 @@
 """Does the featuriser's MSA say what the a3m said? A pure-numpy gate.
 
   JAX_DEFAULT_MATMUL_PRECISION=highest PYTHONPATH=src:. \
-    ~/venv/bin/python dev/oracles/msa_row_check.py esmfold2_exp
+    ~/venv/bin/python dev/oracles/msa_row_check.py esmfold2
 
 Every MSA gate in this file's neighbourhood compares ACTIVATIONS, and all of
 them inject the vendor's own embedded rows so that both sides start from an

@@ -25,11 +25,6 @@ SOURCES = {
     # writes beside the blob as <model>.lm.npz.
     'esmfold2': dict(repo='biohub/ESMFold2'),
     'esmfold2_fast': dict(repo='biohub/ESMFold2-Fast'),
-    'esmfold2_exp': dict(repo='biohub/ESMFold2-Experimental'),
-    'esmfold2_exp_fast': dict(repo='biohub/ESMFold2-Experimental-Fast'),
-    'esmfold2_exp_cutoff2025': dict(repo='biohub/ESMFold2-Experimental-Cutoff2025'),
-    'esmfold2_exp_fast_cutoff2025': dict(
-        repo='biohub/ESMFold2-Experimental-Fast-Cutoff2025'),
     # the 600M-ESM-C tier; pairs with the esmc_600m tower below
     'esmfold2_lm600m': dict(
         repo='biohub/ESMFold2-Experimental-Fast-base600M-step1500k'),

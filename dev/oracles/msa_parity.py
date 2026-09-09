@@ -456,8 +456,7 @@ def native_esmfold2(model, msa, s_inputs, z, n_msa):
 
 NATIVES = {'rosettafold3': native_rf3, 'intellifold2': native_if2,
            'opendde': native_opendde, 'boltz2': native_boltz2,
-           **{m: native_esmfold2 for m in ('esmfold2', 'esmfold2_exp',
-                                          'esmfold2_exp_cutoff2025')}}
+           **{m: native_esmfold2 for m in ('esmfold2')}}
 try:
   from denoise_parity import _OF3_CKPT as _OF3
   NATIVES.update({m: native_of3 for m in _OF3})
@@ -495,8 +494,7 @@ def main(argv=None):
   # The raw MSA feature width comes off the checkpoint inside the adapter; the
   # harness hands it random rows, as the trunk gates do for s/z.
   raw_w = {'rosettafold3': 35, 'intellifold2': 34, 'boltz2': 33,
-           'opendde': 34, 'esmfold2': 35, 'esmfold2_exp': 35,
-           'esmfold2_exp_cutoff2025': 35}.get(args.model, 34)
+           'opendde': 34, 'esmfold2': 35}.get(args.model, 34)
   msa = (rng.normal(size=(args.num_msa, n_tok, raw_w)) * 0.5).astype(np.float32)
   s_inputs = (rng.normal(size=(n_tok, 449)) * 0.5).astype(np.float32)
   if os.environ.get('LAYER'):

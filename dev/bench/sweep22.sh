@@ -7,7 +7,7 @@ for m in $plain; do
   printf "%-30s " "$m" >> $out
   PYTHONPATH=src:. ~/venv/bin/python dev/oracles/fold_check.py $m ~/6MRR.pdb 2>&1 | tail -1 >> $out
 done
-for m in esmfold2 esmfold2_fast esmfold2_exp esmfold2_exp_fast esmfold2_exp_cutoff2025 esmfold2_exp_fast_cutoff2025; do
+for m in esmfold2 esmfold2_fast esmfold2_lm600m esmfold2_lm300m; do
   printf "%-30s " "$m" >> $out
   ESMC_HIDDEN=$S/hid_6b.npz PYTHONPATH=src:. ~/venv/bin/python dev/oracles/fold_check.py $m ~/6MRR.pdb 2>&1 | tail -1 >> $out
 done

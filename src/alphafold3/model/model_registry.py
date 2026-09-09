@@ -417,21 +417,13 @@ ESMFOLD2_VARIANTS = {
                      msa_w=16, bins=64, conf_bins=39, esmc='esmc'),
     'esmfold2_fast': dict(hub='ESMFold2-Fast', trunk=24, msa=0, coda=2, lm_enc=4,
                           msa_w=0, bins=64, conf_bins=39, esmc='esmc'),
-    'esmfold2_exp': dict(hub='ESMFold2-Experimental', trunk=48, msa=4, coda=0,
-                         lm_enc=0, msa_w=32, bins=128, conf_bins=128, esmc='esmc'),
-    'esmfold2_exp_fast': dict(hub='ESMFold2-Experimental-Fast', trunk=24, msa=0,
-                              coda=0, lm_enc=0, msa_w=0, bins=128, conf_bins=128, esmc='esmc'),
-    'esmfold2_exp_cutoff2025': dict(hub='ESMFold2-Experimental-Cutoff2025',
-                                    trunk=48, msa=4, coda=0, lm_enc=0, msa_w=32,
-                                    bins=128, conf_bins=128, esmc='esmc'),
-    'esmfold2_exp_fast_cutoff2025': dict(
-        hub='ESMFold2-Experimental-Fast-Cutoff2025', trunk=24, msa=0, coda=0,
-        lm_enc=0, msa_w=0, bins=128, conf_bins=128, esmc='esmc'),
-    # The 600M-ESM-C tier. Architecturally identical to esmfold2_exp_fast --
-    # 24 blocks, no MSA encoder, no lm_encoder, no parcae -- and trained
-    # against a DIFFERENT tower, which is the only thing `esmc` records and the
-    # only thing that makes it a separate model. step1500k is the last
-    # checkpoint of upstream's scaling series, i.e. the best of that tier.
+    # The 600M-ESM-C tier: 24 blocks, no MSA encoder, no lm_encoder, no parcae,
+    # and trained against a DIFFERENT tower, which is the only thing `esmc`
+    # records and the only thing that makes it a separate model. step1500k is
+    # the last checkpoint of upstream's scaling series, i.e. the best of that
+    # tier. (Its architecture came from the dropped ESMFold2-Experimental-Fast,
+    # which is why these two rows carry bins 128 and conf_bins 128 where the
+    # released pair carry 64 and 39.)
     'esmfold2_lm600m': dict(
         hub='ESMFold2-Experimental-Fast-base600M-step1500k', trunk=24, msa=0,
         coda=0, lm_enc=0, msa_w=0, bins=128, conf_bins=128, esmc='esmc_600m'),

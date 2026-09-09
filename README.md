@@ -91,10 +91,6 @@ Pair-only trunk conditioned on an ESM-C language model.
 |---|---|---|---|
 | `esmfold2` | [ESMFold2](https://huggingface.co/biohub/ESMFold2) (Arc / CZ Biohub) | MIT | 1.483 |
 | `esmfold2_fast` | [ESMFold2-Fast](https://huggingface.co/biohub/ESMFold2-Fast) — half the trunk | MIT | 1.245 |
-| `esmfold2_exp` | [ESMFold2-Experimental](https://huggingface.co/biohub/ESMFold2-Experimental) | MIT | 0.722 |
-| `esmfold2_exp_fast` | [ESMFold2-Experimental-Fast](https://huggingface.co/biohub/ESMFold2-Experimental-Fast) | MIT | 1.267 |
-| `esmfold2_exp_cutoff2025` | […-Cutoff2025](https://huggingface.co/biohub/ESMFold2-Experimental-Cutoff2025) | MIT | 1.611 |
-| `esmfold2_exp_fast_cutoff2025` | […-Fast-Cutoff2025](https://huggingface.co/biohub/ESMFold2-Experimental-Fast-Cutoff2025) | MIT | 1.423 |
 | `esmfold2_lm600m` | […-base600M-step1500k](https://huggingface.co/biohub/ESMFold2-Experimental-Fast-base600M-step1500k) — **ESM-C 600M** | MIT | 0.858 |
 | `esmfold2_lm300m` | […-base300M-step1500k](https://huggingface.co/biohub/ESMFold2-Experimental-Fast-base300M-step1500k) — **ESM-C 300M** | MIT | 1.753 |
 
@@ -164,7 +160,7 @@ against.
 | `opendde` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `rosettafold3` | ✓ | ✓ | ~ | ✓ | ✓ | ✓ | ✓ |
 | `chai1` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `esmfold2` family (8) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ~ — ligands 0.645 Å, DNA 2.9 Å, RNA 25 Å |
+| `esmfold2` family (4) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ~ — ligands 0.645 Å, DNA 2.9 Å, RNA 1.7 Å |
 | `af2_ptm` / `af2_multimer` | n/a | n/a | n/a | n/a | n/a | ✓ | n/a — protein only |
 
 `alphafold3` and the AF2 pair are `n/a` by construction: the first IS the
@@ -245,7 +241,7 @@ vendor's torch module on identical inputs (`dev/oracles/trunk_parity.py`).
 | `rosettafold3` | 0.999997 | 0.999996 | |
 | `intellifold2` | 1.000000 | 0.998994 | over 48 blocks; ONE block is 1.000000/1.000000 and every op bisects to ≥0.999997, so the residual is fp compounding |
 | `chai1` | 0.999945 | 0.999918 | at the floor — native chai's TorchScript is bf16 |
-| `esmfold2` family | — | — | whole trunk corr **0.99961** from raw features (not split s/z); the eight variants share this graph |
+| `esmfold2` family | — | — | whole trunk corr **0.99961** from raw features (not split s/z); the four variants share this graph |
 | `alphafold3` | n/a | n/a | this IS the reference implementation |
 
 ### L3 — one full denoise step

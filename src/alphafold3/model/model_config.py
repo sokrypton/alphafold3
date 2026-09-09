@@ -50,15 +50,16 @@ MODELS = (
     # SSM recycle, a clamped OPM norm and a rotary atom window -- see
     # SSM_RECYCLE, CLAMPED_OPM_NORM, SWA_ROPE_ATOM_ATTENTION.
     'esmfold2',
-    # ...and its released variants. "Fast" halves the folding trunk (24 blocks
-    # against 48) and keeps the same ESM-C 6B tower; "Experimental" and
-    # "Cutoff2025" are separate trainings at the same two depths. Every forward
-    # branch below is shared, so they are one family.
+    # ...and its released "Fast" variant, which halves the folding trunk (24
+    # blocks against 48) and keeps the same ESM-C 6B tower.
+    #
+    # The ESMFold2-Experimental and -Experimental-Cutoff2025 lines, and their
+    # -Fast siblings, were ported and then DROPPED on 2026-09-09. They are gone
+    # from the registry, the converters and the oracles; git history and
+    # PARITY.md hold what was learned from them, including the two fixes they
+    # were the only models to exercise (the experimental MSA block order and
+    # its outer-product bias placement).
     'esmfold2_fast',
-    'esmfold2_exp',
-    'esmfold2_exp_fast',
-    'esmfold2_exp_cutoff2025',
-    'esmfold2_exp_fast_cutoff2025',
     # the smaller-ESM-C tiers: the experimental-fast architecture trained
     # against a smaller tower, which is the only thing that differs -- same
     # trunk depth, same sampler, same heads.
@@ -94,34 +95,45 @@ ALL_MODELS = MODELS + AF2_MODELS
 # Naming the membership once is the whole point: `esmfold2` alone appeared in
 # thirteen places in this file and eight more in the graph, and a variant added
 # to twelve of them would fail as a shape error that names nothing.
-ESMFOLD2_FAMILY = ('esmfold2', 'esmfold2_fast', 'esmfold2_exp',
-                   'esmfold2_exp_fast', 'esmfold2_exp_cutoff2025',
-                   'esmfold2_exp_fast_cutoff2025',
+# Four releases, not the eight that were ported: the ESMFold2-Experimental and
+# -Experimental-Cutoff2025 lines (and their -Fast siblings) were dropped on
+# 2026-09-09 to keep the debugging surface honest. What these four still cover
+# between them is both trunk lines, the released MSA encoder, and all three
+# ESM-C tower sizes; what went with the dropped four is the EXPERIMENTAL MSA
+# encoder, since they were the only msa=4 models on that line.
+ESMFOLD2_FAMILY = ('esmfold2', 'esmfold2_fast',
                    'esmfold2_lm600m', 'esmfold2_lm300m')
 
 # ...with one real architectural split inside it. The two RELEASED models recycle
-# through the parcae SSM; the four EXPERIMENTAL ones carry `pair_loop_proj`
-# instead -- a LayerNorm(256) and a Linear(256, 256), which is exactly AF3's own
+# through the parcae SSM; the two language-model-tier ones carry
+# `pair_loop_proj` instead -- a LayerNorm(256) and a Linear(256, 256), which is exactly AF3's own
 # `prev_embedding_layer_norm` + `prev_embedding`. So the experimental line reverts
 # to stock recycling, and drops the parcae readout and coda with it.
 ESMFOLD2_SSM_RECYCLE = ('esmfold2', 'esmfold2_fast')
 
-# The experimental line, which is also where the confidence head changes: it
-# keeps pLDDT and PAE, drops the PAE LayerNorm, and drops the PDE and
-# experimentally-resolved heads outright (93 confidence tensors against 101).
+# The experimental-line members that remain: esmfold2_lm600m and
+# esmfold2_lm300m. Both are structure-only (msa 0, no confidence head), so this
+# now selects the RECYCLE difference and nothing else -- every exception that
+# needed an experimental model WITH an MSA stack or a confidence head is dead
+# and has been removed rather than left keyed on a list that cannot match.
 ESMFOLD2_EXPERIMENTAL = tuple(m for m in ESMFOLD2_FAMILY
                               if m not in ESMFOLD2_SSM_RECYCLE)
 
 # Confidence heads a model does not have. Building one anyway leaves its
 # parameters at random init and emits a prediction that looks like a prediction
 # and is noise -- which is what happened to chai1's experimentally-resolved.
-NO_PDE_HEAD = ESMFOLD2_EXPERIMENTAL
-NO_RESOLVED_HEAD = ('chai1',) + ESMFOLD2_EXPERIMENTAL
+#
+# NO_PDE_HEAD is gone: its only members were the ESMFold2-Experimental releases
+# (dropped 2026-09-09) plus the lm-tier pair, and the lm pair ship NO confidence
+# head at all (NO_CONFIDENCE_HEAD), so nothing could reach it.
+NO_RESOLVED_HEAD = ('chai1',)
 # ...and the LayerNorms they do not have. boltz2 has none before ANY head;
 # ESMFold2's experimental line keeps plddt_ln but not pae_ln, so this is keyed
 # by head, not by model.
-NO_HEAD_NORM = {'boltz2': ('*',),
-                **{m: ('pae_logits_ln',) for m in ESMFOLD2_EXPERIMENTAL}}
+# boltz2 has none before ANY head. The ESMFold2 entry that used to live here
+# (`pae_logits_ln` for the experimental line) went with those releases: the
+# lm-tier survivors build no confidence head at all.
+NO_HEAD_NORM = {'boltz2': ('*',)}
 
 # Models whose confidence re-embedding bins the predicted distances with their
 # OWN trained boundaries rather than boltz2's constant 2..22 A over 63 edges.
@@ -179,12 +191,6 @@ def affine_norm(model, name):
 # OVERWRITES the injection before it (`msa_encoder_overwrite: true`); the
 # experimental line runs it AFTER, as an addition:
 #     z = z_init + pair_loop_proj(z)
-#     z = z + msa_encoder(x_pair=z, ...)
-# and its encoder returns the UPDATED pair rather than a delta, so that add is
-# the same double count boltz2 and chai make. It also zeroes its whole output
-# when the MSA has no non-query rows (`msa_track_mask`), which for a
-# single-sequence fold means the MSA track contributes exactly nothing.
-MSA_AFTER_RECYCLE = ESMFOLD2_EXPERIMENTAL
 
 # Models whose MSA subsampling KEEPS THE QUERY AT ROW 0 and preserves the
 # alignment's own row order, rather than taking AF3's uniform gumbel shuffle
@@ -216,7 +222,9 @@ MSA_KEEP_QUERY_ROW = ESMFOLD2_FAMILY
 # Invisible without a real alignment: the experimental encoder multiplies its
 # whole output by `msa_track_mask`, which is False when the MSA has no non-query
 # rows, so at depth 1 both orders return exactly zero.
-MSA_UPDATE_BEFORE_OPM = ('opendde', 'boltz2') + ESMFOLD2_EXPERIMENTAL
+# The ESMFold2-Experimental half of this list went with those releases: the two
+# lm-tier survivors set msa=0, so no ESMFold2 model reaches an MSA block now.
+MSA_UPDATE_BEFORE_OPM = ('opendde', 'boltz2')
 
 # The Protenix family. Its model types differ from one another ONLY in counts
 # and widths (converters/protenix2.derive_dims reads both off the checkpoint), so
@@ -398,7 +406,9 @@ MIN_BLOB_CONVENTION: dict[str, int] = {}
 # modeling_esmfold2_common.py, so the two lines do not differ by CLASS at all.
 # They differ by the ARGUMENT one instantiates it with, which an audit of
 # duplicated class names cannot see ([[esmfold2-two-file-sweep]]).
-OPM_BIAS_AFTER_NORM = OPM_ROW_COUNT_NORM + ESMFOLD2_EXPERIMENTAL
+# Same story: only boltz2 remains, for the same reason as
+# MSA_UPDATE_BEFORE_OPM above.
+OPM_BIAS_AFTER_NORM = OPM_ROW_COUNT_NORM
 
 
 # Models whose ATOM attention is a sliding window with 3D rotary positions

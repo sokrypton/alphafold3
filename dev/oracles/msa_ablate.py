@@ -1,7 +1,7 @@
 """Which MSA-derived feature breaks the fold? Ablate one at a time.
 
   PYTHONPATH=src:. ABLATE=profile ~/venv/bin/python \
-    dev/oracles/msa_ablate.py esmfold2_exp ligand_1stp
+    dev/oracles/msa_ablate.py esmfold2 ligand_1stp
 
 A real alignment reaches an AF3-lineage model by THREE routes, not one:
 
