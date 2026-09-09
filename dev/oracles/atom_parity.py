@@ -839,9 +839,23 @@ def native_boltz2(model, fb, feats, pos_noisy, s, z, n_tok):
   M = _boltz2_modules()
   bf, n_real, pad_to, r = _boltz2_feats(fb, feats, pos_noisy, n_tok)
   t = lambda x: torch.tensor(_np.asarray(x, _np.float32))
+  # BLOCKS truncates BOTH sides (ours in `ours()`). boltz's bias tensor carries
+  # one slice per block and its transformer reads `L = len(self.layers)` to cut
+  # it up, so the layer list and the bias have to be truncated TOGETHER -- a
+  # mismatch reshapes the bias silently rather than failing.
+  _nb = os.environ.get('BLOCKS')
+  _bias_layers = list(M['enc_bias'])
+  if _nb:
+    _nb = int(_nb)
+    dt = M['aae'].atom_encoder.diffusion_transformer
+    dt.layers = dt.layers[:_nb]
+    _bias_layers = _bias_layers[:_nb]
+    print('  native atom stack truncated to %d block(s)' % _nb)
   with torch.no_grad():
     q, c, p, to_keys = M['enc'](feats=bf, s_trunk=t(s)[None], z=t(z)[None])
-    bias = torch.cat([l(p) for l in M['enc_bias']], dim=-1)
+    bias = torch.cat([l(p) for l in _bias_layers], dim=-1)
+    if os.environ.get('NOBIAS'):
+      bias = torch.zeros_like(bias)
     a, q_out, c_out, _ = M['aae'](feats=bf, q=q, c=c, atom_enc_bias=bias,
                                   to_keys=to_keys, r=r)
   _RAW['boltz2'] = dict(p=p, q=q_out, c=c_out, to_keys=to_keys,
@@ -937,6 +951,18 @@ def ours(model, cfg, model_dir, fb, act_dense, s, z):
     cfg.heads.diffusion.atom_transformer.num_blocks = int(_nb)
     full = _truncate_atom_blocks(full, int(_nb))
     print('  BLOCKS=%s: atom stack truncated on BOTH sides' % _nb)
+
+  if os.environ.get('NOBIAS'):
+    # ZERO THE PER-BLOCK PAIR BIAS ON BOTH SIDES (the native half does the same
+    # under this variable). It splits a stack disagreement in two: with the bias
+    # gone the atom transformer runs on its block weights alone, so a residual
+    # that SURVIVES is in those weights and one that VANISHES is in the bias --
+    # which is where a per-block projection stacked in the wrong order, or an
+    # absorbed LayerNorm, would live.
+    full = {sc: {k: (np.zeros_like(np.asarray(v))
+                     if 'pair_logits_projection' in sc else v)
+                 for k, v in full[sc].items()} for sc in full}
+    print('  NOBIAS: per-block pair bias zeroed on both sides')
 
   def fwd():
     enc = aca.atom_cross_att_encoder(

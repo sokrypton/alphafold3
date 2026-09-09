@@ -273,6 +273,24 @@ PROTENIX_FAMILY = ('protenix1', 'protenix2')
 RAW_REF_CHARGE = ('chai1', 'boltz2') + ESMFOLD2_FAMILY
 
 
+# boltz2's atom cross-attention builds its keys by gathering the ALREADY
+# NORMALISED queries -- `k_in = to_keys(b)` where `b = self.adaln(a, s)`, with no
+# key-side norm after it (transformersv2.py DiffusionTransformerLayer.forward),
+# and its checkpoint carries a single `adaln` per layer where opendde carries
+# `layernorm_a` + `layernorm_kv`.
+#
+# THAT NEEDS NO BRANCH, and the reason is worth keeping: adaptive LayerNorm is
+# POINTWISE per atom, so gathering before or after it is the same computation.
+# `adaln_k(gather(a))` with the k-side weights equal to the q-side -- which is
+# what a converter must write when the vendor has one `adaln` -- IS
+# `gather(adaln_q(a))`. Implementing the gather-first form changed the atom
+# encoder by nothing at all (q_atom max|d|/rms 1.20e-02 at one block, before and
+# after, to five decimals), so it was reverted.
+#
+# The opendde/protenix CHAINED form is different precisely because it applies a
+# norm TWICE, and composition does not commute away.
+
+
 OPENFOLD3_LINEAGE = (
     'openfold3', 'openbind0', 'opendde', 'boltz2', 'rosettafold3',
 ) + PROTENIX_FAMILY
