@@ -595,6 +595,27 @@ def native_rf3(model, fb, feats, pos_noisy, s, z, n_tok):
     print('  native UNEXPECTED (in checkpoint, not in the module we built): %s'
           % sorted(unexpected)[:12])
   assert not missing, 'native is missing %d tensors' % len(missing)
+  # BLOCKS truncates BOTH sides. rf3's stack is nested one deeper than the
+  # others (`atom_transformer.diffusion_transformer.blocks`), and without this
+  # the knob compared our 1-block stack against native's 3 -- which reads
+  # q_atom corr 0.58 and 1298 max|d|, WORSE than the untruncated run. That
+  # "it got worse with fewer blocks" tell is already written down in
+  # confidence_parity._truncate; I walked into it anyway.
+  _nb = os.environ.get('BLOCKS')
+  if _nb:
+    dt = net.atom_transformer.diffusion_transformer
+    dt.blocks = dt.blocks[:int(_nb)]
+    if hasattr(dt, 'n_block'):
+      dt.n_block = int(_nb)
+    print('  native atom stack truncated to %s block(s)' % _nb)
+  if os.environ.get('NOBIAS'):
+    # Zero the PAIR BIAS on both sides -- ours in `ours()`. rf3 forms it as
+    # `to_b(ln_0(Z_local))` inside the attention, so zeroing `to_b` is the
+    # whole term. It is what separated "the pair" from "the block" for boltz2.
+    with torch.no_grad():
+      for _blk in net.atom_transformer.diffusion_transformer.blocks:
+        _blk.attention_pair_bias.to_b.weight.zero_()
+    print('  NOBIAS: native pair bias zeroed')
   net.eval()
   with torch.no_grad():
     # The coordinates carry rf3's leading DIFFUSION-batch dim, the trunk
@@ -606,10 +627,34 @@ def native_rf3(model, fb, feats, pos_noisy, s, z, n_tok):
   # rf3's pair tensor is not comparable to ours (dense L*L against our windows)
   # but the DECODER consumes it, so it is parked rather than dropped.
   _RAW['rf3'] = dict(p=p_lm, f=f, q=q_l, c=c_l)
-  # rf3 keeps the atom pair tensor dense over all L*L, ours is windowed --
-  # not comparable, so it is not compared.
+  # THE PAIR, WINDOWED WITH RF3'S OWN INDEX ARITHMETIC. It used to be returned
+  # as None because "rf3 keeps the atom pair dense over all L*L, ours is
+  # windowed" -- true, and not a reason to drop it: the window is a GATHER, and
+  # `AttentionPairBiasDiffusion.atom_attention` says exactly which one.
+  #
+  #     Cs      = arange(nq) * 32 + 16          (block centres)
+  #     patchq  = arange(32)  - 16              -> queries 32i .. 32i+31
+  #     patchk  = arange(128) - 64              -> keys    32i-48 .. 32i+79
+  #     indices = clamp(Cs + patch, 0, L-1), and out-of-range slots are masked
+  #
+  # Applying that here is what makes `p_atom_pair` comparable -- the tensor that
+  # localised boltz2's offset sign, and the one thing about rf3's atom stack
+  # that had never been measured.
+  p_ret = pm = None
+  _p = np.asarray(p_lm) if p_lm is not None else None
+  if _p is not None and _p.ndim >= 3:
+    _p = _p.reshape(_p.shape[-3], _p.shape[-2], _p.shape[-1])
+    L = _p.shape[0]
+    nq = -(-L // 32)
+    cs = np.arange(nq) * 32 + 16
+    iq = cs[:, None] + (np.arange(32) - 16)
+    ik = cs[:, None] + (np.arange(128) - 64)
+    okq, okk = (iq >= 0) & (iq < L), (ik >= 0) & (ik < L)
+    iq, ik = np.clip(iq, 0, L - 1), np.clip(ik, 0, L - 1)
+    p_ret = _p[iq[:, :, None], ik[:, None, :]]
+    pm = (okq[:, :, None] & okk[:, None, :]).astype(np.float32)
   sq = lambda x: np.asarray(x).reshape(np.asarray(x).shape[-2:])
-  return (sq(a), sq(q_l), sq(c_l), None, None)
+  return (sq(a), sq(q_l), sq(c_l), p_ret, pm)
 
 
 def native_esmfold2(model, fb, feats, pos_noisy, s, z, n_tok):
@@ -975,8 +1020,23 @@ NATIVES.update({m: native_esmfold2 for m in (
     'esmfold2', 'esmfold2_fast', 'esmfold2_lm600m', 'esmfold2_lm300m')})
 
 
-def _truncate_atom_blocks(p, nb, which='diffusion_atom_transformer'):
-  """Slice a stacked atom transformer to `nb` blocks. See the BLOCKS knob."""
+def _truncate_atom_blocks(p, nb, which='diffusion_atom_transformer', total=None):
+  """Slice a stacked atom transformer to `nb` blocks. See the BLOCKS knob.
+
+  THE BLOCK AXIS IS NOT ALWAYS THE SAME ONE, which is why `total` exists. Two
+  layouts share this parameter name:
+
+    shared LN (AF3, of3, if2, boltz2, chai)   pair_logits_projection is created
+      OUTSIDE the stack as (c_pair, n_blocks, n_heads) -- block axis 1.
+    per-block LN (opendde, protenix, rf3)     it is created INSIDE the stack, so
+      layer_stack prepends the block axis: (n_blocks, c_pair, n_heads) -- axis 0.
+
+  Slicing axis 1 unconditionally left rf3's axis 0 at its full length, and
+  haiku's own scan caught it: `length argument of 1 which disagrees with leading
+  axis sizes [1, 1, ..., 3, 1]`. So the axis is chosen by MATCHING the block
+  count rather than by position, and a name that identifies neither axis is left
+  alone rather than guessed at.
+  """
   out = {}
   for k, v in p.items():
     if which not in k:
@@ -984,8 +1044,10 @@ def _truncate_atom_blocks(p, nb, which='diffusion_atom_transformer'):
     out[k] = {}
     for leaf, arr in v.items():
       a_ = np.asarray(arr)
-      if 'pair_logits_projection' in k and a_.ndim == 3 and a_.shape[1] > nb:
-        a_ = a_[:, :nb]
+      if 'pair_logits_projection' in k and a_.ndim == 3:
+        axes = [i for i in (0, 1) if total is None or a_.shape[i] == total]
+        ax = axes[0] if axes else (1 if a_.shape[1] > nb else 0)
+        a_ = a_[:nb] if ax == 0 else a_[:, :nb]
       elif '__layer_stack' in k and a_.ndim and a_.shape[0] > nb:
         a_ = a_[:nb]
       out[k][leaf] = a_
@@ -1007,8 +1069,9 @@ def ours(model, cfg, model_dir, fb, act_dense, s, z):
     # TRUNCATE BOTH SIDES: the loop count AND the stacked params. Truncating
     # only the reference's loop reads 0.72 and means nothing -- it compares a
     # 1-block stack against a 3-block one.
+    _total = cfg.heads.diffusion.atom_transformer.num_blocks
     cfg.heads.diffusion.atom_transformer.num_blocks = int(_nb)
-    full = _truncate_atom_blocks(full, int(_nb))
+    full = _truncate_atom_blocks(full, int(_nb), total=_total)
     print('  BLOCKS=%s: atom stack truncated on BOTH sides' % _nb)
 
   if os.environ.get('NOBIAS'):

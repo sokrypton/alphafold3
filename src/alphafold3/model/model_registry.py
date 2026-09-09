@@ -557,10 +557,18 @@ _FEATURISE = {
     # chirality features, aligns restypes to its own alphabet, and calls an
     # atomised polymer token UNKNOWN where AlphaFold 3 keeps the parent residue
     # type (which is what asserted the L enantiomer over 11 D-amino acids).
+    # padded_keys: rf3's atom attention CLAMPS its key window and masks the
+    # out-of-range slots (`Cs = arange(nq)*32 + 16`, `patchk = arange(128) - 64`
+    # -> keys 32i-48 .. 32i+79, then `torch.clamp(indices, 0, L-1)` and
+    # `-1e9 * (maskQ | maskK)`), where AF3 slides the window bodily in bounds.
+    # Same convention as opendde and protenix; it was missed here because rf3
+    # was already in KEY_MASKED_ATOM_ATTENTION and that list is about the MASK,
+    # not about where the window sits.
     'rosettafold3': dict(chirals=True, atomized_element_names=True,
                          restype_alignment=True,
                          atomized_unknown_restype=True,
-                         atomized_backbone_bonds=True),
+                         atomized_backbone_bonds=True,
+                         padded_keys=True),
     # chai-1's four input conventions, every one of them silent when forgotten:
     # it takes the atom key window MODULO the atom count where AF3 slides it back
     # in bounds; it numbers its atoms without the C-terminal OXT; it carries its

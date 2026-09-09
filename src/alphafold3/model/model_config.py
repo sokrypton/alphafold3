@@ -268,9 +268,17 @@ PROTENIX_FAMILY = ('protenix1', 'protenix2')
 #   boltz2         `AtomEncoder.forward` concatenates `feats["ref_charge"]`
 #                  verbatim (encodersv2.py:321), and its featuriser stores
 #                  `GetFormalCharge()` unmodified (schema.py:684).
+#   rosettafold3   `ref_charge = atom_array.charge` verbatim
+#                  (atomworks af3_reference_molecule.py:429), and neither rf3
+#                  nor atomworks' ML transforms contain an arcsinh or asinh at
+#                  all. Found the same way as boltz2's, a day later: the
+#                  `FEAT=charge` arm read max|d|/rms 6.03e-02 while position,
+#                  element, atom-name characters and the mask were each exact
+#                  at ~1e-6.
 #   intellifold2   applies asinh INSIDE the module, so arcsinh here is right.
-#   protenix/of3/opendde/rf3  AF3's convention; their charge arm is exact.
-RAW_REF_CHARGE = ('chai1', 'boltz2') + ESMFOLD2_FAMILY
+#   protenix/of3/opendde  AF3's convention, and their charge arms are exact
+#                  (3.79e-06 / 2.02e-06), which is what says so.
+RAW_REF_CHARGE = ('chai1', 'boltz2', 'rosettafold3') + ESMFOLD2_FAMILY
 
 
 # Whose relative-CHAIN bucket is keyed on same-CHAIN, sending the MATCH to the
