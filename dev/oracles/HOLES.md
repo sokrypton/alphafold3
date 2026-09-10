@@ -14,8 +14,7 @@ TWO categories, and the second was invisible until `parity_audit.py` existed:
 | gate | models | what it needs |
 |---|---|---|
 | `L4.confidence` | boltz2 | the converter is done (66 -> 11); the rest is forward branches, recipe in [[boltz2-confidence-port]]. |
-| `L4.confidence` | esmfold2, esmfold2_fast | `esmfold2_reference` does NOT implement the confidence head, so this is the one esmfold2 cell that needs the DUMP. `esmfold2_oracle_6mrr.py` now hooks it (`conf.in.*`, one `conf.out.<name>` per output, `with_kwargs=True` because it is called with keywords only), and `esmfold2_dumps.module_io(model, 'conf')` hands them over. Our side then has to run on the RECORDED inputs, which is a different shape from every gate here -- they hand both sides a synthetic activation. |
-| `L1b.msa` | esmfold2 | the only release with `msa=4`; the other three are n/a. |
+| `L4.confidence` | esmfold2, esmfold2_fast | NO LONGER A HOLE -- the cell RUNS, dump-driven, and its numbers are a finding rather than a gap. See below. |
 
 Everything else is covered: L0, L1.trunk, L1i.trunk_init, L1t.template,
 L2.conditioning, L2.atom_encoder, L2.atom_decoder, L2.diffusion, L3.denoise all
@@ -57,6 +56,42 @@ stores its trunk in bfloat16** -- deliberately, mirroring AF3's own param dtype
 policy, and measured fold-neutral where that policy is set. Rounding native to
 the blob's dtype gives 3.79e-06. Only `alphafold3` and `intellifold2` store bf16
 at all, so nothing else in the panel can hit it.
+
+# The esmfold2 confidence head: the cell runs, and it disagrees
+
+The only esmfold2 module `esmfold2_reference` does not implement, so the only
+one that needs a native run. `esmfold2_oracle_6mrr.py` hooks `confidence_head`
+with `with_kwargs=True` (it is called with keywords only) and parks 11 inputs
+and 14 outputs; the gate injects z, s_inputs and x_pred so both sides run on the
+tensors native actually used.
+
+What is SOUND about the setup, so the numbers are not dismissed:
+
+  * 573 of 574 atoms match BY NAME (`esmfold2_dumps.atom_map`); the odd one is
+    the terminal OXT, which ESMFold2's PROTEIN_HEAVY_ATOMS table has never had.
+  * the representative-atom assert passes BIT-EXACTLY (0.00e+00): ESMFold2 hands
+    its head an explicit `distogram_atom_idx` and our head gathers the
+    pseudo-beta, and they land on the same coordinates.
+  * native is self-consistent: its `plddt_logits` reduce to its own
+    `plddt_per_atom` at corr 1.000000 through the same 50-bin expectation the
+    gate uses, so the bin convention is not in question.
+
+What disagrees:
+
+    full_pae   corr 0.9947 / 5.68e-01      esmfold2      (0.9948 / 5.23e-01 fast)
+    full_pde   corr 0.9017 / 1.39e+00                    (0.8335 / 1.53e+00)
+    plddt      corr 0.1059 / 1.10e+00                    (0.0893 / 1.02e+00)
+    resolved   corr 0.3748 / 9.92e-01                    (0.1833 / 7.51e-01)
+
+The PAIR-derived outputs are close and the PER-ATOM ones are not, which is the
+shape of the answer. `DIAG=1` adds a per-TOKEN mean, which is invariant to a
+within-token slot misalignment: it reads corr 0.0378, so the mapping is NOT the
+fault. Our per-atom values are far too low (token 1: ours 15.8 / 15.3 / 15.2
+against native 59.8 / 59.2 / 61.9), so the next thing to check is the per-atom
+path itself -- for a PAIR_ONLY_TRUNK model our head builds its single by
+ROW-ATTENTION POOLING the pair (`confidence_head.py:310`), which is the one
+piece of ESMFold2 with no AF3 analogue and the only input to plddt that pae does
+not share.
 
 # The gate that measures an amplifier
 

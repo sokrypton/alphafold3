@@ -656,7 +656,88 @@ def ours_opendde(cfg, model_dir, pos, s_inputs, s, z, n, max_atoms):
   return f.apply(params, jax.random.PRNGKey(0))
 
 
+_OVERRIDE = {}
+
+
+def native_esmfold2(model, batch, pos, rng, n, max_atoms):
+  """-> (ref logits, s_inputs, s, z, rep_native) from the ESMFold2 DUMP.
+
+  THE ONE esmfold2 CELL THE REFERENCE CANNOT SERVE. `esmfold2_reference.py`
+  stops at the diffusion; it has no confidence head, so this is the only module
+  gate in the family that needs a native run -- which is why
+  `esmfold2_oracle_6mrr.py` hooks `confidence_head` with `with_kwargs=True` and
+  parks its 11 inputs and 14 outputs in the dump.
+
+  Everything our head consumes is INJECTED from that dump, so both sides run on
+  the tensors native actually used:
+
+      z, s_inputs  the real trunk output for this fold (256- and 451-wide)
+      x_pred       native's sampled coordinates, PACKED (576 slots, 574 real)
+
+  Two layout translations, both of them the ones this family always needs:
+
+    * s_inputs is 451 = [atom 384 | restype 33 | profile 33 | deletion 1] and
+      ours is 447 = [restype 31 | profile 31 | deletion 1 | atom 384], with the
+      restype blocks a PERMUTATION (ESM puts the MSA gap at class 1, below the
+      residues -- `converters/esmfold2.esm_class_of_af3`).
+    * the atom axis is packed on native's side and dense (token, slot) on ours,
+      and the two do not even agree on the atom COUNT: ours carries the terminal
+      OXT, ESMFold2's PROTEIN_HEAVY_ATOMS table does not. `esmfold2_dumps.atom_map`
+      matches them BY NAME, which is the only way that is safe.
+  """
+  import esmfold2_dumps
+  from converters import esmfold2 as CV
+
+  io = esmfold2_dumps.module_io(model, tag='conf')
+  g = lambda k: np.asarray(io[k])[0]
+  nat = esmfold2_dumps.native(model)
+  f = {k[5:]: v[0] for k, v in nat.items() if k.startswith('feat.')}
+  ref_idx, our_flat = esmfold2_dumps.atom_map(batch, f)
+  print('  dump: %d tokens, %d packed atoms, %d matched by name'
+        % (g('in.z').shape[0], g('in.x_pred').shape[0], len(ref_idx)))
+
+  # s_inputs: 451 (ESM) -> 447 (ours), the permutation not a slice.
+  n_af3, n_esm = 31, 33
+  si451 = g('in.s_inputs')
+  cols = np.asarray(CV.esm_class_of_af3(n_af3))
+  s_inputs = np.zeros((si451.shape[0], 2 * n_af3 + 1 + 384), np.float32)
+  s_inputs[:, :n_af3] = si451[:, 384 + cols]
+  s_inputs[:, n_af3:2 * n_af3] = si451[:, 384 + n_esm + cols]
+  s_inputs[:, 2 * n_af3] = si451[:, 384 + 2 * n_esm]
+  s_inputs[:, 2 * n_af3 + 1:] = si451[:, :384]
+
+  # x_pred: packed -> our dense (token, slot). Unmatched slots stay zero and
+  # are masked out of every comparison.
+  x = g('in.x_pred')
+  pos_new = np.zeros_like(np.asarray(pos))
+  pos_new.reshape(-1, 3)[our_flat] = x[ref_idx]
+  _OVERRIDE['pos'] = pos_new
+
+  # The per-atom logits arrive on the packed axis too.
+  def dense(v, last):
+    out = np.zeros((n, max_atoms, last), np.float32)
+    out.reshape(-1, last)[our_flat] = v[ref_idx]
+    return out
+
+  ref = {
+      'pae': g('out.pae_logits'),
+      'pde': g('out.pde_logits'),
+      'plddt': dense(g('out.plddt_logits'), g('out.plddt_logits').shape[-1]),
+      'resolved': dense(g('out.resolved_logits'), 2),
+  }
+  # THE REPRESENTATIVE ATOM. ESMFold2 hands its head an explicit
+  # `distogram_atom_idx` per token; our head gathers the pseudo-beta. main
+  # asserts the two land on the SAME coordinates, which is the check that a
+  # geometry mismatch cannot hide behind a plausible correlation.
+  rep = x[np.asarray(g('in.distogram_atom_idx')).astype(int)]
+  # `s` is the single track, and ESMFold2 has none (PAIR_ONLY_TRUNK): its head
+  # reads z and s_inputs only. Zeros, matching what our head is handed.
+  s = np.zeros((n, 384), np.float32)
+  return ref, s_inputs, s, g('in.z'), rep
+
+
 NATIVES = {m: native_protenix for m in _PROTENIX_CKPT}
+NATIVES.update({m: native_esmfold2 for m in ('esmfold2', 'esmfold2_fast')})
 NATIVES.update({m: native_of3 for m in _OF3_CKPT})
 NATIVES['intellifold2'] = native_if2
 NATIVES['rosettafold3'] = native_rf3
@@ -738,6 +819,10 @@ def main(argv=None):
       args.model, seq, args.model_dir)
   ref, s_inputs, s, z, rep_native = NATIVES[args.model](
       args.model, batch, pos, rng, n, max_atoms)
+  # An adapter may REPLACE the positions: the esmfold2 cell is dump-driven, so
+  # both sides have to embed native's own sampled coordinates rather than this
+  # harness's synthetic ones.
+  pos = _OVERRIDE.get('pos', pos)
 
   # Which atom represents a token in the distance embedding is itself a
   # convention, and it differs: rosettafold3 uses the token-centre CA (dense
@@ -807,6 +892,24 @@ def main(argv=None):
   bw = 1.0 / p.shape[-1]
   _cmp('plddt', out['predicted_lddt'][:, :k],
        (p * np.arange(0.5 * bw, 1.0, bw)).sum(-1) * 100.0, amask)
+  if os.environ.get('DIAG'):
+    # PER-ATOM vs PER-TOKEN. A per-atom quantity can disagree two ways: the
+    # heads differ, or the two atom layouts are misaligned WITHIN a token. The
+    # per-token mean over matched atoms is invariant to the second, so if it
+    # correlates while the per-atom does not, the fault is the mapping.
+    _lo = (p * np.arange(0.5 * bw, 1.0, bw)).sum(-1) * 100.0
+    _og = np.asarray(out['predicted_lddt'][:, :k])
+    _w = amask.astype(np.float64)
+    _tn = (_lo * _w).sum(1) / np.maximum(_w.sum(1), 1)
+    _to = (_og * _w).sum(1) / np.maximum(_w.sum(1), 1)
+    print('  DIAG plddt per-TOKEN mean: corr %.6f  (per-atom corr above)'
+          % np.corrcoef(_to, _tn)[0, 1])
+    _i = int(np.argmax(_w.sum(1)))
+    print('  DIAG token %d, %d atoms: ours %s' % (
+        _i, int(_w[_i].sum()),
+        np.round(_og[_i][amask[_i]][:8], 1).tolist()))
+    print('  DIAG                      native %s' % (
+        np.round(_lo[_i][amask[_i]][:8], 1).tolist(),))
   res = ref['resolved'].reshape(n, -1, 2)[:, :k]
   pr = np.exp(res - res.max(-1, keepdims=True)); pr = pr / pr.sum(-1, keepdims=True)
   _cmp('resolved', out['predicted_experimentally_resolved'][:, :k],
