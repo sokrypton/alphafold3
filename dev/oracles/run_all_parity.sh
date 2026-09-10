@@ -335,7 +335,8 @@ fi
 if want L4; then
   echo "== L4 confidence head"
   for m in $MODELS; do
-    gate L4.confidence "$m" '^  (full_pae|plddt)' dev/oracles/confidence_parity.py "$m"
+    (export FLOOR=1e-6
+     gate L4.confidence "$m" '^  (full_pae|plddt)' dev/oracles/confidence_parity.py "$m")
   done
   # chai1's head has no standalone-constructible vendor module, but its verbatim
   # I/O was captured during the port -- nine inputs and three LOGIT tensors -- so

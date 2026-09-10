@@ -294,3 +294,25 @@ different measurement or something moved earlier and unnoticed. Do not treat
 c_in is 2.17e-04 and c_out is 16.0. So this compares almost pure network output
 at the one operating point where the coordinates barely enter. A re-dump at a
 mid-schedule sigma is the next measurement, and it needs the boltz venv.
+
+## confidence_parity's `ours()` is not idempotent (2026-09-10)
+
+Called twice in one process it builds a DIFFERENT head for some models. For
+opendde the first call builds 52 scopes and maps all of them; the second builds
+51 and cannot fill 66, and the names it cannot fill are stock-AF3
+(`confidence_head/~_embed_features/left_target_feat_project/weights`, ...)
+rather than opendde's own module's -- so the second build is the AF3 head, not
+opendde's.
+
+Found by adding FLOOR to the cell, which needs a second call. Consequences:
+
+  * opendde and any model with a bespoke head cannot have its confidence FLOOR
+    measured, so `L4.confidence` for opendde is graded on its number with no
+    resolution estimate. The gate now PRINTS "FLOOR UNAVAILABLE ... ours() is
+    not idempotent for this model" rather than dying or skipping silently.
+  * nothing else in the matrix calls `ours()` twice, so no existing number is
+    affected -- but any future two-call gate hits this.
+
+The fix is to build the head ONCE and apply it to two sets of inputs (the
+inputs are currently closed over inside `fwd()`), not to call `ours()` again.
+Not done here: it is a refactor of the gate's core and the level was mid-run.

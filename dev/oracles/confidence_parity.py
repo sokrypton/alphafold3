@@ -1023,6 +1023,37 @@ def main(argv=None):
   # (left + swap(left)), and LayerNorm makes those two different functions --
   # which is what the number below is measuring.
   pde_ref = expectation(ref['pde'], ccfg.max_error_bin, ccfg.num_bins)
+  # FLOOR -- how much of the CLOSE band here is resolvable at all? These heads
+  # sit on top of a 4-block pairformer fed s_inputs, s and z, and the outputs are
+  # EXPECTATIONS over softmaxed bins, so a small input shift can move an entry by
+  # a bin's worth. Perturb the injected inputs and see how far our own outputs
+  # move; parity_audit grades a row at or below its own floor as FLOOR.
+  eps = float(os.environ.get('FLOOR') or 0)
+  if eps and not _OVERRIDE.get('dump_driven'):
+    rngf = np.random.default_rng(1234)
+    pert = lambda x: (np.asarray(x)
+                      * (1 + eps * rngf.normal(size=np.shape(x)))).astype(
+                          np.asarray(x).dtype)
+    try:
+      out_p = ours(args.model, cfg, model_dir, batch, pos,
+                   pert(s_inputs), pert(s), pert(z))
+    except AssertionError as e:
+      # `ours()` IS NOT IDEMPOTENT for every model: called twice in one process
+      # it builds 51 scopes for opendde where the first call built 52, and the
+      # 66 it cannot fill are stock-AF3 names (`confidence_head/~_embed_features
+      # /...`) rather than opendde's own module's -- so the second build is a
+      # DIFFERENT head. Reported, never swallowed: a floor that cannot be
+      # measured has to look different from one that came out small.
+      print('  FLOOR UNAVAILABLE (%s): ours() is not idempotent for this model '
+            '-- see HOLES.md' % e)
+      out_p = None
+    if out_p is not None:
+      print('  FLOOR: our own outputs after a %g relative perturbation of the '
+            'injected s_inputs / s / z' % eps)
+      _cmp('full_pae_floor', out_p['full_pae'], out['full_pae'])
+      _cmp('full_pde_floor', out_p['full_pde'], out['full_pde'])
+      _OVERRIDE['floor_out'] = out_p
+
   _cmp('full_pae', out['full_pae'], pae_ref)
   _cmp('full_pde', out['full_pde'], pde_ref)
   # Compare on the slots both layouts have: of3 has 23, our dense layout 24.
@@ -1032,6 +1063,12 @@ def main(argv=None):
   amask = atom_mask[:, :k]
   p = np.exp(lddt - lddt.max(-1, keepdims=True)); p = p / p.sum(-1, keepdims=True)
   bw = 1.0 / p.shape[-1]
+  if _OVERRIDE.get('floor_out') is not None:
+    _f = _OVERRIDE['floor_out']
+    _cmp('plddt_floor', _f['predicted_lddt'][:, :k],
+         out['predicted_lddt'][:, :k])
+    _cmp('resolved_floor', _f['predicted_experimentally_resolved'][:, :k],
+         out['predicted_experimentally_resolved'][:, :k])
   _cmp('plddt', out['predicted_lddt'][:, :k],
        (p * np.arange(0.5 * bw, 1.0, bw)).sum(-1) * 100.0, amask)
   if os.environ.get('DIAG'):
