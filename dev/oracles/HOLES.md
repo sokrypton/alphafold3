@@ -390,3 +390,50 @@ asked for (it returns only the four head outputs).
 Note for whoever adds that: the L4 FLOOR knob's number is not the resolution of
 the embedding path. Perturbing the head's inputs and perturbing the stack's
 input measure different gains, and this cell has both.
+
+### ...and the protenix L4 residual is probably the reference's own float32
+
+Continuing the above. Every term of the BLOCKS=0 embedding path was checked by
+reading, and all of it matches:
+
+  * `linear_no_bias_s1` -> `left_target_feat_project` and `s2` -> `right`, which
+    is the right way round: native adds s1 on the COLUMN axis
+    (`[..., None, :, :]`) and s2 on the ROW axis (`[..., None, :]`), and ours
+    adds `left` then `right[:, None]`, the same orientation.
+  * both distance terms are present, including the unbinned
+    `linear_no_bias_d_wo_onehot` that carries the sub-bin resolution.
+  * the bin edges are identical: protenix's `arange(3.25, 52.0, 1.25)` is our
+    `linspace(3.25, 50.75, 39)`, 39 lower edges plus a catch-all. Ours compares
+    SQUARED distances against squared breaks, which is equivalent for positive
+    distances.
+  * the representative-atom positions are asserted bit-identical by the gate.
+  * protenix does NOT mask its distance terms where we do (`dgram *= pair_mask`),
+    but the gate feeds an all-ones mask, so that is inert HERE. It would matter
+    on a padded input, and no cell covers that.
+
+What is MEASURED:
+
+    the confidence stack, isolated      z 2.42e-05, s 2.06e-06  (exact)
+    its gain on its own input           6.9x - 8.8x, stable over 3 decades
+    pae at 4 blocks / pae at 0 blocks   2.30e-02 / 3.03e-03 = 7.6x  (the gain)
+    native's OWN fp32-vs-fp64 noise
+      through the embedding arithmetic  max 4.36e-03, p99.9 6.33e-05
+
+So our whole BLOCKS=0 gap (3.03e-03 max) is the same order as the reference's
+own float32 noise in that path (4.36e-03 max), and the 4-block number is that
+times an exact stack's gain.
+
+**CONSISTENT WITH, NOT ESTABLISHED.** Those two numbers are measured on
+different tensors (native's on z_embed at rms 8.16, ours on the pae expectation
+at rms 14.76), so the orders line up but the comparison is not apples to apples.
+The test that would settle it is native's whole head in fp32 against itself in
+fp64, compared on the same pae expectation -- attempted, and it dies in
+protenix's `primitives.LinearNoBias` with "expected m1 and m2 to have the same
+dtype" because the head has inputs it does not convert. Plumbing, not physics,
+but not done.
+
+**REVISION of what this file said an hour earlier.** "protenix2 -> REAL, four
+orders above its own floor" was read off the FLOOR knob, which perturbs
+s_inputs/s/z upstream of the embedding and therefore measures the wrong gain.
+Read against the arithmetic floor of the path instead, these rows are at or near
+it. Treat them as precision-limited unless the fp64 test says otherwise.
