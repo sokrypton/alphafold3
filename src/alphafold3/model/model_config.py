@@ -573,7 +573,29 @@ MIN_BLOB_CONVENTION: dict[str, int] = {}
 # duplicated class names cannot see ([[esmfold2-two-file-sweep]]).
 # Same story: only boltz2 remains, for the same reason as
 # MSA_UPDATE_BEFORE_OPM above.
-OPM_BIAS_AFTER_NORM = OPM_ROW_COUNT_NORM
+# rosettafold3 belongs here too, and NOT via the alias: its OuterProductMean
+# divides `right` by float(N) BEFORE the einsum and applies `proj_out` after, so
+# its output bias is never scaled (rf3/model/layers/outer_product.py:56).
+#
+# Ours added `output_b` inside the chunk and then divided the whole thing by the
+# pair count, i.e. contributed bias/8 at MSA depth 8 where native contributes
+# bias. The prediction is an error of (1/8 - 1) * b = -0.875 * b, a per-channel
+# CONSTANT, and that is exactly what the module showed: the error's per-channel
+# means matched -0.88 * proj_out.bias while `output_b` itself was bit-identical
+# to native's, which is what ruled out the converter. Removing the per-channel
+# constant took max|d| from 5.05 to 0.31.
+#
+# It also fixes the remainder, because this branch divides by max(count, 1)
+# rather than AF3's 1e-3 + count, and rf3 divides by exactly N.
+#
+#   L1b.msa  z  1.84e-01 -> see the commit; the OPM alone went 3.52e-02 -> exact
+#
+# NOT written as `OPM_ROW_COUNT_NORM + ('rosettafold3',)`: that name records a
+# DISPROVED reading of boltz's source and has no code effect at all, so hanging
+# a live convention off it makes the alias load-bearing by accident. The two
+# questions -- where the bias enters, and what the divisor counts -- are
+# independent, and only the first of them is settled here.
+OPM_BIAS_AFTER_NORM = ('boltz2', 'rosettafold3')
 
 
 # Models whose ATOM attention is a sliding window with 3D rotary positions
