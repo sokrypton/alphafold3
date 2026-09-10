@@ -416,7 +416,12 @@ def native_boltz2(model, batch, rng, n, noise):
     # LongTensor"). Only `mol_type` is compared rather than indexed.
     feats[k] = torch.tensor(np.asarray(getattr(tf, k)).astype(np.int64))[None]
   feats['mol_type'] = torch.zeros(1, n, dtype=torch.long)
-  rp = RelativePositionEncoder(token_z=token_z)
+  # FROM THE CHECKPOINT, not the class defaults -- see trunk_init_parity.py.
+  # `fix_sym_check` is True here and changes the encoding even on a monomer.
+  _hp = raw.get('hyper_parameters', {}) if isinstance(raw, dict) else {}
+  _fx = bool(_hp.get('fix_sym_check', False)) and not os.environ.get('B2_NO_SYM_FIX')
+  print('  native RelativePositionEncoder(fix_sym_check=%s)' % _fx)
+  rp = RelativePositionEncoder(token_z=token_z, fix_sym_check=_fx)
   rp.load_state_dict(sub_r, strict=False)
   rp.eval()
   with torch.no_grad():

@@ -380,10 +380,34 @@ MASK_ATOM_ACT_PER_BLOCK = ('chai1', 'intellifold2')
 # with the trunk exact, something in the diffusion or the sampler turns a
 # correct pair representation into a worse structure on this target ~10% of the
 # time. The loop gate is the tool for the next model that shows this.
+# boltz2 LEFT this list on 2026-09-10, on the checkpoint's own evidence. Its
+# hyper_parameters carry `fix_sym_check: True`, and that flag IS this
+# convention: boltz's RelativePositionEncoder sentinels on `~b_same_entity` when
+# it is set and on `b_same_chain` when it is not (encodersv2.py:102). True means
+# the ENTITY bucket, which is AF3's.
+#
+# It looked settled the other way because the GATES built native's encoder with
+# the class default (False) rather than the checkpoint's value, so a port bug and
+# an oracle bug cancelled: L1i read 2.77e-06 with both wrong, and L4 -- where our
+# confidence head already used the entity convention via
+# `featurization.create_relative_encoding` -- blew up to pae 1.88e+00 with only
+# the oracle wrong. Against a correctly built native:
+#
+#   trunk z_init    chain bucket  corr 0.954268  max|d|/rms 6.50e-01
+#                   ENTITY        corr 1.000000  max|d|      0.00001
+#
+# The flag is not inert on a monomer, which is what made this findable at all:
+# on 6MRR's own features the two settings differ by max|d| 0.164.
+# AF3_BOLTZ2_CHAIN_BUCKET=1 puts boltz2 back on the chain bucket, for the A/B.
 CHAIN_BUCKET_ON_SAME_CHAIN = (
-    (() if __import__('os').environ.get('AF3_BOLTZ2_TRUNK_ENTITY_BUCKET')
-     else ('boltz2',)) + ESMFOLD2_FAMILY)
-CHAIN_BUCKET_ON_SAME_CHAIN_DIFFUSION = ('boltz2',) + ESMFOLD2_FAMILY
+    (('boltz2',) if __import__('os').environ.get('AF3_BOLTZ2_CHAIN_BUCKET')
+     else ()) + ESMFOLD2_FAMILY)
+# ...and out of the diffusion list too, for the same reason and by the same
+# measurement: with native built at the checkpoint's flag, boltz2's
+# diffusion pair_cond read 1.71e+00 on the chain bucket.
+CHAIN_BUCKET_ON_SAME_CHAIN_DIFFUSION = (
+    (('boltz2',) if __import__('os').environ.get('AF3_BOLTZ2_CHAIN_BUCKET')
+     else ()) + ESMFOLD2_FAMILY)
 
 
 # boltz2's atom cross-attention builds its keys by gathering the ALREADY

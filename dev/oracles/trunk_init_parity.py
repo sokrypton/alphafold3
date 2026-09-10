@@ -61,7 +61,16 @@ def native_boltz2(model, batch, s_inputs, bonds, bond_types, n):
            for k in ('asym_id', 'residue_index', 'entity_id', 'token_index',
                      'sym_id')}
   feats['mol_type'] = torch.zeros(1, n, dtype=torch.long)
-  rp = RelativePositionEncoder(token_z=token_z)
+  # FROM THE CHECKPOINT, not the class defaults: `fix_sym_check` defaults False
+  # and is True in this checkpoint, and it changes the encoding even on a
+  # MONOMER (max|d| 0.164 on 6MRR's features). Building native at the default
+  # compares against a model this checkpoint never was -- which is exactly how
+  # boltz2's L4 gap hid. B2_NO_SYM_FIX=1 restores the old (wrong) construction
+  # for the A/B.
+  _hp = raw.get('hyper_parameters', {}) if isinstance(raw, dict) else {}
+  _fx = bool(_hp.get('fix_sym_check', False)) and not os.environ.get('B2_NO_SYM_FIX')
+  print('  native RelativePositionEncoder(fix_sym_check=%s)' % _fx)
+  rp = RelativePositionEncoder(token_z=token_z, fix_sym_check=_fx)
   rp.load_state_dict({k[len('rel_pos.'):]: v for k, v in sd.items()
                       if k.startswith('rel_pos.')}, strict=False)
   rp.eval()

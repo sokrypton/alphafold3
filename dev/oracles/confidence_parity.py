@@ -713,7 +713,19 @@ def native_boltz2(model, batch, pos, rng, n, max_atoms):
       add_z_input_to_z=cm.get('add_z_input_to_z', False),
       bond_type_feature=bond_type, maximum_bond_distance=max_bond,
       confidence_args=cm.get('confidence_args'),
-      conditioning_cutoff_min=4.0, conditioning_cutoff_max=20.0)
+      conditioning_cutoff_min=4.0, conditioning_cutoff_max=20.0,
+      # FROM THE CHECKPOINT'S OWN hyper_parameters, not ConfidenceModule's
+      # defaults. Both default False there and are True in this checkpoint, and
+      # they change the RELATIVE POSITION ENCODING -- so leaving them unpassed
+      # builds a native this checkpoint never was.
+      #
+      # This was the WHOLE of boltz2's L4 gap (2026-09-10). Our rel_pos matches
+      # native BIT-EXACTLY (max|d| 0.00000) once the flags are right; with them
+      # wrong it reads corr 0.809, and that term's max|d| 0.67429 and
+      # per-channel constant 0.2211 were to the digit the entire re-embedding
+      # error, and therefore the entire cell.
+      fix_sym_check=hp.get('fix_sym_check', False),
+      cyclic_pos_enc=hp.get('cyclic_pos_enc', False))
   missing, unexpected = net.load_state_dict(sub, strict=False)
   print('  native: %d missing, %d unexpected %s%s'
         % (len(missing), len(unexpected), list(missing)[:3],
@@ -782,6 +794,8 @@ def native_boltz2(model, batch, pos, rng, n, max_atoms):
           torch.zeros(1, n, n, dtype=torch.long), 5).float(),
       'contact_threshold': torch.zeros(1, n, n),
       'target_pair_mask': None,
+      # `cyclic_pos_enc` reads this; absent, the encoder KeyErrors.
+      'cyclic_period': torch.zeros(1, n),
   }
   with torch.no_grad():
     out = net(s_inputs=t(s_inputs)[None], s=t(s_tr)[None], z=t(z)[None],
