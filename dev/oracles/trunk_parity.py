@@ -634,6 +634,30 @@ def main(argv=None):
   s_out, z_out = ours(args.model, s, z, mask, nb, args.model_dir)
   _cmp('s', s_out, s_ref)
   _cmp('z', z_out, z_ref)
+
+  # FLOOR -- does this cell have any RESOLUTION at this depth?
+  #
+  # Four models read BAD or LOOSE at 48 blocks and PARITY at one, and the easy
+  # story is the amplifier the --blocks help text describes. But intellifold2
+  # fit that same pattern exactly and turned out to be bf16 weight storage
+  # (2026-09-10), so the pattern is not evidence. This measures the claim
+  # instead: perturb the INPUT by a relative epsilon and see how far the OUTPUT
+  # moves. If a 1e-6 input shift moves the output as much as our port does, the
+  # cell cannot resolve a port bug of that size and the reading is not one.
+  #
+  # This is the replicate-floor method [[rf3-ligand-gap]] applied to a module
+  # rather than to a fold: compare the gate against ITSELF before believing a
+  # number it produces.
+  eps = float(os.environ.get('FLOOR') or 0)
+  if eps:
+    rng = np.random.default_rng(1234)
+    sp = s * (1 + eps * rng.normal(size=s.shape)).astype(np.float32)
+    zp = z * (1 + eps * rng.normal(size=z.shape)).astype(np.float32)
+    s_p, z_p = ours(args.model, sp, zp, mask, nb, args.model_dir)
+    print('  FLOOR: our own output after a %g relative input perturbation --'
+          ' anything at or below this is unresolvable at %d blocks' % (eps, nb))
+    _cmp('s_floor', s_p, s_out)
+    _cmp('z_floor', z_p, z_out)
   return 0
 
 
