@@ -437,3 +437,59 @@ orders above its own floor" was read off the FLOOR knob, which perturbs
 s_inputs/s/z upstream of the embedding and therefore measures the wrong gain.
 Read against the arithmetic floor of the path instead, these rows are at or near
 it. Treat them as precision-limited unless the fp64 test says otherwise.
+
+## boltz2's L4 is the pair RE-EMBEDDING, at 2.66e-02 (2026-09-10)
+
+The BLOCKS sweep says where it is not:
+
+    BLOCKS=0   pae 2.66e-02   pde 9.97e-02   plddt 2.66e-07  (plddt EXACT)
+    BLOCKS=1   pae 2.14e-01   pde 4.23e-01   plddt 9.96e-02
+    BLOCKS=4   pae 5.97e-01   pde 1.24e+00   plddt 1.70e-01
+
+plddt is exact with no pairformer because it never reads the pair; one block
+mixes the pair into the single track and it inherits the error. So the whole of
+L4 for boltz2 follows from the pair re-embedding being wrong by 2.66e-02, and
+[[boltz2-confidence-port]]'s "re-embedding right at 2.66e-02" is exactly this
+number. The "~2e-01 per block" in the same note is the amplification, not a
+per-block bug.
+
+THE STACK IS EXACT. Isolated on the same synthetic input, built the way the gate
+builds it (through ConfidenceModule, whose PairformerModule differs from the one
+you get by importing it directly -- see below): all 8 blocks, 0 unmapped,
+z 3.59e-05, s 1.80e-05, corr 1.00000000.
+
+ELIMINATED by reading, term by term against confidencev2.py:
+
+  * every term is present in our `_boltz2_reembed`: s_inputs_norm, s_norm +
+    s_input_to_s, z_norm, rel_pos, token_bonds, token_bonds_type,
+    contact_conditioning, s_to_z / s_to_z_transpose, s_to_z_prod, distogram.
+  * the s_to_z ORIENTATION is already right and already commented: boltz's
+    `s_to_z(s)[:, :, None, :]` is indexed by i, which is our RIGHT projection,
+    and `s_to_z_transpose` is our LEFT. The prod term's axes match too
+    (in1 -> row, in2 -> column).
+  * the distance bins match: boltz `linspace(2, max_dist=22, 63)` with
+    `(d > boundaries).sum(-1)` into an nn.Embedding; ours the same 63 edges,
+    one-hot into a Linear. Ours masks by pair_mask and boltz does not, which is
+    inert on the all-ones mask the gate feeds (and live on a padded input --
+    same unchecked case as protenix's distance terms).
+  * the `contact_conditioning` PLACEHOLDER is faithful, which was worth
+    checking because our featuriser has no distance-restraint field: boltz
+    initialises `contact_threshold` to ZEROS and only writes `max_distance`
+    where a constraint exists (featurizerv2.py:714), and its module drops the
+    first two conditioning classes (UNSPECIFIED, UNSELECTED) before use. So an
+    unconstrained input contributes nothing through either, which is what the
+    placeholder supplies.
+  * the three `add_*` flags are all True in this checkpoint, so native runs
+    every branch we run.
+
+NEXT MEASUREMENT: a term-by-term numerical diff of the re-embedding -- compute
+native's z after `contact_conditioning`/`s_to_z`/`distogram` and ours, and
+subtract. Everything above was established by READING, and every finding today
+that survived came from a number instead.
+
+TRAP, for whoever writes that probe: `from boltz.model.layers.pairformer import
+PairformerModule` and `ConfidenceModule(...).pairformer_stack` are NOT the same
+module here. Constructing it directly with the checkpoint's own
+`pairformer_args` asks for `attention.norm_s` (16 tensors the checkpoint does
+not have) while ConfidenceModule's build asks for `pre_norm_s` and loads clean.
+Build it through ConfidenceModule, as the gate does. [[three-code-copies]].
