@@ -695,7 +695,11 @@ class CrossAttTransformer(hk.Module):
       # divergence as the trunk's MSA block, one level down -- and with every
       # input to this stack now exact (atom_query / atom_cond / atom_pair all
       # 1.000000) it is the only thing left that can move atom_repr off 0.9930.
-      if chai:
+      if self.global_config.model in model_config.MASK_ATOM_ACT_PER_BLOCK:
+        # ...and IntelliFold-2 lands here for a different reason: it re-pads its
+        # atom axis with ZEROS inside every attention call, so a padded slot can
+        # never carry a previous block's output into the next block's KEY
+        # gather. See model_config.MASK_ATOM_ACT_PER_BLOCK.
         queries_act = queries_act * queries_mask[..., None].astype(
             queries_act.dtype)
       block_in = queries_act

@@ -553,6 +553,18 @@ _FEATURISE = {
     # edge to the atom count rounded up to a whole query block, which is what
     # if2's own reshape-into-windows forces.
     'intellifold2': dict(qblock_keys=bool(__import__('os').environ.get('IF2_QBLOCK'))),
+    # IntelliFold-2's atom key window edge is the atom count ROUNDED UP to a
+    # whole query block, because it reshapes the flat atom axis into windows
+    # (`b (n w) -> b n w`) and must pad to a multiple of 32 first -- so its last
+    # two blocks take keys 448..575 on 6MRR where AF3's slide gives 446..573.
+    #
+    # This is only half of what if2's atom encoder needed; the other half is the
+    # KEY-SIDE MASK (model_config.KEY_MASKED_ATOM_ATTENTION). With the window
+    # aligned and the mask wrong, block 1 read 9.5e-03 and blocks 2-3 blew up on
+    # windows 16 and 17 ALONE. With both, the whole encoder is exact at full
+    # depth: a_token 2.33e-05, q_atom 1.23e-05, every window at the numerical
+    # floor.
+    'intellifold2': dict(qblock_keys=True),
     # rf3 (atomworks) renames atomised atoms to their ELEMENT symbol, carries
     # chirality features, aligns restypes to its own alphabet, and calls an
     # atomised polymer token UNKNOWN where AlphaFold 3 keeps the parent residue

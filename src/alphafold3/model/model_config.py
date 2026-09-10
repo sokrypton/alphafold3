@@ -281,6 +281,24 @@ PROTENIX_FAMILY = ('protenix1', 'protenix2')
 RAW_REF_CHARGE = ('chai1', 'boltz2', 'rosettafold3') + ESMFOLD2_FAMILY
 
 
+# Whose atom transformer sees ZEROS in the padded atom slots at the top of EVERY
+# block, rather than whatever the previous block left there.
+#
+# IntelliFold-2 pads its flat atom axis INSIDE each attention call
+# (`pad_at_dim(a_row, ..., value=0.)` in `forward_local`), so every block starts
+# from a freshly zero-padded activation. Our stack pads once, carries the
+# activation through the layer_stack, and a masked QUERY still produces an
+# output -- which the next block then GATHERS as a key. chai-1 re-masks for its
+# own reason (a parallel block that reads the masked activation twice) and lands
+# in the same place.
+#
+# The signature is unmistakable and took a pair gate to see: with if2's window
+# alignment fixed, its atom pair is EXACT on every window (3.98e-06) and block 1
+# is 9.5e-03, while blocks 2 and 3 blow up on windows 16 and 17 ALONE -- the two
+# whose key sets reach past the last real atom into our padding.
+MASK_ATOM_ACT_PER_BLOCK = ('chai1', 'intellifold2')
+
+
 # Whose relative-CHAIN bucket is keyed on same-CHAIN, sending the MATCH to the
 # pad class, rather than on same-ENTITY sending the MISMATCH there.
 #
@@ -427,8 +445,15 @@ PER_BLOCK_PAIR_LAYER_NORM = (
 # above). It was found by `model_registry_test.test_padded_key_windows_imply_
 # the_or_mask` the moment boltz2 gained the `padded_keys` knob, which is what
 # that test is for.
+# intellifold2 masks the key side too: `forward_local` pads `single_mask` with
+# zeros, windows it with the same duplicated-edge construction as the keys, and
+# `_prep_inputs_local` turns that into the attention bias -- so a padded key is
+# excluded from EVERY query, not only from a padded one. It has no
+# `padded_keys` knob (its window policy is a third one: the edge windows are
+# DUPLICATED), which is why the registry test that caught boltz2 did not fire
+# here. The mask convention is independent of the window policy.
 KEY_MASKED_ATOM_ATTENTION = (
-    ('rosettafold3', 'opendde', 'boltz2') + PROTENIX_FAMILY)
+    ('rosettafold3', 'opendde', 'boltz2', 'intellifold2') + PROTENIX_FAMILY)
 
 
 # Models that recycle through a linear STATE-SPACE step instead of an addition.
