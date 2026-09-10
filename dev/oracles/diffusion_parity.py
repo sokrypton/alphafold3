@@ -524,6 +524,28 @@ def main(argv=None):
   a, s, z, ref, _nb = NATIVES[args.model](args.model, args.tokens)
   out = ours(args.model, a, s, z, args.model_dir)
   _cmp('a', out, ref)
+
+  # FLOOR -- does this cell have any RESOLUTION? Same knob and same reasoning as
+  # `trunk_parity`: perturb the INPUT by a relative epsilon and see how far our
+  # own OUTPUT moves. Anything at or below that is unresolvable, and
+  # `parity_audit` grades such a row FLOOR rather than CLOSE or BAD.
+  #
+  # It is here because the three cells that were not at parity -- openfold3
+  # 3.95e-03, boltz2 1.92e-03, openbind0 1.81e-03 -- are exactly the models
+  # whose activations on this gate's synthetic input are largest (rms(native)
+  # 1021 and 590, against 18.2 for opendde at 5.32e-05). That pattern already
+  # turned out to be resolution rather than a port bug for the trunk, twice,
+  # and it has to be MEASURED rather than argued from the resemblance.
+  eps = float(os.environ.get('FLOOR') or 0)
+  if eps:
+    rng = np.random.default_rng(1234)
+    pert = lambda x: (np.asarray(x)
+                      * (1 + eps * rng.normal(size=np.shape(x)))).astype(
+                          np.asarray(x).dtype)
+    out_p = ours(args.model, pert(a), pert(s), pert(z), args.model_dir)
+    print('  FLOOR: our own output after a %g relative input perturbation --'
+          ' anything at or below this is unresolvable here' % eps)
+    _cmp('a_floor', out_p, out)
   return 0
 
 

@@ -290,7 +290,17 @@ fi
 # --- L2: the three parts, which is why the level table reads `~` ----------
 if want L2; then
   echo "== L2 token diffusion transformer"
-  for m in $MODELS; do gate L2.diffusion "$m" '^  a ' dev/oracles/diffusion_parity.py "$m"; done
+  # FLOOR here for the same reason as the trunk cells: the three models that
+  # were not at parity (openfold3 3.95e-03, boltz2 1.88e-03, openbind0
+  # 1.81e-03) are the ones with the largest activations on this gate's
+  # synthetic input, and all three sit BELOW what a 1e-6 input perturbation
+  # does (6.88e-03, 3.98e-03, 1.31e-02). opendde, whose activations are 30-60x
+  # smaller, is resolved at 4.53e-05 against a 7.65e-05 floor -- so the cell
+  # discriminates, it just cannot discriminate for those three.
+  for m in $MODELS; do
+    (export FLOOR=1e-6
+     gate L2.diffusion "$m" '^  a ' dev/oracles/diffusion_parity.py "$m")
+  done
   echo "== L2 diffusion conditioning"
   for m in $MODELS; do gate L2.conditioning "$m" 'corr' dev/oracles/conditioning_parity.py "$m"; done
   echo "== L2 atom cross-attention encoder"
