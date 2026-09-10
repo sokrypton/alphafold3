@@ -57,41 +57,49 @@ policy, and measured fold-neutral where that policy is set. Rounding native to
 the blob's dtype gives 3.79e-06. Only `alphafold3` and `intellifold2` store bf16
 at all, so nothing else in the panel can hit it.
 
-# The esmfold2 confidence head: the cell runs, and it disagrees
+# The esmfold2 confidence head: two port bugs, then native's own bf16
 
 The only esmfold2 module `esmfold2_reference` does not implement, so the only
-one that needs a native run. `esmfold2_oracle_6mrr.py` hooks `confidence_head`
-with `with_kwargs=True` (it is called with keywords only) and parks 11 inputs
-and 14 outputs; the gate injects z, s_inputs and x_pred so both sides run on the
-tensors native actually used.
+one needing a native run. The dump hooks make it possible: 11 inputs and 14
+outputs, with z, s_inputs and x_pred injected so both sides run on the tensors
+native used.
 
-What is SOUND about the setup, so the numbers are not dismissed:
+TWO REAL BUGS, and the pattern in the numbers is what found each:
 
-  * 573 of 574 atoms match BY NAME (`esmfold2_dumps.atom_map`); the odd one is
-    the terminal OXT, which ESMFold2's PROTEIN_HEAVY_ATOMS table has never had.
-  * the representative-atom assert passes BIT-EXACTLY (0.00e+00): ESMFold2 hands
-    its head an explicit `distogram_atom_idx` and our head gathers the
-    pseudo-beta, and they land on the same coordinates.
-  * native is self-consistent: its `plddt_logits` reduce to its own
-    `plddt_per_atom` at corr 1.000000 through the same 50-bin expectation the
-    gate uses, so the bin convention is not in question.
+  1. THE SINGLE WAS POOLED FROM THE WRONG PAIR. ESMFold2 has no trunk single;
+     its confidence head builds one by ROW-ATTENTION POOLING the pair -- and it
+     pools the pair its FOLDING TRUNK HAS ALREADY UPDATED
+     (`pair.add_(folding_trunk(pair)); single = row_attention_pooling(pair)`).
+     Ours pooled the pre-stack pair. Every PAIR-derived output was close
+     (pae 0.9947) and every PER-ATOM one uncorrelated, because plddt and
+     resolved are the only heads that read the single:
+         plddt     0.1059 -> 0.9883    resolved  0.3748 -> 0.9862
+  2. IT DOES NOT SYMMETRISE ITS PDE. AF3 symmetrises the logits
+     (`left + swap(left)`), protenix the pair inside the LayerNorm, boltz2 first
+     and then splits by chain; ESMFold2 does none of it -- `pde_head(pde_ln(pair))`,
+     its PAE head with different weights (`model_config.UNSYMMETRISED_PDE`).
+     Ours came out 2.6x small, which is what summing a logit with its transpose
+     does to an expectation:
+         full_pde  0.9017 / rms 0.389 -> 0.9935 / rms 1.008
 
-What disagrees:
+WHAT IS LEFT is native's own precision, traced rather than assumed. Its trunk
+runs under `autocast(bfloat16)`, so the `relative_position_encoding` the dump
+carries is a bf16 computation: recomputing it in fp32 from the SAME feature and
+the SAME weight -- our converted `rel_pos_project` is the checkpoint's
+`rel_pos.embed.weight` transposed to max|d| 0.000000 -- differs by 1.74e-02,
+which the folding trunk then amplifies. Running OUR head in bf16 (`BF16=all`,
+new knob) changes nothing, because rounding our weights is not the same as
+reproducing native's accumulation.
 
-    full_pae   corr 0.9947 / 5.68e-01      esmfold2      (0.9948 / 5.23e-01 fast)
-    full_pde   corr 0.9017 / 1.39e+00                    (0.8335 / 1.53e+00)
-    plddt      corr 0.1059 / 1.10e+00                    (0.0893 / 1.02e+00)
-    resolved   corr 0.3748 / 9.92e-01                    (0.1833 / 7.51e-01)
+    esmfold2       pae 0.9947  pde 0.9935  plddt 0.9883  resolved 0.9862
+    esmfold2_fast  pae 0.9948  pde 0.9864  plddt 0.9684  resolved 0.9269
 
-The PAIR-derived outputs are close and the PER-ATOM ones are not, which is the
-shape of the answer. `DIAG=1` adds a per-TOKEN mean, which is invariant to a
-within-token slot misalignment: it reads corr 0.0378, so the mapping is NOT the
-fault. Our per-atom values are far too low (token 1: ours 15.8 / 15.3 / 15.2
-against native 59.8 / 59.2 / 61.9), so the next thing to check is the per-atom
-path itself -- for a PAIR_ONLY_TRUNK model our head builds its single by
-ROW-ATTENTION POOLING the pair (`confidence_head.py:310`), which is the one
-piece of ESMFold2 with no AF3 analogue and the only input to plddt that pae does
-not share.
+Three things say the setup is sound, so those numbers are a precision floor and
+not a hidden gap: 573 of 574 atoms match BY NAME (the odd one is the terminal
+OXT, absent from ESMFold2's atom table); the representative-atom assert passes
+BIT-EXACTLY, ESMFold2's explicit `distogram_atom_idx` landing on the same
+coordinates as our pseudo-beta gather; and native's plddt_logits reduce to its
+own plddt_per_atom at corr 1.000000 through the gate's own 50-bin expectation.
 
 # The gate that measures an amplifier
 

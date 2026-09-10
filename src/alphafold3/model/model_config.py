@@ -281,6 +281,21 @@ PROTENIX_FAMILY = ('protenix1', 'protenix2')
 RAW_REF_CHARGE = ('chai1', 'boltz2', 'rosettafold3') + ESMFOLD2_FAMILY
 
 
+# Whose PDE head reads the pair AS IT IS -- no symmetrisation anywhere.
+#
+# AlphaFold 3 projects the pair and symmetrises the LOGITS
+# (`left + swap(left)`); protenix symmetrises the PAIR inside the LayerNorm
+# (PRE_SYMMETRISED_PDE); boltz2 symmetrises first and then splits by chain.
+# ESMFold2 does NONE of it: `pde_logits = pde_head(pde_ln(pair))`, exactly like
+# its PAE head (modeling_esmfold2.py ConfidenceHead.forward).
+#
+# Worth full_pde rms 0.389 of native's at corr 0.9017 -- ours came out 2.6x
+# small, which is what summing a logit with its transpose does to an
+# expectation. PAE was already close (0.9947) because nothing symmetrises it on
+# either side, and that contrast is what pointed here.
+UNSYMMETRISED_PDE = ESMFOLD2_FAMILY
+
+
 # Whose atom transformer sees ZEROS in the padded atom slots at the top of EVERY
 # block, rather than whatever the previous block left there.
 #

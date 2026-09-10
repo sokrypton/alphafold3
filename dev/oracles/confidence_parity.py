@@ -752,7 +752,12 @@ def ours(model, cfg, model_dir, batch, pos, s_inputs, s, z):
   from alphafold3.model import params as afp
   from alphafold3.model.network import confidence_head, evoformer as ev
 
-  cfg.global_config.bfloat16 = 'none'
+  # BF16=all runs OUR head in bfloat16. ESMFold2's own head casts its folding
+  # trunk with `autocast(dtype=torch.bfloat16)` whenever the pair is on a GPU
+  # (modeling_esmfold2.py ConfidenceHead.forward), and the dump was produced on
+  # one -- so for that family the fp32 default compares two different
+  # precisions, not two implementations.
+  cfg.global_config.bfloat16 = os.environ.get('BF16', 'none')
   nb = os.environ.get('BLOCKS')
   nb = None if nb is None else int(nb)
   if nb is not None:

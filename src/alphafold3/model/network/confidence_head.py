@@ -307,19 +307,12 @@ class ConfidenceHead(hk.Module):
       single_act = embeddings['single'].astype(dtype)
       target_feat = embeddings['target_feat'].astype(dtype)
 
-      if self.global_config.model in model_config.PAIR_ONLY_TRUNK:
-        # No trunk single exists, so there is nothing to read: ESMFold2 builds
-        # its single by ROW-ATTENTION POOLING the pair -- softmax over j of a
-        # learned scalar per (i, j), then a projection. This is the one piece of
-        # ESMFold2 with no AF3 analogue, and it is here rather than in the trunk
-        # because the pair it pools is the confidence head's own re-embedded
-        # pair, not the trunk's.
-        scores = hm.Linear(1, name='row_pool_attn')(pair_act)[..., 0]
-        scores = jnp.where(seq_mask_cast[None, :] > 0, scores, -1e9)
-        single_act = hm.Linear(
-            single_act.shape[-1], name='row_pool_out')(
-                jnp.einsum('nm,nmd->nd', jax.nn.softmax(scores, axis=-1), pair_act))
-
+      # ESMFold2's single is ROW-POOLED FROM THE PAIR, and it happens AFTER the
+      # pairformer -- see `_row_pool` and its call site below the stack. It used
+      # to be done here, on the pre-pairformer pair, which left every PAIR-derived
+      # output close (pae corr 0.9947) and every PER-ATOM one uncorrelated
+      # (plddt 0.1059, our values ~4x too low), because plddt and resolved are
+      # the only heads that read the single.
       if self.global_config.model in model_config.PROTENIX_FAMILY:
         # Protenix LayerNorms (and clamps) the trunk single before ANY use -- the
         # confidence pairformer and every head see the normalised one
@@ -394,6 +387,21 @@ class ConfidenceHead(hk.Module):
 
       pair_act, single_act = pairformer_stack((pair_act, single_act))
       pair_act = pair_act.astype(jnp.float32)
+      if self.global_config.model in model_config.PAIR_ONLY_TRUNK:
+        # No trunk single exists, so there is nothing to read: ESMFold2 builds
+        # its single by ROW-ATTENTION POOLING the pair -- softmax over j of a
+        # learned scalar per (i, j), then a projection -- and it pools the pair
+        # THE FOLDING TRUNK HAS ALREADY UPDATED:
+        #     pair.add_(folding_trunk(pair)); single = row_attention_pooling(pair)
+        # (modeling_esmfold2.py ConfidenceHead.forward). Pooling the pre-stack
+        # pair instead is a different function, and the heads that read the
+        # single are the only ones that can see it.
+        scores = hm.Linear(1, name='row_pool_attn')(pair_act)[..., 0]
+        scores = jnp.where(seq_mask_cast[None, :] > 0, scores, -1e9)
+        single_act = hm.Linear(
+            single_act.shape[-1], name='row_pool_out')(
+                jnp.einsum('nm,nmd->nd', jax.nn.softmax(scores, axis=-1),
+                           pair_act))
       assert pair_act.shape == (num_residues, num_residues, num_pair_channels)
 
       # Produce logits to predict a distogram of pairwise distance errors
@@ -428,10 +436,15 @@ class ConfidenceHead(hk.Module):
             initializer=self.global_config.final_init,
             name='left_half_distance_logits',
         )(self._head_norm('logits_ln', pair_act))
-        right_distance_logits = left_distance_logits
-        distance_logits = left_distance_logits + jnp.swapaxes(  # Symmetrize.
-            right_distance_logits, -2, -3
-        )
+        if self.global_config.model in model_config.UNSYMMETRISED_PDE:
+          # ESMFold2 does not symmetrise at all -- its PDE head is its PAE head
+          # with different weights. See model_config.UNSYMMETRISED_PDE.
+          distance_logits = left_distance_logits
+        else:
+          right_distance_logits = left_distance_logits
+          distance_logits = left_distance_logits + jnp.swapaxes(  # Symmetrize.
+              right_distance_logits, -2, -3
+          )
       # Shape (num_bins,)
       distance_breaks = jnp.linspace(
           0.0, self.config.max_error_bin, self.config.num_bins - 1
