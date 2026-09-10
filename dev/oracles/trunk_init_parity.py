@@ -212,7 +212,84 @@ def native_boltz2_loop(model, batch, s_inputs, bonds, bond_types, n, passes):
   return np.asarray(s)[0], np.asarray(z)[0]
 
 
-NATIVES = {'boltz2': native_boltz2}
+_OURS = {}
+
+
+def native_rf3(model, batch, s_inputs, bonds, bond_types, n):
+  """-> z_init from RoseTTAFold3's own `FeatureInitializer`, on OUR features.
+
+  Three lines of its forward, and the middle one is the trap:
+
+      Z = to_z_init_i(S).unsqueeze(-3) + to_z_init_j(S).unsqueeze(-2)
+      Z = Z + relative_position_encoding(f)
+      Z = Z + process_token_bonds(f["token_bonds"][..., None])
+
+  `unsqueeze(-3)` broadcasts along the ROW axis, so `to_z_init_i` is the COLUMN
+  embedder and `to_z_init_j` the ROW one -- the opposite of what the names say.
+  `converters/rosettafold3.py` already crosses them for that reason; this gate
+  is what can prove it, since a transposed pair init is invisible on a symmetric
+  input and this one is not symmetric.
+  """
+  import torch
+
+  from rf3.model.layers.pairformer_layers import RelativePositionEncoding
+
+  ckpt = os.path.expanduser(
+      '~/rf3_weights/rf3_foundry_01_24_latest_remapped.ckpt')
+  raw = torch.load(ckpt, map_location='cpu', weights_only=False)['model']
+  pre = 'shadow.feature_initializer.'
+  g = lambda k: raw[pre + k]
+  t = lambda x, d=torch.float32: torch.tensor(np.asarray(x), dtype=d)
+  lin = lambda w, x: torch.nn.functional.linear(x, g(w))
+
+  c_z, c_s_inputs = g('to_z_init_i.weight').shape
+  print('  checkpoint: c_z %d, c_s_inputs %d' % (c_z, c_s_inputs))
+  # S_INPUTS IN RF3'S OWN LAYOUT, and the gate's synthetic 384-wide array is not
+  # it: rf3's is 449 channels [a(384), restype(32), profile(32), deletion], with
+  # its OWN restype alphabet (`_AF3_TO_RF3_AATYPE`, which transposes G/C against
+  # of3's). Built here and handed back in OUR 447-wide layout so both sides see
+  # the same numbers -- the same contract `conditioning_parity` uses.
+  from converters.rosettafold3 import _AF3_TO_RF3_AATYPE as _remap
+  idx = np.concatenate([384 + np.asarray(_remap), 416 + np.asarray(_remap),
+                        [448], np.arange(384)])
+  rng = np.random.default_rng(0)
+  s449 = (rng.normal(size=(n, c_s_inputs)) * 0.5).astype(np.float32)
+  # The columns our 447-wide layout has no slot for are ZERO, which is what the
+  # featuriser puts there for every input in this panel -- see the long note in
+  # conditioning_parity.native_rf3.
+  s449[:, np.setdiff1d(np.arange(c_s_inputs), idx)] = 0.0
+  _OURS['s_inputs'] = s449[:, idx]
+  si = t(s449)
+  # THE AXES, VERBATIM. rf3 writes
+  #     Z = to_z_init_i(S).unsqueeze(-3) + to_z_init_j(S).unsqueeze(-2)
+  # and on an [I, c] tensor `unsqueeze(-3)` gives [1, I, c] -- broadcast over
+  # ROWS, so `to_z_init_i` is the COLUMN embedder -- while `unsqueeze(-2)` gives
+  # [I, 1, c], the ROW one. Writing both with `[..., None, :]` (which is
+  # unsqueeze(-2)) and then swapping the NAMES to compensate lands on the same
+  # numbers and hides the reasoning; it also read corr 0.2799 until the swap,
+  # which is what a transposed pair init looks like. Note this is the opposite
+  # convention to protenix and of3, whose `[..., None, :]` term is the ROW.
+  z = (lin('to_z_init_i.weight', si)[None, :, :]
+       + lin('to_z_init_j.weight', si)[:, None, :])
+
+  tf = batch.token_features
+  f = {k: t(np.asarray(getattr(tf, k)).astype(np.int64), torch.long)
+       for k in ('asym_id', 'residue_index', 'entity_id', 'token_index',
+                 'sym_id')}
+  rp = RelativePositionEncoding(r_max=32, s_max=2, c_z=c_z)
+  rp.load_state_dict({'linear.weight': g('relative_position_encoding.linear.weight')},
+                     strict=False)
+  rp.eval()
+  with torch.no_grad():
+    if not os.environ.get('NORELPE'):
+      z = z + rp(f)
+    else:
+      print('  NORELPE: relative position encoding dropped on both sides')
+    z = z + lin('process_token_bonds.weight', t(bonds)[..., None])
+  return np.asarray(z)
+
+
+NATIVES = {'boltz2': native_boltz2, 'rosettafold3': native_rf3}
 LOOPS = {'boltz2': native_boltz2_loop}
 
 
@@ -269,6 +346,14 @@ def ours(model, cfg, model_dir, batch, s_inputs):
   print('  ours: %d scopes, %d unmapped %s'
         % (len(init), len(unmapped), unmapped[:4]))
   assert not unmapped, 'our z-init is partly at init'
+  if os.environ.get('NORELPE'):
+    # Zero the relative-position projection on OUR side too. z-init is a sum of
+    # independent terms, so dropping one from both sides says whether the
+    # disagreement is in it or in what is left.
+    for sc in params:
+      if 'position_activations' in sc or 'relpe' in sc:
+        params[sc] = {k: np.zeros_like(np.asarray(v))
+                      for k, v in params[sc].items()}
   return np.asarray(f.apply(params, jax.random.PRNGKey(0)))
 
 
@@ -379,6 +464,11 @@ def main(argv=None):
     return 0
 
   z_ref = NATIVES[args.model](args.model, batch, s_inputs, bonds, bond_types, n)
+  # An adapter may REPLACE the synthetic s_inputs: the width and the alphabet
+  # are per-model (boltz2 concatenates a token_s-wide one, the of3 lineage a
+  # 449-channel one with its own restype permutation), and the two sides have to
+  # see the same numbers in their own layouts.
+  s_inputs = _OURS.get('s_inputs', s_inputs)
   z_got = ours(args.model, cfg, model_dir, batch, s_inputs)
   print('  shapes: ours %s native %s' % (z_got.shape, z_ref.shape))
   _cmp('z_init', z_got, z_ref)
