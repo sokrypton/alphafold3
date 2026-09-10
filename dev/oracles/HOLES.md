@@ -122,14 +122,19 @@ boltz2 is the model that proved the gap was real, and it now reads
 0.954268 / 6.49e-01 with AF3's, where the per-pair max|d| is IDENTICAL on all
 4624 pairs, one constant vector everywhere.
 
-Adapters: boltz2, rosettafold3, openfold3, openbind0, protenix1, protenix2,
-opendde, intellifold2 -- ALL EXACT (1.95e-06 to 3.79e-06). The four esmfold2
-releases are the only holes left on this gate, and their comparison is
-`esmfold2_reference`'s own `z_init` tap, which computes the same three terms
-(`z_pair0 + rel_pos + token_bonds @ w`, reference line 330). The work is
-feature translation: the reference builds its `s_inputs` from the DUMP's `f`,
-so our batch's features have to be mapped into that layout the way
-`esmfold2_localise_trunk` does.
+CLOSED -- all 12 models that have this module have an adapter and every one is
+EXACT (1.95e-06 to 5.54e-06): boltz2, rosettafold3, openfold3, openbind0,
+protenix1, protenix2, opendde, intellifold2 and all four esmfold2 releases.
+(alphafold3 is the reference; chai1 ships TorchScript.)
+
+The esmfold2 four compare against `esmfold2_reference`'s own three lines rather
+than a vendor module, which is what every other esmfold2 gate does. Their one
+subtlety is that the two implementations hold the SAME vector in different
+layouts -- ESM `[atom 384 | restype 33 | profile 33 | del 1]` against AF3
+`[restype 31 | profile 31 | del 1 | atom 384]` -- and the restype blocks are a
+PERMUTATION (ESM puts the MSA gap at class 1, below the residues), so the gate
+applies `esm_class_of_af3` to the FEATURE the way the converter applies it to
+the weight ROWS. Reading it as a slice is what once read z_init corr 0.008.
 
 Older text below. The other twelve are one function each and the
 recipe is the same: assemble the vendor's own z-init terms from its own

@@ -501,8 +501,74 @@ def native_if2(model, batch, s_inputs, bonds, bond_types, n):
   return np.asarray(z)
 
 
+def native_esmfold2(model, batch, s_inputs, bonds, bond_types, n):
+  """-> z_init from `esmfold2_reference`, the family's stand-in for a vendor.
+
+  ESMFold2's own modules live in ~/venv_esm, so every other esmfold2 gate
+  compares against `dev/oracles/esmfold2_reference.py` -- a self-contained JAX
+  reimplementation whose fidelity `L1.trunk_ref` and `L3.denoise_ref` establish
+  end to end. Its z-init is three lines (reference line 324-330):
+
+      z_pair0 = (s @ z_init_1)[:, None] + (s @ z_init_2)[None, :]
+      z       = z_pair0 + rel_pos_features(...) @ rel_pos
+      z       = z + token_bonds @ token_bonds_w
+
+  the same three terms our `_seq_pair_embedding` / `_relative_encoding` /
+  `_embed_bonds` produce. Written out here rather than by running `R.trunk`,
+  which would need the ESM-C hidden states and a native dump to reach the same
+  point.
+
+  Note the relative encoding: ESMFold2 puts same_entity BEFORE the chain block
+  and INVERTS the chain bucket (same-chain goes to the out-of-bounds bin), which
+  is the convention `model_config.CHAIN_BUCKET_ON_SAME_CHAIN` carries for this
+  family -- so a mismatch here would be that flag, and the gate would say so.
+  """
+  import esmfold2_dumps
+  import esmfold2_reference as R
+  from converters import esmfold2 as CV
+
+  sd = esmfold2_dumps.state_dict(model)
+  p = {k: np.asarray(v) for k, v in CV.map_esmfold2_to_af3(sd).items()}
+  w1 = p['z_init_1/weights']
+  c_s_inputs, c_z = w1.shape
+  print('  reference params: c_s_inputs %d, c_z %d' % (c_s_inputs, c_z))
+  # TWO LAYOUTS OF THE SAME VECTOR. ESMFold2 concatenates
+  # [atom 384 | restype 33 | profile 33 | deletion 1] = 451 and AF3
+  # [restype 31 | profile 31 | deletion 1 | atom 384] = 447, and the restype
+  # blocks are a PERMUTATION, not a slice -- ESM puts the MSA gap at class 1,
+  # below the residues (`converters/esmfold2.esm_class_of_af3`). The converter's
+  # `remap_s_inputs` reorders the WEIGHT rows for exactly this; here the same
+  # permutation is applied to the FEATURE so both sides hold the same numbers in
+  # their own order. Reading it as a slice put every consumer's atom block under
+  # the restype weights and read z_init corr 0.008 when the converter got it
+  # wrong, which is the recorded size of this mistake.
+  n_af3, n_esm = 31, 33
+  rng = np.random.default_rng(0)
+  s447 = (rng.normal(size=(n, 2 * n_af3 + 1 + 384)) * 0.5).astype(np.float32)
+  _OURS['s_inputs'] = s447
+  cols = np.asarray(CV.esm_class_of_af3(n_af3))
+  s_inputs = np.zeros((n, c_s_inputs), np.float32)
+  s_inputs[:, :384] = s447[:, 2 * n_af3 + 1:]
+  s_inputs[:, 384 + cols] = s447[:, :n_af3]
+  s_inputs[:, 384 + n_esm + cols] = s447[:, n_af3:2 * n_af3]
+  s_inputs[:, 384 + 2 * n_esm] = s447[:, 2 * n_af3]
+  tf = batch.token_features
+  ids = [np.asarray(getattr(tf, k)).astype(int)
+         for k in ('residue_index', 'asym_id', 'sym_id', 'entity_id',
+                   'token_index')]
+  z = ((s_inputs @ w1)[:, None] + (s_inputs @ p['z_init_2/weights'])[None, :])
+  if not os.environ.get('NORELPE'):
+    z = z + np.asarray(R.rel_pos_features(*ids)) @ p['rel_pos/weights']
+  else:
+    print('  NORELPE: relative position encoding dropped on both sides')
+  z = z + np.asarray(bonds)[..., None] @ p['token_bonds/weights']
+  return np.asarray(z)
+
+
 NATIVES = {'boltz2': native_boltz2, 'rosettafold3': native_rf3,
            'intellifold2': native_if2}
+NATIVES.update({m: native_esmfold2 for m in (
+    'esmfold2', 'esmfold2_fast', 'esmfold2_lm600m', 'esmfold2_lm300m')})
 NATIVES.update({m: native_of3 for m in _OF3_CKPT})
 NATIVES.update({m: native_protenix for m in _PROTENIX_SRC})
 LOOPS = {'boltz2': native_boltz2_loop}
