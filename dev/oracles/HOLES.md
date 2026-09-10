@@ -9,11 +9,11 @@ TWO categories, and the second was invisible until `parity_audit.py` existed:
      at corr 0.9678 is reported OK. `parity_audit.py` grades on corr AND
      max|d|/rms.
 
-# Category 1: HOLES -- four left
+# Category 1: HOLES -- none left
 
 | gate | models | what it needs |
 |---|---|---|
-| `L4.confidence` | boltz2 | the converter is done (66 -> 11); the rest is forward branches, recipe in [[boltz2-confidence-port]]. |
+| -- | -- | NONE. Every gate now has an adapter for every model the cell applies to. |
 | `L4.confidence` | esmfold2, esmfold2_fast | NO LONGER A HOLE -- the cell RUNS, dump-driven, and its numbers are a finding rather than a gap. See below. |
 
 Everything else is covered: L0, L1.trunk, L1i.trunk_init, L1t.template,
@@ -56,6 +56,45 @@ stores its trunk in bfloat16** -- deliberately, mirroring AF3's own param dtype
 policy, and measured fold-neutral where that policy is set. Rounding native to
 the blob's dtype gives 3.79e-06. Only `alphafold3` and `intellifold2` store bf16
 at all, so nothing else in the panel can hit it.
+
+# boltz2's confidence head: the re-embedding is right, the stack is not
+
+The last hole. Its converter has been structurally complete for a while (66
+unported -> 0) and its three graph branches landed with it, but the VALUES had
+never been compared -- the state [[boltz2-confidence-port]] recorded as
+"structural coverage COMPLETE, values UNVERIFIED". The adapter builds boltz's own
+`ConfidenceModule` and derives every flag from the checkpoint.
+
+    full_pae   0.9198 / 1.88      plddt     0.9964 / 6.50e-02
+    full_pde   0.9286 / 1.47      resolved  0.9975 / 5.50e-01
+
+`BLOCKS=n` truncates the confidence pairformer on both sides, and that localises
+it exactly:
+
+    0 blocks   pae 0.999943 / 2.66e-02     pde 0.999697 / 9.97e-02
+    1 block    pae 0.994351 / 2.14e-01     pde 0.991677 / 4.23e-01
+    8 blocks   pae 0.919759 / 1.88e+00     pde 0.928585 / 1.47e+00
+
+So the RE-EMBEDDING is right -- rel_pos, both bond terms, contact conditioning,
+the two target-feat projections, the product term and the 64-bin distogram all
+land within 2.7e-02 -- and the 8-block stack contributes ~2e-01 per block.
+
+What that is NOT: our pairformer BLOCK. The same block reads 3.85e-04 on z in
+the trunk gate at one block for this model, and boltz forces `v2=True` for both
+stacks, so they are the same layer. So the difference is in what the CONFIDENCE
+stack is given or how its params are mapped, not in the block arithmetic --
+which is the next thing to measure, and it wants an injected single-block
+comparison against `confidence_pairformer`'s own scope.
+
+One oracle bug on the way, with a lesson worth more than the fix:
+`bond_type_feature` is NOT in the checkpoint's `confidence_model_args`, so the
+module defaulted it False and silently skipped its `token_bonds_type` term --
+an nn.Embedding row 0 on every pair, a learned constant, not a no-op. It read
+pae 0.333 / pde 0.293. The tell was there and I was not asserting on it:
+`load_state_dict` returned `token_bonds_type.weight` as UNEXPECTED, because a
+module that does not build a tensor cannot be missing it. Both flags are now
+derived from the tensors (`token_bonds_type` present, and `token_bonds`'s input
+width is 1 + maximum_bond_distance) and the gate asserts on unexpected too.
 
 # The esmfold2 confidence head: two port bugs, then native's own bf16
 

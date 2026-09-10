@@ -659,6 +659,139 @@ def ours_opendde(cfg, model_dir, pos, s_inputs, s, z, n, max_atoms):
 _OVERRIDE = {}
 
 
+def native_boltz2(model, batch, pos, rng, n, max_atoms):
+  """-> (ref logits, s_inputs, s, z, rep_native) from Boltz-2's ConfidenceModule.
+
+  THE LAST HOLE in the panel. Its converter has been structurally complete for a
+  while (66 unported -> 0) and its three graph branches landed with it, but the
+  VALUES had never been compared -- which is the state [[boltz2-confidence-port]]
+  records as "structural coverage COMPLETE, values UNVERIFIED".
+
+  Everything is read off the checkpoint's own `confidence_model_args`, so a
+  release that changes its mind fails in load_state_dict rather than comparing
+  quietly: 8 pairformer blocks / 16 heads, 64 distance bins to max_dist 22, and
+  the three `add_*` flags that decide whether the re-embedding runs at all
+  (all True here) plus `use_separate_heads` for the intra/inter split.
+  """
+  import torch
+
+  from boltz.model.modules.confidencev2 import ConfidenceModule
+
+  ckpt = os.path.expanduser('~/boltz2_weights/boltz2_conf.ckpt')
+  raw = torch.load(ckpt, map_location='cpu', weights_only=False)
+  sd = raw.get('state_dict', raw.get('model', raw))
+  hp = raw.get('hyper_parameters', {})
+  cm = dict(hp.get('confidence_model_args', {}))
+  pre = 'confidence_module.'
+  sub = {k[len(pre):]: v for k, v in sd.items() if k.startswith(pre)}
+  if not sub:
+    raise SystemExit('no %r keys in %s' % (pre, ckpt))
+
+  token_s = sub['s_to_z.weight'].shape[1]
+  token_z = sub['s_to_z.weight'].shape[0]
+  print('  checkpoint: %d tensors, token_s %d, token_z %d, %d pairformer blocks'
+        % (len(sub), token_s, token_z,
+           cm.get('pairformer_args', {}).get('num_blocks')))
+  # `bond_type_feature` and `maximum_bond_distance` are NOT in the checkpoint's
+  # `confidence_model_args`, and both change the forward. Derived from the
+  # tensors instead: `token_bonds_type` exists only when the flag is on, and
+  # `token_bonds`'s input width is 1 + maximum_bond_distance.
+  bond_type = 'token_bonds_type.weight' in sub
+  max_bond = int(sub['token_bonds.weight'].shape[1]) - 1
+  print('  derived: bond_type_feature=%s, maximum_bond_distance=%d'
+        % (bond_type, max_bond))
+  net = ConfidenceModule(
+      token_s=token_s, token_z=token_z,
+      pairformer_args=dict(cm['pairformer_args'], dropout=0.0),
+      num_dist_bins=cm.get('num_dist_bins', 64),
+      max_dist=cm.get('max_dist', 22),
+      add_s_to_z_prod=cm.get('add_s_to_z_prod', False),
+      add_s_input_to_s=cm.get('add_s_input_to_s', False),
+      add_z_input_to_z=cm.get('add_z_input_to_z', False),
+      bond_type_feature=bond_type, maximum_bond_distance=max_bond,
+      confidence_args=cm.get('confidence_args'),
+      conditioning_cutoff_min=4.0, conditioning_cutoff_max=20.0)
+  missing, unexpected = net.load_state_dict(sub, strict=False)
+  print('  native: %d missing, %d unexpected %s%s'
+        % (len(missing), len(unexpected), list(missing)[:3],
+           list(unexpected)[:3]))
+  assert not missing, 'native confidence is missing %d tensors' % len(missing)
+  # AND NOT UNEXPECTED EITHER. A tensor the checkpoint has and the module did
+  # not build means a FLAG is wrong, and the module then silently skips that
+  # term: `bond_type_feature` defaulted False, `token_bonds_type` came back
+  # unexpected, and native dropped a term ours was adding -- an nn.Embedding's
+  # row 0 on every pair, which is a learned constant and not a no-op.
+  assert not unexpected, (
+      'native confidence did not build %d checkpoint tensors: %s'
+      % (len(unexpected), sorted(unexpected)[:6]))
+  # BLOCKS truncates the confidence pairformer on BOTH sides (ours in `ours()`),
+  # which splits "the re-embedding differs" from "the stack differs". BLOCKS=0
+  # compares the re-embedded z straight into the heads.
+  _nb = os.environ.get('BLOCKS')
+  if _nb is not None:
+    import torch.nn as _nn
+    _l = net.pairformer_stack.layers
+    net.pairformer_stack.layers = _nn.ModuleList(list(_l)[:int(_nb)])
+    print('  native pairformer truncated to %s block(s)' % _nb)
+  net.eval()
+
+  t = lambda x, d=torch.float32: torch.tensor(np.asarray(x), dtype=d)
+  rng2 = np.random.default_rng(0)
+  s_inputs = (rng2.normal(size=(n, token_s)) * 0.5).astype(np.float32)
+  s_tr = (rng2.normal(size=(n, token_s)) * 0.5).astype(np.float32)
+  z = (rng2.normal(size=(n, n, token_z)) * 0.5).astype(np.float32)
+
+  # boltz works on a PACKED atom axis with a token -> representative-atom
+  # gather, and this harness synthesises a dense (token, slot) layout in which
+  # every slot is a real atom. So the packed axis is that layout flattened, and
+  # `token_to_rep_atom` is a one-hot picking slot 0 of each token -- which is
+  # what main compares `rep_ours` against.
+  posd = np.asarray(pos)
+  flat = posd.reshape(-1, 3)
+  n_at = flat.shape[0]
+  # THE REPRESENTATIVE ATOM IS THE PSEUDO-BETA, not slot 0. Our head gathers
+  # `pseudo_beta_info.token_atoms_to_pseudo_beta`, and main asserts the two
+  # sides embed the same coordinates -- picking slot 0 here read 4.56e+01 and
+  # fired that assert, which is the whole point of it.
+  rep_flat = np.asarray(
+      batch.pseudo_beta_info.token_atoms_to_pseudo_beta.gather_idxs).reshape(-1)
+  assert rep_flat.shape == (n,), rep_flat.shape
+  t2r = np.zeros((n, n_at), np.float32)
+  t2r[np.arange(n), rep_flat] = 1.0
+  a2t = np.repeat(np.arange(n), max_atoms)
+  feats = {
+      'token_pad_mask': torch.ones(1, n),
+      'atom_pad_mask': torch.ones(1, n_at),
+      'token_to_rep_atom': t(t2r)[None],
+      'atom_to_token': t(np.eye(n, dtype=np.float32)[a2t])[None],
+      'asym_id': t(np.asarray(batch.token_features.asym_id), torch.long)[None],
+      'residue_index': t(np.asarray(batch.token_features.residue_index),
+                         torch.long)[None],
+      'entity_id': t(np.asarray(batch.token_features.entity_id),
+                     torch.long)[None],
+      'token_index': t(np.asarray(batch.token_features.token_index),
+                       torch.long)[None],
+      'sym_id': t(np.asarray(batch.token_features.sym_id), torch.long)[None],
+      'mol_type': torch.zeros(1, n, dtype=torch.long),
+      'token_bonds': torch.zeros(1, n, n, 1),
+      'type_bonds': torch.zeros(1, n, n, dtype=torch.long),
+      'contact_conditioning': torch.nn.functional.one_hot(
+          torch.zeros(1, n, n, dtype=torch.long), 5).float(),
+      'contact_threshold': torch.zeros(1, n, n),
+      'target_pair_mask': None,
+  }
+  with torch.no_grad():
+    out = net(s_inputs=t(s_inputs)[None], s=t(s_tr)[None], z=t(z)[None],
+              x_pred=t(flat)[None], feats=feats,
+              pred_distogram_logits=torch.zeros(1, n, n, 64))
+  g = lambda k: np.asarray(out[k])[0]
+  ref = {'pae': g('pae_logits'), 'pde': g('pde_logits'),
+         'plddt': g('plddt_logits'), 'resolved': g('resolved_logits')}
+  for k, v in ref.items():
+    print('  native %-9s %s' % (k, v.shape))
+  return ref, s_inputs, s_tr, z, flat[rep_flat]
+
+
 def native_esmfold2(model, batch, pos, rng, n, max_atoms):
   """-> (ref logits, s_inputs, s, z, rep_native) from the ESMFold2 DUMP.
 
@@ -738,6 +871,7 @@ def native_esmfold2(model, batch, pos, rng, n, max_atoms):
 
 NATIVES = {m: native_protenix for m in _PROTENIX_CKPT}
 NATIVES.update({m: native_esmfold2 for m in ('esmfold2', 'esmfold2_fast')})
+NATIVES['boltz2'] = native_boltz2
 NATIVES.update({m: native_of3 for m in _OF3_CKPT})
 NATIVES['intellifold2'] = native_if2
 NATIVES['rosettafold3'] = native_rf3
