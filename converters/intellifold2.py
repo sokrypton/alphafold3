@@ -320,6 +320,26 @@ def _record_dtype(scope, name):
     return np.float32
   if 'diffusion_head' in scope or 'evoformer_conditioning' in scope:
     return np.float32
+  # ...and the TEMPLATE EMBEDDER, which is 7.9 MB of the 1284 MB this policy
+  # saves -- 0.6% of the saving to remove an artifact entirely.
+  #
+  # Measured 2026-09-10: with the region in bf16, `L1t.template` read max|d|/rms
+  # 1.57e-01 while an fp32 blob read 7.19e-05, so the cell was reporting the
+  # storage dtype rather than the port. Unlike the trunk and msa gates this one
+  # could NOT be fixed by rounding native's weights to match (that made it
+  # WORSE, 2.03e-01, because the converter rounds AFTER its transform and the
+  # transform does not commute with rounding -- verified: the shipped blob is
+  # bit-for-bit bf16(fp32 blob) for all 138 bf16 params). So either the chart
+  # carries a permanent BAD that everyone learns to ignore, or the region goes
+  # to fp32. It is cheap, so it goes to fp32.
+  #
+  # The fold cost of the bf16 policy was originally priced on 6MRR DE NOVO,
+  # which has no template at all, so the template embedder's share of it had
+  # never been measured. It is neutral there too -- 5K9P with its own structure
+  # as a template reads mean 1.888 both ways (best 1.722 bf16 vs 1.723 fp32) --
+  # so this buys parity in the gate rather than accuracy in the fold.
+  if 'template_embedding' in scope:
+    return np.float32
   if name in ('scale', 'offset') or scope in _F32_TRUNK_WEIGHTS:
     return np.float32
   return ml_dtypes.bfloat16
