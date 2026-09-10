@@ -185,3 +185,31 @@ openfold3, boltz2 and protenix2 read BAD/LOOSE on z at 48 blocks while a 1e-6
 perturbation of the gate's own input moves its output FURTHER than our port does.
 They grade FLOOR. `trunk_parity FLOOR=<eps>` is how a cell earns that, and rf3
 failing to earn it is how its /L was found -- so the exemption discriminates.
+
+## A gate that reports OK while testing nothing (2026-09-10)
+
+`L1b.msa_nonuniform` runs `NONUNIFORM=1`, and that variable is read INSIDE
+boltz2's adapter only (`msa_parity.py` native_boltz2). For the other thirteen
+models the cell is a byte-identical duplicate of `L1b.msa`: same number, status
+OK, nothing tested. It is not a hole by `gate_applies.py` -- the cell RAN -- and
+that is what makes it worse than a hole.
+
+It exists to separate two OPM normalisers that an all-ones mask cannot tell
+apart, and there is a live question waiting on it:
+
+  * **rosettafold3's OuterProductMean takes no mask argument at all** and divides
+    by `float(N)`, the RAW row count (outer_product.py:29-37). AF3 masks the msa
+    and divides by the pairwise valid count. Under padding those disagree: a
+    padded row contributes nothing to rf3's outer product but still moves its
+    divisor. Whether rf3's subsampler zeroes padded rows before the OPM sees
+    them decides only the numerator, never the denominator.
+
+So `OPM_ROW_COUNT_NORM` may well need rosettafold3 -- but that list currently has
+NO code effect (it documents a disproved reading of boltz's source), so answering
+this means building the nonuniform path for rf3 first, then deciding what the
+divisor should count. Until then rf3's OPM is verified only for a uniform mask,
+which is what the L1b cells feed.
+
+The general lesson is the one [[harness-rot]] describes, one level in: a knob
+implemented in one adapter and read by a cell for all fourteen models produces
+thirteen silent passes.
