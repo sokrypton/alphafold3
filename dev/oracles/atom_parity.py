@@ -753,6 +753,12 @@ def native_esmfold2(model, fb, feats, pos_noisy, s, z, n_tok):
   a = R.scatter_mean(jax.nn.relu(q @ ae['atom_to_token/weights']), a2t,
                      int(np.asarray(fb.token_features.mask).shape[0]), mask)
   sel = lambda v: np.asarray(v).reshape(-1, np.asarray(v).shape[-1])[ref_idx]
+  # Park the decoder's inputs. ESMFold2's decoder needs more than the gate's
+  # arguments carry -- the ROPE tables and the atom-level mask, which are built
+  # from ref_pos and ref_space_uid rather than passed in -- so the encoder
+  # invocation is kept the way if2's, boltz2's and rf3's are.
+  _RAW['esmfold2'] = dict(q=q, c0=c0, cos=cos, sin=sin, mask=mask, a2t=a2t,
+                          dims=dims, p=pref, sel=sel)
   return (np.asarray(a), sel(q), sel(c0), None, None)
 
 
@@ -1694,7 +1700,46 @@ def _native_decoder_rf3(model, feats, a, q_ref, c_ref, p_ref, n_atom, c_token):
   return _np.asarray(r).reshape(-1, 3)[:n_atom]
 
 
-_DECODER_FN = {'boltz2': _native_decoder_boltz2,
+def _native_decoder_esmfold2(model, feats, a, q_ref, c_ref, p_ref, n_atom,
+                             c_token):
+  """-> r_ref from `esmfold2_reference`'s atom decoder (reference line 478-482).
+
+      qd = q + (a @ token_to_atom)[atom_to_token]
+      qd = atom_stack(qd, c0, ..., cos, sin, mask)     # 3 blocks, SWA + rope
+      r  = layer_norm(qd, norm) @ output
+
+  The decoder was the family's last module hole. It needs the ROPE tables and
+  the atom mask, which are functions of ref_pos and ref_space_uid rather than
+  gate arguments, so it reuses the encoder invocation parked in `_RAW` -- the
+  same mechanism if2, boltz2 and rf3 use. Each side still gets its own
+  encoder's skips, legitimate because that encoder is gated exact (a_token
+  1.000000).
+  """
+  import jax.numpy as jnp
+  import numpy as _np
+
+  import esmfold2_reference as R
+
+  if _RAW.get('esmfold2') is None:
+    raise SystemExit('the esmfold2 decoder needs the encoder invocation; '
+                     'native_esmfold2 did not park one in _RAW')
+  Rw = _RAW['esmfold2']
+  ad = {k[len('diffusion/atom_decoder/'):]: v for k, v in Rw['p'].items()
+        if k.startswith('diffusion/atom_decoder/')}
+  if not ad:
+    raise SystemExit('no diffusion/atom_decoder/* params for %r' % model)
+  qd = Rw['q'] + (jnp.asarray(a) @ ad['token_to_atom/weights'])[Rw['a2t']]
+  qd = R.atom_stack(qd, Rw['c0'], ad, 'blocks/', Rw['dims']['n_diff_atom'],
+                    Rw['cos'], Rw['sin'], Rw['mask'])
+  r = R.layer_norm(qd, ad['norm/scale'], ad['norm/offset']) @ ad['output/weights']
+  return _np.asarray(Rw['sel'](r))[:n_atom]
+
+
+_DECODER_FN = {'esmfold2': _native_decoder_esmfold2,
+               'esmfold2_fast': _native_decoder_esmfold2,
+               'esmfold2_lm600m': _native_decoder_esmfold2,
+               'esmfold2_lm300m': _native_decoder_esmfold2,
+               'boltz2': _native_decoder_boltz2,
                'rosettafold3': _native_decoder_rf3,
                'openfold3': _native_decoder_of3,
                'openbind0': _native_decoder_of3,
