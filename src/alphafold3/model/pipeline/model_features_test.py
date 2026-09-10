@@ -107,7 +107,12 @@ class ApplyTest(absltest.TestCase):
     # become a real featurise entry precisely BECAUSE openfold3 had none --
     # every caller guards the whole step on `if spec.featurise:`, so an empty
     # entry meant the convention never ran for the model it mattered most for.
-    for name in ('alphafold3', 'intellifold2'):
+    # ...and intellifold2 is not in it any more either, for the same reason: it
+    # declares `qblock_keys` (its atom key window DUPLICATES the edge windows,
+    # aligned to the padded query-block count). This list is a standing
+    # invitation to rot -- every model that gains a convention has to leave it --
+    # so it holds only the reference now.
+    for name in ('alphafold3',):
       with self.subTest(model=name):
         before = _atom_window_batch()
         after = model_features.apply(_atom_window_batch(),

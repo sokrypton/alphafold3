@@ -408,6 +408,8 @@ class TriangleMultiplication(hk.Module):
     """
     mask = mask[None, ...]
     num_channels = act.shape[-1]
+    # the token count, read BEFORE `act` is reassigned by the input LayerNorm
+    num_residues = act.shape[-2]
     # the a/b projections, the einsum and center_norm all run at hidden_dim;
     # only output_projection and the gate come back to num_channels
     hidden_dim = (num_channels if self.config.hidden_dim is None
@@ -455,6 +457,11 @@ class TriangleMultiplication(hk.Module):
     a, b = jnp.split(projection, 2, axis=1)
     a, b = jnp.squeeze(a, axis=1), jnp.squeeze(b, axis=1)
     act = jnp.einsum(equation, a, b)
+    # rf3 divides by the sequence length here, and it is NOT a no-op in front of
+    # a LayerNorm because of the norm's epsilon -- see
+    # model_config.TRIANGLE_MUL_DIVIDE_BY_LENGTH for the measurement.
+    if self.global_config.model in model_config.TRIANGLE_MUL_DIVIDE_BY_LENGTH:
+      act = act / jnp.asarray(num_residues, act.dtype)
     act = hm.LayerNorm(name='center_norm', axis=0, param_axis=0)(act)
 
     act = jnp.transpose(act, (1, 2, 0))

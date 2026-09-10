@@ -843,3 +843,38 @@ class GlobalConfig(base_config.BaseConfig):
   # Names are always full-name + version so a future port of another version of
   # the same model (boltz1, protenix3, ...) gets its own unambiguous name.
   model: str = 'alphafold3'
+
+
+# Whose triangle multiplication divides by the SEQUENCE LENGTH before the
+# centre LayerNorm.
+#
+#   rf3  `out = einsum("bikd,bjkd->bijd", left, right / float(L))`
+#        then `out = self.norm_out(out)`
+#        (rf3/model/layers/attention.py:268, both directions)
+#
+# A LayerNorm is scale-invariant, so this looks like it cannot matter -- and for
+# 40 of rf3's 48 trunk blocks it does not. It matters because of the norm's
+# EPSILON: dividing by L=68 shrinks the variance by 4624, and once the pair
+# track decays with depth (rms 89 at block 8 down to 24 by block 48), `var` stops
+# dominating `var + eps` and the normalisation lands somewhere else.
+#
+# So the depth profile is the signature. Per block, on native's own input, our
+# error was at the float32 floor through block 20 and then climbed: 5.6e-05 at
+# 24, 1.5e-03 at 36, 3.1e-02 at 44. Native's own float32-vs-float64 noise stayed
+# flat at 3e-06 the whole way, so the blocks were not ill-conditioned -- the
+# arithmetic was different. Localised to the two triangle multiplications (the
+# attentions and the transition were exact at every depth), then to this line:
+# with the division our tri_mul_incoming was 7.1e-01 off at block 44, without it
+# 4.3e-06, at every depth measured.
+#
+# Only rf3 does this. Checked against of3, protenix, if2, opendde and boltz2 --
+# all five write the plain einsum with `norm_out` after it, which is why this is
+# a per-model branch and not a change to the shared path. It is also NOT a
+# weight fold ([[branch-vs-weight-fold]]): folding 1/L into the projection would
+# reproduce the pre-norm tensor but a LayerNorm's eps does not commute with a
+# scale, which is the only reason the term is observable at all.
+# AF3_NO_TRI_MUL_DIV_L=1 takes the term back out, which is how the fold above
+# was priced against the same seeds without it.
+TRIANGLE_MUL_DIVIDE_BY_LENGTH = (
+    () if __import__('os').environ.get('AF3_NO_TRI_MUL_DIV_L')
+    else ('rosettafold3',))

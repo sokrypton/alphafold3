@@ -516,6 +516,34 @@ def native_rf3(model, n, mask, blocks=None):
   rng = _np.random.default_rng(0)
   s = (rng.normal(size=(n, c_s)) * 0.5).astype(_np.float32)
   z = (rng.normal(size=(n, n, c_z)) * 0.5).astype(_np.float32)
+
+  def run(dtype):
+    with torch.no_grad():
+      S = torch.tensor(s)[None].to(dtype)
+      Z = torch.tensor(z)[None].to(dtype)
+      m = net.to(dtype)
+      for b in m:
+        S, Z = b(S, Z)
+      return S[0].double().numpy(), Z[0].double().numpy()
+
+  # NATIVE_F64 -- the REFERENCE's own arithmetic noise.
+  #
+  # FLOOR measures how sensitive the stack is to its INPUT. That is not the
+  # only floor: over rf3's last twelve blocks the pair track COLLAPSES (rms
+  # 69.6 at 36 blocks to 24.5 at 48) while the single track grows to rms 2.7e4,
+  # and a relative error on a collapsing denominator computed in float32 has
+  # its own noise. So run the identical native stack in float64 and compare it
+  # against itself in float32: that difference is arithmetic the reference
+  # cannot get right either, and our port cannot be held to a tighter standard.
+  if os.environ.get('NATIVE_F64'):
+    s32, z32 = run(torch.float32)
+    s64, z64 = run(torch.float64)
+    print('  NATIVE_F64: the reference against ITSELF in float64 -- its own '
+          'accumulation noise at %d blocks' % keep)
+    _cmp('s_native64', s32, s64)
+    _cmp('z_native64', z32, z64)
+    return s, z, s64.astype(_np.float32), z64.astype(_np.float32), keep
+
   with torch.no_grad():
     S, Z = torch.tensor(s)[None], torch.tensor(z)[None]
     for b in net:
