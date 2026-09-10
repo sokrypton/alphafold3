@@ -9,164 +9,72 @@ TWO categories, and the second was invisible until `parity_audit.py` existed:
      at corr 0.9678 is reported OK. `parity_audit.py` grades on corr AND
      max|d|/rms.
 
-On the last full run: 234 OK / 79 N/A / 66 holes, and of the 115 actual
-comparisons inside those OK cells, **PARITY 77, CLOSE 16, LOOSE 10, BAD 12**.
+# Category 1: HOLES -- four left
 
-## Category 2: cells that ran and are NOT at parity
+| gate | models | what it needs |
+|---|---|---|
+| `L4.confidence` | boltz2 | the converter is done (66 -> 11); the rest is forward branches, recipe in [[boltz2-confidence-port]]. |
+| `L4.confidence` | esmfold2, esmfold2_fast | `esmfold2_reference` does NOT implement the confidence head, so this is the one esmfold2 cell that needs the DUMP. `esmfold2_oracle_6mrr.py` now hooks it (`conf.in.*`, one `conf.out.<name>` per output, `with_kwargs=True` because it is called with keywords only), and `esmfold2_dumps.module_io(model, 'conf')` hands them over. Our side then has to run on the RECORDED inputs, which is a different shape from every gate here -- they hand both sides a synthetic activation. |
+| `L1b.msa` | esmfold2 | the only release with `msa=4`; the other three are n/a. |
 
-| grade | gate | model | quantity | corr | max\|d\|/rms |
-|---|---|---|---|---|---|
-| BAD | L2.atom_encoder | protenix2 | `p_atom_pair` | 0.967768 | 9.64 |
-| BAD | L2.atom_encoder | protenix1 | `p_atom_pair` | 0.983858 | 3.19 |
-| BAD | L2.atom_encoder | openfold3 | `p_atom_pair` | 0.999816 | 1.39 |
-| BAD | L2.atom_encoder | openbind0 | `p_atom_pair` | 0.999860 | 1.26 |
-| BAD | L2.atom_* | rosettafold3 | `q_atom` | 0.999582 | 0.84 |
-| BAD | L2.atom_* | rosettafold3 | `a_token` | 0.999870 | 0.57 |
-| BAD | L1t.template | intellifold2 | `template_embed` | 0.999999 | 0.157 |
-| BAD | L3.denoise | rosettafold3 | `x_denoised` | 0.999948 | 0.153 |
-| BAD | L3.denoise | intellifold2 | `x_denoised` | 0.999950 | 0.141 |
-| BAD | L2.conditioning | rosettafold3 | `single_cond` | 0.999996 | 0.124 |
+Everything else is covered: L0, L1.trunk, L1i.trunk_init, L1t.template,
+L2.conditioning, L2.atom_encoder, L2.atom_decoder, L2.diffusion, L3.denoise all
+have an adapter for every model the cell applies to. (`alphafold3` is the
+reference implementation; `chai1` ships TorchScript archives with no callable
+submodule forward -- those are n/a by construction, not gaps.)
 
-**`p_atom_pair` is four models of one lineage, so it is one suspect, not four --
-and the shapes say it is probably the HARNESS.**
+# Category 2: cells that ran and disagreed -- all closed
 
-    ours   (51, 32, 128, 16)      51 * 32 = 1632 = 68 tokens * 24 max_atoms
-    native (18, 32, 128, 16)      18 * 32 =  576, i.e. 574 real atoms rounded up
+Eight PORT bugs, found in cells that had no gate before 2026-09-09:
 
-Our flat queries axis is padded to `num_tokens * max_atoms`; native's stops at
-the real atoms. The gate compares `pg[:18]` against `pr[:18]` on the stated
-assumption that "the leading windows hold the same atoms in the same order",
-and for the QUERY axis that holds -- `c_atom_cond` is exact under the same
-`[:574]` slicing, which proves the real atoms are contiguous at the front.
+| model | bug | after |
+|---|---|---|
+| opendde | the diffusion atom pair ran on ZERO weights (4 of 5 terms): the converter asserted which of a `X`/`X_1` haiku pair was live, and the forward changed under it | denoise 0.464 -> 0.0054 A/atom |
+| boltz2 | `arcsinh(charge)` where it takes the RAW formal charge | c_atom_cond exact |
+| boltz2 | slid the atom key window where it CLIPS AND PADS | a_token -> 1.000000 |
+| boltz2 | padded keys not masked from real queries -- caught by a registry TEST, not a number | edge window 1.78 -> 0.18 |
+| boltz2 | relative-CHAIN bucket keyed on entity, not chain | trunk loop exact through 4 passes |
+| boltz2 | atom-pair offset is KEYS minus QUERIES, uniquely in the panel | whole atom path -> 1.000000 |
+| rosettafold3 | slid the key window where it CLAMPS AND MASKS | a_token 5.7e-01 -> 1.11e-01 |
+| rosettafold3 | `arcsinh(charge)` again, second model in two days | c_atom_cond 5.11e-02 -> 2.50e-06 |
 
-But the KEY axis is 128 wide per window, and for the last real windows those
-keys run PAST atom 574. Ours then reads our own padding slots (574..623);
-native's axis simply ends at 576. So the two windows hold different keys near
-the tail, and a tail artifact would explain a large `max|d|` with `q_atom`
-exact -- q is a per-atom quantity over the query axis, p is per key PAIR.
+And EIGHT ORACLE bugs, which is the half of the work that is easy to
+under-report. Each had a distinguishing signature, and that is what to reuse:
 
-Prediction to check with `DIAG=1` (added for exactly this): the per-window
-max|d| should be concentrated at the HIGH window indices, and the per-key-position
-max|d| at the END of each window. If it is spread evenly instead, the residual
-is real and the pair conditioning genuinely differs.
+| harness fault | how it was told apart |
+|---|---|
+| rf3's chirality term disabled on the native side while the port implements it | `ZERO_POS=1` made the whole encoder exact: the chirality signal is a gradient w.r.t. the NOISY COORDINATES, the only term that vanishes with them |
+| if2's atom pair returned as None ("it windows the dense axis" -- true of the dense layout, false of the packed one the checkpoint runs) | once returned, `p_pair_valid` per window was exact everywhere while q blew up on windows 16-17 alone |
+| boltz2 fed the DENSE atom layout when its featuriser packs | `c_atom_cond`, which has no window, stayed at 0.999999 throughout |
+| boltz2's `SingleConditioning` fed sigma instead of `c_noise(sigma)` | single_cond rms 0.4367 of native's with max\|d\| 6762 -- what a Fourier embedding does when its input is off by that much |
+| if2's pairformer needs `v2=True` (`pre_norm_s`, not `attention.norm_s`) | 128 tensors missing in load_state_dict |
+| if2's MSA one-hot built in OUR class order, not boltz's | s 0.9537 / z 0.9291 -- a permuted vocabulary where most columns still land somewhere plausible |
+| `is_paired` zeroed when boltz2 marks the QUERY ROW | s 0.974 -> 1.000000 on its own |
+| BLOCKS truncating only OUR side (rf3), and `_truncate_atom_blocks` slicing the wrong axis for the per-block-LN family | the 1-block run came back WORSE than the 3-block one; haiku's scan caught the axis |
 
-Do not "fix" this by trimming the comparison until the DIAG says which it is.
-Seven of the nineteen BAD cells so far have been the oracle, so the prior is
-strong -- but the prior is exactly what makes a wrong trim easy to believe.
-There is a tension to resolve first: `q_atom` is 1.000000 for protenix while
-`p_atom_pair` is 9.64 off, and q is computed FROM p -- so either the comparison
-is misaligned or p is not what feeds q. The comparison rests on an assumption
-stated in its own comment ("the leading windows hold the same atoms in the same
-order") while our flat atom axis is padded to `num_tokens * max_atoms` and
-native's is not (51 windows against 18). `DIAG=1` now breaks it down per window
-and per key position -- run that before reading any vendor source, which is the
-lesson the ESMFold2 OXT taught.
+One more that is neither: **intellifold2's z_init read 2.06e-02 because our blob
+stores its trunk in bfloat16** -- deliberately, mirroring AF3's own param dtype
+policy, and measured fold-neutral where that policy is set. Rounding native to
+the blob's dtype gives 3.79e-06. Only `alphafold3` and `intellifold2` store bf16
+at all, so nothing else in the panel can hit it.
 
-Eliminated already: it is NOT the padded-key `ref_space_uid` collision.
-`OPENFOLD3_LINEAGE` -- which gates `offsets_valid & keys_mask` -- already
-contains all four padded-key families. And it is not the conformer centering:
-the numbers are byte-identical centred or not.
+# The gate that measures an amplifier
 
-`rosettafold3` accounts for four of the twelve on its own and has no
-`L2.conditioning`/`L1.trunk` adapter either, so it is the single worst-covered
-model in the panel.
+`L1.trunk` at FULL depth on synthetic input is not a port measurement. rf3's z
+reads 5.8e-04 at one block, 5.0e-04 at four and 1.2e-01 at 48, where the single
+track has grown to rms 2.7e4 while the pair track has FALLEN to 24 --
+non-monotone, i.e. saturated far outside the trained input distribution. Read
+1-4 blocks for the port and the full depth as a smoke test. The driver should
+run a low-depth cell too; until it does, three models will keep reading BAD
+there for a reason that is not a bug.
 
+# The one question that is open and is not a hole
 
+With boltz2's trunk provably exact through four recycle passes, something
+DOWNSTREAM turns a correct pair representation into a worse structure on 6MRR
+about 10% of the time (mean 0.700 against 0.540 over 40 samples, four of them
+at 0.84-1.5, while at zero recycles the two conventions are level). See
+`model_config.CHAIN_BUCKET_ON_SAME_CHAIN` for the full numbers and the knob.
 
-# rosettafold3's atom encoder: a source-derived hypothesis to test
-
-`q_atom` 0.84 and `a_token` 0.57 are the worst remaining numbers in the panel.
-Read off rf3's own source rather than guessed at, while the matrix held the GPU:
-
-  * ITS KEY WINDOW IS CLAMP+MASK, NOT SLIDE, and that is almost certainly it.
-    `AttentionPairBiasDiffusion.atom_attention` builds
-    `Cs = arange(nq)*32 + 16`, `patchk = arange(128) - 64`, so window i takes
-    keys `32i-48 .. 32i+79` -- byte-identical to our `_key_window` 'pad' policy
-    -- then CLAMPS out-of-range indices to [0, L-1] and masks them
-    (`-1e9 * (maskQ | maskK)`). Our default for rf3 is AF3's SLIDE, which
-    shifts the whole window inside the real atom count instead. rf3 is already
-    in KEY_MASKED_ATOM_ATTENTION but has NO `padded_keys` knob, and the note
-    there explains why: it was reasoned to "reach the same place through a short
-    atom count". That reasoning is about the MASK, not about where the window
-    SITS. So: give rf3 `padded_keys=True` and re-measure.
-  * NOT the offset sign. `D_LL = ref_pos.unsqueeze(-2) - ref_pos.unsqueeze(-3)`
-    is queries - keys, the same as AF3 -- unlike boltz2.
-  * NOT the inverse-distance form. rf3_net.yaml sets
-    `use_inv_dist_squared: true` at both call sites, i.e. `1/(1+|d|^2)`, ours.
-  * NOT the fused-feature column split, which `c_atom_cond` 0.051 would
-    otherwise point at. The 393-wide `process_input_features` weight has a norm
-    signature that confirms the converter's assumed order exactly: three TINY
-    columns at 0-2 (ref_pos, barely used), two large scalars at 3-4 (charge,
-    mask), 128 element columns at 5-132, four structured 64-wide character
-    groups at 133-388 with decreasing means (1.56 / 2.37 / 1.02 / 0.55), then
-    three tiny columns at 389-391 (ref_pos_ground_truth) and one large at 392
-    (has_atom_level_embedding). Both are fed as zeros and dropped by the
-    converter, which is what rf3 does with them.
-
-What the forensic could NOT settle is rf3's ELEMENT indexing: the column norms
-are scattered (top classes 4, 34, 20, 45, 26) with median 2.30, so they do not
-rank by element frequency and cannot say whether class 6 is carbon. That needs
-a gate, not a weight histogram.
-
-# The trunk z-INIT had no gate at all, and now it does
-
-`dev/oracles/trunk_init_parity.py` (L1i). `trunk_parity` feeds the pairformer
-SYNTHETIC s and z -- the right way to gate 48 blocks of arithmetic, and it means
-nothing ever measured the tensor those blocks start from: the relative position
-encoding, the bond embeddings, and for boltz2 two terms AF3 has no equivalent
-for. `conditioning_parity` gates the DIFFUSION conditioner's copy of the
-relative encoding, not the trunk's.
-
-boltz2 is the model that proved the gap was real, and it now reads
-**corr 1.000000, max|d|/rms 2.77e-06** with its own convention -- against
-0.954268 / 6.49e-01 with AF3's, where the per-pair max|d| is IDENTICAL on all
-4624 pairs, one constant vector everywhere.
-
-CLOSED -- all 12 models that have this module have an adapter and every one is
-EXACT (1.95e-06 to 5.54e-06): boltz2, rosettafold3, openfold3, openbind0,
-protenix1, protenix2, opendde, intellifold2 and all four esmfold2 releases.
-(alphafold3 is the reference; chai1 ships TorchScript.)
-
-The esmfold2 four compare against `esmfold2_reference`'s own three lines rather
-than a vendor module, which is what every other esmfold2 gate does. Their one
-subtlety is that the two implementations hold the SAME vector in different
-layouts -- ESM `[atom 384 | restype 33 | profile 33 | del 1]` against AF3
-`[restype 31 | profile 31 | del 1 | atom 384]` -- and the restype blocks are a
-PERMUTATION (ESM puts the MSA gap at class 1, below the residues), so the gate
-applies `esm_class_of_af3` to the FEATURE the way the converter applies it to
-the weight ROWS. Reading it as a slice is what once read z_init corr 0.008.
-
-Older text below. The other twelve are one function each and the
-recipe is the same: assemble the vendor's own z-init terms from its own
-checkpoint and feed them OUR features.
-
-`PASSES=n` turns the same gate into the FULL TRUNK LOOP -- boltz's own
-`s/z recycle -> msa_module -> pairformer`, n times, against our own
-`Evoformer.__call__` carrying `prev`. CLOSED, and it settled the chain-bucket
-question:
-
-  convention     z-init      loop, 1 pass         loop, 4 passes
-  same-chain     2.77e-06    s 1.9e-05 z 3.5e-05  s 1.5e-05 z 1.9e-05
-  same-entity    6.49e-01    s 1.49    z 9.71     s 1.02    z 3.42
-
-Our recycled trunk is bit-faithful to boltz2 with its own convention, which is
-now the shipped default.
-
-THREE oracle bugs came out of this gate before it was trustworthy, and they are
-the reason its first reading (s 0.963 / z 0.915) was a lead and not a verdict:
-
-  * boltz2's pairformer needs `v2=True` -- its layers carry `pre_norm_s` where
-    the default builds `attention.norm_s`, 128 tensors missing, and the
-    checkpoint's hparams do not mention the flag.
-  * the MSA one-hot has to be built in BOLTZ's 33-class order, because our
-    converter permutes those columns into our 31.
-  * `is_paired` is 1 ON THE QUERY ROW for boltz2 (0 everywhere for rf3 -- the
-    two vendors disagree about what the flag means). Feeding zeros was the last
-    of the three and worth s 0.974 -> 1.000000 on its own.
-
-What remains is DOWNSTREAM of the trunk and is a real question rather than a
-hole: with the trunk provably exact, something in the diffusion or the sampler
-turns a correct pair representation into a worse structure on 6MRR about 10% of
-the time (mean 0.700 against 0.540, four samples of 40 at 0.84-1.5, while at
-zero recycles the two conventions are level). The loop gate is the tool for the
-next model that shows this.
+Read `dev/oracles/gate_applies.py` first -- a cell is only a hole if the model
+HAS that module and no other cell covers it.
