@@ -334,9 +334,31 @@ def native_of3(model, fb, feats, pos_noisy, s, z, n_tok):
   with torch.no_grad():
     a, q_l, c_l, p_lm = net(batch, rl=t(pos_noisy)[None],
                             si_trunk=t(s)[None], zij_trunk=t(z)[None])
+  # WHICH (block, query, key) SLOTS HOLD A REAL ATOM PAIR -- the of3 family had
+  # no such mask and so no `p_pair_valid` row, which is the whole reason its
+  # p_atom_pair read 1.39e+00 (of3) and 1.26e+00 (openbind0) while every other
+  # vendor's valid-slot comparison came out at ~1e-06.
+  #
+  # of3 SLIDES its key window rather than clipping and padding, so there are no
+  # out-of-range key slots to exclude -- but the window still covers PADDED
+  # ATOMS past the real count, and those hold whatever each implementation
+  # leaves there. The start formula is AF3's own slide, which is exactly what
+  # both sides use (model_features._key_window, policy 'slide'), so the mask
+  # cannot drift from the window it describes.
+  pl = np.asarray(p_lm).reshape(*np.asarray(p_lm).shape[-4:])
+  nw, nq, nk = pl.shape[0], pl.shape[1], pl.shape[2]
+  n_padded = nw * nq
+  starts = np.clip(np.arange(nw) * nq + (nq - nk) // 2, 0, n_padded - nk)
+  key_idx = starts[:, None] + np.arange(nk)[None, :]
+  q_idx = np.arange(nw)[:, None] * nq + np.arange(nq)[None, :]
+  n_real = int(np.asarray(batch['atom_mask'] if 'atom_mask' in batch
+                          else batch['ref_mask']).reshape(-1).sum())
+  real = np.zeros(n_padded, bool)
+  real[:n_real] = True
+  pad_mask = (real[q_idx][:, :, None] & real[key_idx][:, None, :])
   return (np.asarray(a)[0], np.asarray(q_l)[0],
           np.asarray(c_l).reshape(-1, np.asarray(c_l).shape[-1]),
-          np.asarray(p_lm).reshape(*np.asarray(p_lm).shape[-4:]), None)
+          pl, pad_mask)
 
 
 def native_if2(model, fb, feats, pos_noisy, s, z, n_tok):
@@ -1337,7 +1359,19 @@ def main(argv=None):
   # leading windows hold the same atoms in the same order, so compare those.
   nw = min(pg.shape[0], pr.shape[0])
   if pg.shape[1:] == pr.shape[1:]:
-    _cmp('p_atom_pair', pg[:nw], pr[:nw])
+    # OVER ALL SLOTS, INCLUDING THE PADDED ONES. Kept because it is what
+    # localised boltz2's offset sign and if2's masked-slot artifact, and
+    # suppressing it would hide the DIAG breakdown below -- but it is not a
+    # parity measurement, and it read BAD for all eight models for exactly that
+    # reason. On openfold3 only 380 of 73728 slots are padding, 0.5%, and they
+    # alone give max|d| 23.37 against 1.3e-04 on the real ones.
+    #
+    # So it is TAGGED, and `parity_audit` skips a row tagged
+    # `[superseded by X]` -- provided X is itself printed and graded. The tag is
+    # only emitted when the valid-slot row actually follows, so this cannot
+    # retire the only comparison a gate makes.
+    _cmp('p_atom_pair', pg[:nw], pr[:nw],
+         note=('[superseded by p_pair_valid]' if pad_mask is not None else ''))
     # WHERE the disagreement lives, because the claim above -- "the leading
     # windows hold the same atoms in the same order" -- is an assumption, and
     # p_atom_pair reads corr 0.9678 for protenix2 while q_atom, which is

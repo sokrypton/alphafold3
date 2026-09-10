@@ -122,8 +122,26 @@ def native_if2(model, batch, rng, n, noise):
   print('  checkpoint: c_z %d, c_s %d, c_s_inputs %d, c_fourier %d, relpos %d'
         % (c_z, c_s, c_s_inputs, c_fourier, n_relpos))
 
-  net = DiffusionConditioning(c_s=c_s, c_z=c_z, c_s_inputs=c_s_inputs,
-                              c_fourier=c_fourier)
+  # if2's constructor gained six REQUIRED arguments (sigma_data, no_transitions,
+  # transition_n, r_max, s_max, eps), so this gate had been dying in
+  # `TypeError: __init__() missing 6 required positional arguments` and not
+  # running at all. Found 2026-09-10 when L2 was first driven to completion.
+  #
+  # Read from if2's OWN inference config rather than written out here, the same
+  # way the widths are read off the checkpoint: a release that changes one is
+  # then followed instead of silently compared against last year's default.
+  # `v2_inference_config` is the config the checkpoint runs under (see
+  # native_if2 in atom_parity.py for why v2 and not the module defaults).
+  from intellifold.openfold import v2_inference_config as _v2
+  _dcfg = _v2.config.diffusion.diffusion_conditioning
+  _get = lambda k: (lambda v: v.get() if hasattr(v, 'get') else v)(_dcfg[k])
+  net = DiffusionConditioning(
+      c_s=c_s, c_z=c_z, c_s_inputs=c_s_inputs, c_fourier=c_fourier,
+      sigma_data=float(_get('sigma_data')),
+      no_transitions=int(_get('no_transitions')),
+      transition_n=int(_get('transition_n')),
+      r_max=int(_get('r_max')), s_max=int(_get('s_max')),
+      eps=float(_get('eps')))
   missing, unexpected = net.load_state_dict(sub, strict=False)
   print('  native: %d tensors, %d missing, %d unexpected %s'
         % (len(sub), len(missing), len(unexpected), list(missing)[:2]))
@@ -196,13 +214,26 @@ def native_of3(model, batch, rng, n, noise):
   print('  checkpoint: c_z %d, c_s %d, c_s_input %d, c_fourier %d, relpos %d'
         % (c_z, c_s, c_s_input, c_fourier, n_relpos))
 
-  cfg = model_config('initial_training')
-  dc = cfg.model.diffusion_module.diffusion_conditioning
+  # of3's `model_config` used to be a FACTORY taking a preset name and is now a
+  # plain ConfigDict, and `diffusion_module` moved from `cfg.model` to
+  # `cfg.architecture` -- so this gate had been dying in
+  # `TypeError: 'ConfigDict' object is not callable` and not running at all for
+  # openfold3 and openbind0. Found 2026-09-10 when L2 was first driven to
+  # completion; it FAILs loudly, which is the only reason it was findable.
+  #
+  # Read positionally from the ConfigDict rather than pinned to either shape, and
+  # resolve FieldReferences (the module-level `max_relative_idx` is a
+  # FieldReference object, not an int, so `int()` on it is required).
+  cfg = model_config() if callable(model_config) else model_config
+  dc = (cfg.architecture.diffusion_module.diffusion_conditioning
+        if 'architecture' in cfg
+        else cfg.model.diffusion_module.diffusion_conditioning)
   kw = dict(c_s_input=c_s_input, c_s=c_s, c_z=c_z, c_fourier_emb=c_fourier,
             sigma_data=16.0)
   for k in ('max_relative_idx', 'max_relative_chain'):
     if k in dc:
-      kw[k] = dc[k]
+      v = dc[k]
+      kw[k] = int(v.get() if hasattr(v, 'get') else v)
   net = DiffusionConditioning(**kw)
   missing, unexpected = net.load_state_dict(sub, strict=False)
   print('  native: %d tensors, %d missing, %d unexpected %s'
@@ -223,6 +254,12 @@ def native_of3(model, batch, rng, n, noise):
   nb = {k: torch.tensor(np.asarray(getattr(tf, k)).astype(np.int64))[None]
         for k in ('asym_id', 'residue_index', 'entity_id', 'token_index',
                   'sym_id')}
+  # of3's forward now reads `batch['token_mask']` (diffusion_conditioning.py:241)
+  # and KeyErrors without it. All ones: the gate feeds `n` real tokens and no
+  # padding, and a partial mask here would compare a masked conditioning against
+  # our unmasked one. Asserted by construction rather than by comment -- `n` IS
+  # the token count the features were built for.
+  nb['token_mask'] = torch.ones(1, n)
   with torch.no_grad():
     single, pair = net(nb, torch.tensor(np.asarray([noise], np.float32)),
                        torch.tensor(s_inputs)[None], torch.tensor(s)[None],

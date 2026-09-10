@@ -98,6 +98,7 @@ def grade(corr, ratio):
 def audit(logdir, unparsed=None):
   rows = []
   floors = collections.defaultdict(dict)
+  superseded = {}
   for f in sorted(os.listdir(logdir)):
     if not f.endswith('.log'):
       continue
@@ -120,14 +121,38 @@ def audit(logdir, unparsed=None):
           unparsed.append((gate, model, line.strip()))
         continue
       corr = float(m.group('corr'))
-      ratio = _ratio(m.group('rest'))
+      rest = m.group('rest')
+      # A gate may TAG a comparison it makes for diagnosis and does not want
+      # graded: `[superseded by X]` means X is the parity measurement and this
+      # row is the same tensor over a wider, meaningless domain.
+      #
+      # `L2.atom_encoder`'s p_atom_pair is the case this exists for. It compares
+      # the atom pair over ALL window slots including the padded ones, and read
+      # BAD for all EIGHT applicable models -- on openfold3, 380 of 73728 slots
+      # are padding (0.5%) and they alone give max|d| 23.37 where the real slots
+      # give 1.3e-04. The gate already printed the restricted comparison
+      # (`p_pair_valid`, ~1e-06 everywhere); nothing was reading it.
+      #
+      # The tag is only honoured when the named row is actually PRESENT in the
+      # same log, so it cannot retire a measurement that was never replaced.
+      sup = re.search(r'\[superseded by ([\w.]+)\]', rest)
+      ratio = _ratio(rest)
       name = (m.group('name') or heading or '?').strip()
+      if sup:
+        superseded.setdefault((gate, model), {})[name] = sup.group(1)
       if name.endswith('_floor'):
         floors[(gate, model)][name[:-len('_floor')]] = ratio
         continue
       rows.append([gate, model, name, corr, ratio, grade(corr, ratio)])
 
-  # Second pass: a row at or below its own measured floor is unresolvable.
+  # Second pass: drop rows a gate tagged as superseded, provided the row that
+  # supersedes them is really there.
+  present = {(g, m, n) for g, m, n, *_ in rows}
+  rows = [r for r in rows
+          if not (superseded.get((r[0], r[1]), {}).get(r[2])
+                  and (r[0], r[1],
+                       superseded[(r[0], r[1])][r[2]]) in present)]
+  # ...then: a row at or below its own measured floor is unresolvable.
   for r in rows:
     f = floors.get((r[0], r[1]), {}).get(r[2])
     if f is not None and r[4] is not None and r[4] <= f and r[5] != 'PARITY':

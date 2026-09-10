@@ -33,7 +33,7 @@ _PROTENIX_CKPT = {
 }
 
 
-def _cmp(tag, got, ref, mask=None):
+def _cmp(tag, got, ref, mask=None, note=''):
   a = np.asarray(got, np.float64)
   b = np.asarray(ref, np.float64)
   if mask is not None:
@@ -45,10 +45,13 @@ def _cmp(tag, got, ref, mask=None):
   # 1e-6 logit difference at a bin boundary moves one entry by O(1) while every
   # other entry is exact. max|d| alone cannot tell that apart from a systematic
   # error; p99.9 >> 0 can.
-  print('  %-10s corr %.6f  rms ours/native %.4f  max|d| %.5f  p99.9|d| %.2e  '
-        'rms(native) %.3f  max|d|/rms %.2e'
-        % (tag, np.corrcoef(a, b)[0, 1], np.sqrt((a ** 2).mean()) / rb,
-           d.max(), np.percentile(d, 99.9), rb, d.max() / rb))
+  # `note` carries a tag the audit reads, e.g. '[superseded by p_pair_valid]'
+  # for a comparison the gate makes for DIAGNOSIS and does not want graded.
+  line = ('  %-10s corr %.6f  rms ours/native %.4f  max|d| %.5f  p99.9|d| %.2e'
+          '  rms(native) %.3f  max|d|/rms %.2e'
+          % (tag, np.corrcoef(a, b)[0, 1], np.sqrt((a ** 2).mean()) / rb,
+             d.max(), np.percentile(d, 99.9), rb, d.max() / rb))
+  print(line + ('  ' + note if note else ''))
 
 
 def _truncate(stack, name='blocks'):
