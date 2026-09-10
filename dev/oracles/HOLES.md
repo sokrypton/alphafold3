@@ -316,3 +316,34 @@ Found by adding FLOOR to the cell, which needs a second call. Consequences:
 The fix is to build the head ONCE and apply it to two sets of inputs (the
 inputs are currently closed over inside `fwd()`), not to call `ours()` again.
 Not done here: it is a refactor of the gate's core and the level was mid-run.
+
+## RETRACTION: esmfold2's confidence gap is NOT our-side bf16 (2026-09-10)
+
+`L4.confidence` for the two ESMFold2 releases with a confidence head reads
+
+    esmfold2        full_pae 5.68e-01  full_pde 2.75e-01  plddt 7.83e-02  resolved 4.58e-02
+    esmfold2_fast   full_pae 5.23e-01  full_pde 3.71e-01  plddt 1.84e-01  resolved 1.01e-01
+
+and PARITY.md carried these as a characterised residual: "the two esmfold2
+confidence heads at native's bf16 floor". `confidence_parity.ours()` even has a
+BF16 knob for this family, with the reasoning written out -- ESMFold2's own head
+casts under `autocast(bfloat16)` on a GPU and the dump was produced on one, so
+an fp32 comparison would be comparing two precisions.
+
+MEASURED, and it is not that:
+
+    esmfold2       BF16=none  pae 5.68e-01   BF16=all  pae 5.62e-01
+    esmfold2_fast  BF16=none  pae 5.23e-01   BF16=all  pae 5.17e-01
+
+Running OUR head in bfloat16 moves the third digit. So whatever these rows are,
+they are not our side's precision, and the driver was right not to set the knob
+(it would have changed nothing while looking like diligence).
+
+What is still POSSIBLE and untested: that NATIVE's own output is that noisy, i.e.
+the DUMP is one draw from a bf16-wide band. That is a claim about native's
+reproducibility and it cannot be tested from our side at all --
+[[esm-tower-numerical-modes]] measured exactly this shape of thing before
+(bimodal ~6e-4 across processes, "hid_*.npz is one draw; measure the band
+first"). The test is two dumps from ~/venv_esm and the spread between them.
+Until that exists, these four rows are UNEXPLAINED, not characterised, and
+PARITY.md should not call them a bf16 floor.
