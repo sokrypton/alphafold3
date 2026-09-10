@@ -211,7 +211,21 @@ if want L1; then
   # distribution. Both cells are reported: the deep one is a smoke test, the
   # shallow one is the port.
   echo "== L1b1 trunk pairformer, ONE block"
-  for m in $MODELS; do gate L1.trunk1 "$m" '^  (single|pair|s|z) ' dev/oracles/trunk_parity.py "$m" --blocks 1; done
+  # FLOOR here too. The one-block cell IS the port measurement for most models
+  # -- opendde reads 2.56e-04 and protenix1 4.27e-04, comfortably resolved --
+  # but not for the OF3 family, whose activations on synthetic input are two
+  # orders larger than anyone else's: after ONE block openfold3's single track
+  # has rms 16750 and openbind0's 1958, against 6.8 for opendde and 4.8 for
+  # protenix1, from the same N(0, 0.5) input. `rms ours/native` is 1.0000, so
+  # native amplifies identically -- it is the input being far outside the
+  # trained distribution, not a scale bug. At that magnitude a 1e-6 input
+  # perturbation already moves z by 5.7e-03 (of3) and 7.3e-03 (openbind0),
+  # which is above what our port differs by, so the cell cannot answer for
+  # those two and says FLOOR instead of a number nobody should trust.
+  for m in $MODELS; do
+    (export FLOOR=1e-6
+     gate L1.trunk1 "$m" '^  (single|pair|s|z) ' dev/oracles/trunk_parity.py "$m" --blocks 1)
+  done
   # L1i -- the tensor the pairformer STARTS FROM. trunk_parity feeds it
   # synthetic s and z, so nothing here ever measured the relative position
   # encoding or the bond embeddings until this gate existed. In the driver from

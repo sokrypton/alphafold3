@@ -213,3 +213,33 @@ which is what the L1b cells feed.
 The general lesson is the one [[harness-rot]] describes, one level in: a knob
 implemented in one adapter and read by a cell for all fourteen models produces
 thirteen silent passes.
+
+## An existing gate the driver never runs (2026-09-10)
+
+`dev/oracles/real_trunk_parity.py` is written, documented, has two native dumps
+beside it (`native_trunk_5k9p_plain.npz`, `native_trunk_6mrr.npz`) -- and
+appears nowhere in `run_all_parity.sh`. Its own docstring says what it covers
+that nothing else does:
+
+  * the INPUT EMBEDDER (`create_target_feat_embedding` -> s_inputs), which five
+    oracles build and none compares;
+  * the trunk's output on a REAL input rather than one block on noise;
+  * the RECYCLING loop, since L1-L4 all measure a single pass.
+
+This is not academic. The synthetic trunk cell is resolution-limited for the OF3
+family: after one block openfold3's single track has rms 16750 from an
+N(0, 0.5) input (openbind0 1958, against 6.8 for opendde), and at that magnitude
+a 1e-6 input perturbation moves z further than our port does. Both cells now
+grade FLOOR, which is honest but is not the same as verified -- and a real-input
+gate is exactly what would verify them.
+
+What it would take: `native_trunk_dump.sh` dumps PROTENIX's trunk specifically
+(its own runner and featuriser, two class-level monkeypatches). Wiring the gate
+in for protenix2 is a driver line. Covering openfold3 needs an of3 equivalent of
+that dump script, which is real work -- and until it exists, `gate_applies.py`
+should call the of3 cells HOLES rather than let the level look complete.
+
+Read the control in its docstring before believing any number it produces: 48
+blocks x 10 recycles amplify float differences, and on 6MRR -- where our fold
+matches native at 0.70 A -- the pair still only correlates 0.960. That mistake
+already cost most of a session once.
