@@ -234,6 +234,28 @@ def native_if2(model, msa, s_inputs, z, n_msa):
                        # never read, so if2 does not build those 12 tensors.
                        # Leaving it False asks for them and reports 12 missing.
                        skip_unused_modules=True)
+  # ROUND NATIVE'S WEIGHTS THE WAY THE BLOB STORES THEM -- the same exposure
+  # `trunk_parity` had, found the same day and for the same reason. if2 is the
+  # only port whose blob keeps the trunk region in bfloat16 (a deliberate,
+  # measured, fold-neutral policy: converters/intellifold2.py `_record_dtype`),
+  # and this gate runs with bfloat16='none', so without this it compares
+  # bf16-rounded weights against native's fp32 checkpoint and reports the
+  # STORAGE dtype as a disagreement.
+  #
+  # Measured: the shipped blob reads max|d|/rms 1.05e-01 on this cell and an
+  # fp32-converted one (IF2_FP32_BLOB=1) reads 1.06e-04, so the whole reading
+  # was the rounding. LayerNorm scale/offset stay fp32 and every other tensor
+  # rounds -- the converter's own rule. IF2_NO_BF16_WEIGHTS=1 measures the
+  # storage policy instead.
+  if not os.environ.get('IF2_NO_BF16_WEIGHTS'):
+    n_round = 0
+    for k in list(sub):
+      if '.layer_norm' in k:
+        continue
+      sub[k] = sub[k].to(torch.bfloat16).float()
+      n_round += 1
+    print('  native: %d of %d tensors bf16-rounded to match the blob'
+          % (n_round, len(sub)))
   missing, unexpected = net.load_state_dict(sub, strict=False)
   print('  native: %d tensors, %d missing, %d unexpected %s %s'
         % (len(sub), len(missing), len(unexpected), list(missing)[:2],
