@@ -45,10 +45,41 @@ import re
 import sys
 import collections
 
+# `<name> corr <value>`, and then whatever relative measure the gate happens to
+# print. THREE formats are in use and this file used to read only one of them:
+#
+#   trunk_parity / msa_parity   max|d| X ... rms(native) Y   -> ratio = X/Y
+#   prot_parity                 relerr Z                     -> ratio = Z
+#   the esmfold2 reference gate corr only, no magnitude       -> ratio = None
+#
+# and a name may contain '->' (`msa -> pair`). Requiring `max|d|` and excluding
+# '>' from the name silently dropped 36 comparisons -- every L1b cell plus
+# L1.trunk_ref, which is esmfold2's ONLY trunk gate. A parser that skips a line
+# it does not recognise is the same failure as a driver that does not run a gate
+# ([[harness-rot]]), so `--strict` now reports unparsed `corr` lines instead of
+# ignoring them.
+# The name is OPTIONAL: the esmfold2 reference gate prints a bare
+# `corr ... relerr ...` under a heading line, and four such rows went ungraded
+# because the name was required. Nameless rows are labelled with the heading
+# that precedes them.
 _LINE = re.compile(
-    r'^\s{2,}(?P<name>[A-Za-z_][\w()\'/ .-]*?)\s+corr\s+(?P<corr>[-\d.]+)'
-    r'.*?max\|d\|\s+(?P<maxd>[\d.eE+-]+)'
-    r'(?:.*?rms\(native\)\s+(?P<rms>[\d.eE+-]+))?')
+    r'^\s{2,}(?:(?P<name>[A-Za-z_][\w()\'/ .>-]*?)\s+)?corr\s+(?P<corr>[-\d.]+)'
+    r'(?P<rest>.*)$')
+_HEAD = re.compile(r'^\S.*?(?P<h>[\w ]+?)\s*(?:\(|:|$)')
+_MAXD = re.compile(r'max\|d\|\s+([\d.eE+-]+)')
+_RMS = re.compile(r'rms\(native\)\s+([\d.eE+-]+)')
+_RELERR = re.compile(r'relerr\s+([\d.eE+-]+)')
+
+
+def _ratio(rest):
+  """The row's relative error, whichever way its gate spells it."""
+  md, rms = _MAXD.search(rest), _RMS.search(rest)
+  if md and rms and float(rms.group(1)):
+    return float(md.group(1)) / float(rms.group(1))
+  re_ = _RELERR.search(rest)
+  if re_:
+    return float(re_.group(1))
+  return None
 
 
 def grade(corr, ratio):
@@ -64,7 +95,7 @@ def grade(corr, ratio):
   return 'BAD'
 
 
-def audit(logdir):
+def audit(logdir, unparsed=None):
   rows = []
   floors = collections.defaultdict(dict)
   for f in sorted(os.listdir(logdir)):
@@ -77,15 +108,20 @@ def audit(logdir):
     gate = '.'.join(parts[:2]) if len(parts) > 2 else parts[0]
     model = '.'.join(parts[2:]) if len(parts) > 2 else (
         parts[1] if len(parts) > 1 else '?')
+    heading = ''
     for line in open(os.path.join(logdir, f), errors='ignore'):
+      if line[:1] not in (' ', '\t', '\n') and 'corr' not in line:
+        h = _HEAD.match(line.rstrip('\n'))
+        heading = (h.group('h').strip().lower().replace(' ', '_')
+                   if h else '') or heading
       m = _LINE.match(line.rstrip('\n'))
       if not m:
+        if unparsed is not None and 'corr' in line:
+          unparsed.append((gate, model, line.strip()))
         continue
       corr = float(m.group('corr'))
-      maxd = float(m.group('maxd'))
-      rms = m.group('rms')
-      ratio = (maxd / float(rms)) if rms and float(rms) else None
-      name = m.group('name').strip()
+      ratio = _ratio(m.group('rest'))
+      name = (m.group('name') or heading or '?').strip()
       if name.endswith('_floor'):
         floors[(gate, model)][name[:-len('_floor')]] = ratio
         continue
@@ -101,7 +137,8 @@ def audit(logdir):
 
 def main(argv):
   logdir = argv[1] if len(argv) > 1 else 'dev/oracles/parity_runs/2026-09-08'
-  rows = audit(logdir)
+  unparsed = []
+  rows = audit(logdir, unparsed)
   t = collections.Counter(r[5] for r in rows)
   print('%s: %d comparisons in %d logs' % (logdir, len(rows),
                                            len({(r[0], r[1]) for r in rows})))
@@ -123,7 +160,12 @@ def main(argv):
       print('  %-5s %-20s %-26s %-16s corr %.6f  max|d|/rms %s'
             % (g, gate, model, name, corr,
                '%.2e' % ratio if ratio is not None else 'n/a'))
-  return 1 if t['BAD'] else 0
+  if unparsed:
+    print('\n%d `corr` line(s) THIS FILE COULD NOT READ -- a comparison it '
+          'cannot parse is a comparison nobody grades:' % len(unparsed))
+    for gate, model, line in unparsed[:10]:
+      print('  %-20s %-26s %s' % (gate, model, line[:70]))
+  return 1 if (t['BAD'] or unparsed) else 0
 
 
 if __name__ == '__main__':
