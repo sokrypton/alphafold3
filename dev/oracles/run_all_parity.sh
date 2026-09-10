@@ -188,7 +188,16 @@ fi
 # --- L1 / L1b: the trunk, and the MSA stack inside it ---------------------
 if want L1; then
   echo "== L1 trunk pairformer"
-  for m in $MODELS; do gate L1.trunk "$m" '^  (single|pair) ' dev/oracles/trunk_parity.py "$m"; done
+  for m in $MODELS; do gate L1.trunk "$m" '^  (single|pair|s|z) ' dev/oracles/trunk_parity.py "$m"; done
+  # AND AT ONE BLOCK, which is the cell that means something. At full depth this
+  # gate measures an AMPLIFIER on synthetic input: rosettafold3's z reads
+  # 5.8e-04 at one block, 5.0e-04 at four and 1.2e-01 at 48, where the single
+  # track has grown to rms 2.7e4 while the pair track has FALLEN to 24 --
+  # non-monotone, so the stack is saturated far outside its trained input
+  # distribution. Both cells are reported: the deep one is a smoke test, the
+  # shallow one is the port.
+  echo "== L1b1 trunk pairformer, ONE block"
+  for m in $MODELS; do gate L1.trunk1 "$m" '^  (single|pair|s|z) ' dev/oracles/trunk_parity.py "$m" --blocks 1; done
   # L1i -- the tensor the pairformer STARTS FROM. trunk_parity feeds it
   # synthetic s and z, so nothing here ever measured the relative position
   # encoding or the bond embeddings until this gate existed. In the driver from

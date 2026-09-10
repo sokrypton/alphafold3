@@ -65,6 +65,7 @@ def reason(gate, model):
     return 'protenix\'s MSA module is gated by L1b.prot, not L1b.msa'
 
   ref_covered = {'L1.trunk': 'L1.trunk_ref',
+                 'L1.trunk1': 'L1.trunk_ref',
                  'L3.denoise': 'L3.denoise_ref',
                  'L1d.dgram': 'L1.trunk_ref (the distogram rides on it)',
                  'L2.diffusion': 'L3.denoise_ref'}
