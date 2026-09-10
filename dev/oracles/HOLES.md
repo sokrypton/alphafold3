@@ -347,3 +347,46 @@ reproducibility and it cannot be tested from our side at all --
 first"). The test is two dumps from ~/venv_esm and the spread between them.
 Until that exists, these four rows are UNEXPLAINED, not characterised, and
 PARITY.md should not call them a bf16 floor.
+
+## protenix's L4 gap: an exact stack amplifying a 3e-03 embedding difference
+
+`L4.confidence` leaves the protenix lineage not at parity -- protenix2 pae
+2.30e-02 / pde 1.72e-02, protenix1 5.4e-03 / 6.8e-03, opendde pae 9.8e-03 / pde
+1.58e-02 -- and these are REAL: protenix2's FLOOR is 1.9e-06 to 6.0e-06.
+
+TWO WRONG INFERENCES were made and corrected by measurement, both recorded
+because the reasoning looked sound each time:
+
+  1. "pde starts in the re-embedding, because BLOCKS=0 reads 4.40e-02, WORSE
+     than 1.72e-02 at four blocks." No: at BLOCKS=0 full_pde's rms(native)
+     collapses to 1.218 from 18.831, so that was a small denominator. In
+     ABSOLUTE terms max|d| grows 0.0536 -> 0.323 with depth. Its p99.9 also
+     sits 65x below max|d| there -- a few bin-boundary entries.
+  2. "the stack itself differs, because the heads all grow with depth and the
+     floor implies a gain of only 2-6x." No: isolated on the same synthetic
+     input, protenix2's confidence pairformer is EXACT -- z 2.42e-05, s
+     2.06e-06, corr 1.00000000, 0 unmapped. The floor knob was measuring the
+     wrong sensitivity: it perturbs s_inputs/s/z, UPSTREAM of the embedding,
+     which is a different path from the stack's own input.
+
+Measured properly, the stack's GAIN on a perturbation of its own input pair is
+6.9x to 8.8x, stable over three decades of eps:
+
+    input rel 1.26e-05 -> output rel 1.11e-04   gain 8.8x
+    input rel 1.25e-03 -> output rel 8.63e-03   gain 6.9x
+    input rel 5.01e-03 -> output rel 3.46e-02   gain 6.9x
+
+and protenix2's pae at four blocks (2.30e-02) is 7.6x its pae at BLOCKS=0
+(3.03e-03) -- the gain, to within the measurement.
+
+**So the whole of it lives in the BLOCKS=0 path and is ~3e-03, not 2.3e-02.**
+That path is: `_embed_features` (left/right target-feat projections plus the
+CB-CB dgram) and the four LN+Linear heads. p99.9 there is 4.0e-04 relative, so
+whatever it is, it is small and broad. That is the next measurement, and the
+cheap version of it is a direct comparison of the EMBEDDED pair before the
+stack -- which no cell makes today, and which `ours()` cannot currently be
+asked for (it returns only the four head outputs).
+
+Note for whoever adds that: the L4 FLOOR knob's number is not the resolution of
+the embedding path. Perturbing the head's inputs and perturbing the stack's
+input measure different gains, and this cell has both.
