@@ -451,6 +451,23 @@ def native_if2(model, batch, s_inputs, bonds, bond_types, n):
   t = lambda x, d=torch.float32: torch.tensor(np.asarray(x), dtype=d)
   lin = lambda w, x: torch.nn.functional.linear(x, g(w))
 
+  # ROUND THE NATIVE WEIGHTS TO THE BLOB'S STORAGE DTYPE. if2 is the only port
+  # that stores its TRUNK in bfloat16, deliberately, mirroring AF3's own param
+  # dtype policy -- `converters/intellifold2._record_dtype`, where it is also
+  # measured fold-neutral (6MRR 1.517 against 1.519 for an fp32 blob). Its
+  # checkpoint is entirely float32, so comparing our bf16-stored weights against
+  # the raw checkpoint measures the STORAGE, not the port: 2.12e-02 on this
+  # gate, reproduced exactly in numpy with the same formula and both weight
+  # sets. The L4 confidence gate already rounds native for this reason.
+  # NO_BF16_ROUND=1 shows the unrounded number.
+  if not os.environ.get('NO_BF16_ROUND'):
+    import ml_dtypes
+    _raw = g
+    def g(k, _raw=_raw):                       # noqa: E306
+      v = _raw(k)
+      return torch.tensor(
+          np.asarray(v, np.float32).astype(ml_dtypes.bfloat16).astype(np.float32))
+    print('  native trunk weights rounded to bfloat16 (the blob\'s storage)')
   c_z, c_s_inputs = g('linear_z_i.weight').shape
   n_relpos = g('relative_position_encoding.linear_relpos.weight').shape[1]
   print('  checkpoint: c_z %d, c_s_inputs %d (OUR layout), relpos %d'

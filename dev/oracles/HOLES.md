@@ -122,7 +122,16 @@ boltz2 is the model that proved the gap was real, and it now reads
 0.954268 / 6.49e-01 with AF3's, where the per-pair max|d| is IDENTICAL on all
 4624 pairs, one constant vector everywhere.
 
-Only boltz2 has an adapter. The other twelve are one function each and the
+Adapters: boltz2, rosettafold3, openfold3, openbind0, protenix1, protenix2,
+opendde, intellifold2 -- ALL EXACT (1.95e-06 to 3.79e-06). The four esmfold2
+releases are the only holes left on this gate, and their comparison is
+`esmfold2_reference`'s own `z_init` tap, which computes the same three terms
+(`z_pair0 + rel_pos + token_bonds @ w`, reference line 330). The work is
+feature translation: the reference builds its `s_inputs` from the DUMP's `f`,
+so our batch's features have to be mapped into that layout the way
+`esmfold2_localise_trunk` does.
+
+Older text below. The other twelve are one function each and the
 recipe is the same: assemble the vendor's own z-init terms from its own
 checkpoint and feed them OUR features.
 
