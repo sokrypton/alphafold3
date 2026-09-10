@@ -306,6 +306,41 @@ def _restype_cols(w, start):
   return np.asarray(w)[:, [start + i for i in RESTYPE_PERM]]
 
 
+# The one OpenDDE residue class AF3 has no slot for -- DERIVED from the
+# permutation rather than written down, so a release that reorders its alphabet
+# cannot leave a stale index here.
+_RESTYPE_DROPPED = next(i for i in range(32) if i not in RESTYPE_PERM)
+# ...and the padded permutation: our 31 in our order, then that extra class at
+# index 31, which is exactly where diffusion_head's PADDED_SINGLE_COND branch
+# inserts its zero column.
+_RESTYPE_PERM_PADDED = RESTYPE_PERM + [_RESTYPE_DROPPED]
+
+
+def _remap_s_inputs_vec_padded(v):
+  """`_remap_s_inputs_vec`, but KEEPING the two classes AF3 lacks (449 -> 449).
+
+  For `single_cond_initial_norm` only, and only because it is a LayerNorm: a
+  zero input column contributes nothing to a bias-free Linear, so dropping it
+  there is exact, but a LayerNorm maps a zero input to -mean/std and normalises
+  over 833 channels rather than 831. This converter carried a note saying the
+  difference was "minor; confirm via e2e" -- L2's conditioning gate confirmed it
+  at single_cond max|d|/rms 1.05e-02 with rms ours/native 0.9994, the last
+  unfixed instance of [[dropped-vocab-columns]]'s 833-vs-831 trap.
+  """
+  v = np.asarray(v)
+  return np.concatenate([v[384:416][_RESTYPE_PERM_PADDED],
+                         v[416:448][_RESTYPE_PERM_PADDED],
+                         v[448:449], v[0:384]])
+
+
+def _s_inputs_adapter_padded(w):
+  """`_s_inputs_adapter` keeping those same two columns: (out, 449) -> (449, out)."""
+  w = np.asarray(w)
+  cols = ([384 + i for i in _RESTYPE_PERM_PADDED]
+          + [416 + i for i in _RESTYPE_PERM_PADDED] + [448] + list(range(384)))
+  return w[:, cols].T
+
+
 def _s_inputs_adapter(w):
   """adapt an OpenDDE linear over s_inputs (out, 449) with order [a(384), restype(32),
   profile(32), del(1)] to our target_feat order [restype(31), profile(31), del(1),
@@ -357,17 +392,22 @@ def convert_diffusion_conditioning(sd):
   conditioning params. Pair side is clean (.T); the diffusion relpe branch (added to
   diffusion_head) matches OpenDDE's separate compress+concat. single_cond_initial uses
   the s_inputs adapter-combine (s_trunk identity + s_inputs 449->447). Fourier folds in
-  like IF2 (trained_fourier). NOTE: single_cond_initial_norm LN spans 831 (ours) vs 833
-  (OpenDDE); the 2 dropped vocab features are 0 for protein so the normalization count
-  differs only slightly (minor; confirm via e2e)."""
+  like IF2 (trained_fourier). single_cond_initial_norm keeps the vendor's FULL 833
+  width -- the note that used to sit here called the difference "minor; confirm
+  via e2e", and the e2e confirmation (L2.conditioning, 2026-09-10) priced it at
+  single_cond max|d|/rms 1.05e-02."""
   C = 'diffusion_module.diffusion_conditioning'
   g = lambda n: np.asarray(sd[_k(C, n)])
-  # single_cond_initial adapter-combine (833 -> 831): [s_trunk(384) | s_inputs(449->447)]
+  # single_cond_initial stays 833 WIDE: [s_trunk(384) | s_inputs(449, reordered)].
+  # See _remap_s_inputs_vec_padded -- the LayerNorm's normalisation count is the
+  # whole point, and model_config.PADDED_SINGLE_COND is the matching graph
+  # branch that re-inserts the two zero columns in these same positions.
   scale = g('layernorm_s.weight')                              # (833,)
-  sci_scale = np.concatenate([scale[0:384], _remap_s_inputs_vec(scale[384:833])])
+  sci_scale = np.concatenate([scale[0:384],
+                              _remap_s_inputs_vec_padded(scale[384:833])])
   sw = g('linear_no_bias_s.weight')                            # (384, 833) out,in
   sci_w = np.concatenate([sw[:, 0:384],
-                          _s_inputs_adapter(sw[:, 384:833]).T], axis=1)   # (384, 831)
+                          _s_inputs_adapter_padded(sw[:, 384:833]).T], axis=1)
 
   def tr(src, dst):   # OpenDDE Transition -> our transition_block(single_cond=None) ffw_
     gg = lambda n: np.asarray(sd[_k(_k(C, src), n)])

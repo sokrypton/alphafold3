@@ -840,7 +840,15 @@ PRE_SYMMETRISED_PDE = PROTENIX_FAMILY
 # difference. Adding a model here REQUIRES its converter to emit the padded
 # (833-row) scale and projection -- `_reorder_features_1d(pad_unk_dna=True)` --
 # and therefore a re-conversion; the shape mismatch is loud if you forget.
-PADDED_SINGLE_COND = (('openfold3', 'openbind0', 'rosettafold3')
+# opendde joined last (2026-09-10) and was the note this list's own comment
+# pointed at: `converters/opendde.py` carried "the normalization count differs
+# only slightly (minor; confirm via e2e)" for its OWN diffusion path, and L2's
+# conditioning gate is the e2e confirmation -- single_cond max|d|/rms 1.05e-02
+# with rms ours/native 0.9994, against 3.60e-06 for the pair half of the same
+# conditioner. Its layout puts `a` LAST ([restype 31 | profile 31 | del 1 |
+# a 384]), but the pad goes in at the same two offsets, so the graph branch
+# needed no change.
+PADDED_SINGLE_COND = (('openfold3', 'openbind0', 'rosettafold3', 'opendde')
                       + PROTENIX_FAMILY)
 
 
