@@ -243,3 +243,54 @@ Read the control in its docstring before believing any number it produces: 48
 blocks x 10 recycles amplify float differences, and on 6MRR -- where our fold
 matches native at 0.70 A -- the pair still only correlates 0.960. That mistake
 already cost most of a session once.
+
+## boltz2's denoise: every part at parity, the whole at 0.32 A/atom (2026-09-10)
+
+L3 closed for seven models (7.65e-06 to 8.63e-04 on x_denoised) and all four
+ESMFold2 releases (exact, 0.00e+00 against the reference). boltz2 is the
+exception, and it is TWO problems:
+
+  1. **`L3.denoise` is a genuine HOLE for boltz2** -- `denoise_parity.py` has no
+     boltz2 adapter, so the model that needs this cell most is the one model it
+     does not cover. `gate_applies.py` says so ("applies to this model, no
+     adapter"), which is the honest report.
+  2. `boltz2_denoise_parity.py` is the substitute, injecting native's own
+     conditioning, and it reads **x_denoised corr 0.999767, max|d|/rms 6.03e-02,
+     per-atom distance mean 0.3248 A**.
+
+It is REAL and it is resolvable -- perturbing the injected conditioning by 1e-6
+moves our own output by 4.22e-06, four orders below the gap. And every piece of
+the same path is at parity:
+
+    L2.conditioning    pair 1.95e-06   single 1.39e-05
+    L2.atom_encoder    a_token 1.0e-04   q_atom 3.6e-04   p_pair_valid 4.5e-06
+    L2.atom_decoder    a_token 1.1e-04   q_atom 3.5e-04   r_update 1.8e-04
+    L2.diffusion       a 1.88e-03, below its own 3.98e-03 floor
+    L1i / L1.trunk1    z_init 2.77e-06, trunk 3.92e-04
+
+So the parts are right and the COMPOSITION is not, which is the shape of a
+wiring or scaling difference rather than a weight one. Two things already ruled
+out by measurement:
+
+  * NOT the extra C-terminal atom. Ours carries one atom boltz never sees
+    (`per-token count differs at [(67, 10, 9)]`, the OXT) and it is dropped from
+    the comparison but not from the model, so it still sits in our atom windows
+    -- the ESMFold2 OXT failure exactly. That one showed as error rising over
+    the final tokens; this profile is FLAT (8 bins 0.24-0.50, last-32 mean
+    0.309 against a 0.322 median).
+  * NOT today's work. Every src change of 2026-09-10 is behind a model-name or
+    env gate that excludes boltz2, and `boltz2` sits in OPM_BIAS_AFTER_NORM
+    identically before and after. The gate itself has not changed since dev/
+    became tracked.
+
+**UNEXPLAINED, and recorded as such:** [[boltz2-port]] carries 0.0269 A/atom for
+this cell after the earlier round of fixes, and it now reads 0.3248 A. Today's
+changes provably cannot have moved it, so either that figure came from a
+different measurement or something moved earlier and unnoticed. Do not treat
+0.0269 as a baseline to regress against until it can be reproduced.
+
+**The gate's one blind spot to fix first:** the dump holds a SINGLE sampler step,
+`times 1.4157 -> sigma 4608`, the highest-noise step of the schedule, where
+c_in is 2.17e-04 and c_out is 16.0. So this compares almost pure network output
+at the one operating point where the coordinates barely enter. A re-dump at a
+mid-schedule sigma is the next measurement, and it needs the boltz venv.

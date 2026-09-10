@@ -127,7 +127,42 @@ def main(argv=None):
   got = ours(cfg, model_dir, fb, pos_dense, sigma, s_inputs, s, z)
   got_flat = np.asarray(got)[mask][o_idx]
   _cmp('x_denoised', got_flat, ref)
+
+  # FLOOR -- perturb the INJECTED CONDITIONING, not the coordinates. At this
+  # dump's operating point c_in is 2.17e-04, so r_noisy is almost entirely
+  # suppressed and a coordinate perturbation would say nothing; s_trunk, z_trunk
+  # and s_inputs are what determine the output here.
+  eps = float(os.environ.get('FLOOR') or 0)
+  if eps:
+    rng = np.random.default_rng(1234)
+    pert = lambda x: (np.asarray(x)
+                      * (1 + eps * rng.normal(size=np.shape(x)))).astype(
+                          np.asarray(x).dtype)
+    got_p = ours(cfg, model_dir, fb, pos_dense, sigma,
+                 pert(s_inputs), pert(s), pert(z))
+    got_pf = np.asarray(got_p)[mask][o_idx]
+    print('  FLOOR: our own output after a %g relative perturbation of the '
+          'INJECTED conditioning' % eps)
+    _cmp('x_denoised_floor', got_pf, got_flat)
+    dp = np.sqrt(((got_pf - got_flat) ** 2).sum(-1))
+    print('  per-atom distance FLOOR: mean %.4f A, max %.4f A'
+          % (dp.mean(), dp.max()))
   dist = np.sqrt(((got_flat - ref) ** 2).sum(-1))
+  # WHERE the error lives along the atom list. Ours carries one atom boltz never
+  # sees (the C-terminal OXT: `per-token count differs at [(67, 10, 9)]` above),
+  # and it is dropped from this COMPARISON but not from the MODEL -- our atom
+  # attention still windows 574 atoms where boltz windows 573. That corrupts the
+  # last window's worth of atoms and nothing else, which is exactly the signature
+  # ESMFold2's OXT left ([[esmfold2-ref-pos-table]]: "max|d| 0.0000 at the
+  # median, rising only over the final seven tokens"). A flat profile means the
+  # extra atom is NOT the story here.
+  q = np.percentile(dist, [50, 90, 99])
+  nb = max(len(dist) // 8, 1)
+  print('  per-atom distance by position (8 bins): %s'
+        % [round(float(dist[i:i + nb].mean()), 4)
+           for i in range(0, len(dist), nb)])
+  print('  per-atom distance median %.4f  p90 %.4f  p99 %.4f  last 32 mean %.4f'
+        % (q[0], q[1], q[2], float(dist[-32:].mean())))
   print('  per-atom distance: mean %.4f A, max %.4f A, rms(native) %.2f'
         % (dist.mean(), dist.max(), np.sqrt((ref ** 2).sum(-1).mean())))
   return 0
