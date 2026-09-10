@@ -17,6 +17,22 @@ This reads every `corr` line out of the logs and grades it:
   CLOSE    corr >= 0.9999  and max|d|/rms <= 1e-2
   LOOSE    corr >= 0.999
   BAD      anything else
+  FLOOR    below the cell's OWN resolution -- see below
+
+A cell can also have no resolution left. `trunk_parity --blocks 48` runs a
+48-block stack on synthetic input, and three models read BAD or LOOSE there
+while a 1e-6 relative perturbation of the gate's INPUT moves its own output
+FURTHER than our port does. Grading those cells on the number is grading noise.
+
+So a gate may emit `<name>_floor` rows next to its `<name>` rows -- the same
+comparison against a perturbed replicate of itself -- and any row at or below
+its own floor is graded FLOOR rather than BAD. That is not a pass: it says the
+cell cannot answer, and the answer has to come from a shallower or better
+conditioned one (`L1.trunk1`, at one block, for this gate).
+
+Earning the exemption requires the gate to MEASURE the floor. A cell with no
+floor row is graded on its number as before, so this cannot quietly excuse
+anything.
 
 The thresholds are deliberately stricter than "0.999 looks fine". This file's
 own history is the argument: chai1's dropped template bias sat at corr 0.999648
@@ -50,6 +66,7 @@ def grade(corr, ratio):
 
 def audit(logdir):
   rows = []
+  floors = collections.defaultdict(dict)
   for f in sorted(os.listdir(logdir)):
     if not f.endswith('.log'):
       continue
@@ -68,9 +85,18 @@ def audit(logdir):
       maxd = float(m.group('maxd'))
       rms = m.group('rms')
       ratio = (maxd / float(rms)) if rms and float(rms) else None
-      rows.append((gate, model, m.group('name').strip(), corr, ratio,
-                   grade(corr, ratio)))
-  return rows
+      name = m.group('name').strip()
+      if name.endswith('_floor'):
+        floors[(gate, model)][name[:-len('_floor')]] = ratio
+        continue
+      rows.append([gate, model, name, corr, ratio, grade(corr, ratio)])
+
+  # Second pass: a row at or below its own measured floor is unresolvable.
+  for r in rows:
+    f = floors.get((r[0], r[1]), {}).get(r[2])
+    if f is not None and r[4] is not None and r[4] <= f and r[5] != 'PARITY':
+      r[5] = 'FLOOR'
+  return [tuple(r) for r in rows]
 
 
 def main(argv):
@@ -80,8 +106,15 @@ def main(argv):
   print('%s: %d comparisons in %d logs' % (logdir, len(rows),
                                            len({(r[0], r[1]) for r in rows})))
   print('  ' + '   '.join('%s=%d' % (k, t[k])
-                          for k in ('PARITY', 'CLOSE', 'LOOSE', 'BAD')
+                          for k in ('PARITY', 'CLOSE', 'FLOOR', 'LOOSE',
+                                    'BAD')
                           if t[k]))
+  fl = [r for r in rows if r[5] == 'FLOOR']
+  if fl:
+    print('\nBELOW THE CELL\'S OWN RESOLUTION -- the gate cannot answer here:')
+    for gate, model, name, corr, ratio, _ in sorted(fl, key=lambda r: -(r[4] or 0)):
+      print('  %-5s %-20s %-26s %-16s corr %.6f  max|d|/rms %.2e'
+            % ('FLOOR', gate, model, name, corr, ratio))
   bad = [r for r in rows if r[5] in ('LOOSE', 'BAD')]
   if bad:
     print('\nNOT at parity, worst first (these all count as OK today):')

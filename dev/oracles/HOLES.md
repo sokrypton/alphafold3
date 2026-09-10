@@ -160,3 +160,28 @@ at 0.84-1.5, while at zero recycles the two conventions are level). See
 
 Read `dev/oracles/gate_applies.py` first -- a cell is only a hole if the model
 HAS that module and no other cell covers it.
+
+## 2026-09-10, L1 closed: one more port bug and one more oracle bug
+
+    PORT    rosettafold3  triangle multiplication divides by float(L) before the
+            centre LayerNorm, so the term is observable only through the norm's
+            epsilon. L1.trunk z 1.24e-01 -> 5.25e-03, corr 0.999989 -> 1.000000.
+            Fold-neutral on real input (6MRR 0.892/1.507 vs 0.882/1.507; 1STP
+            3.725 vs 3.722) -- the synthetic-input gate is what drives z into the
+            regime where eps stops being negligible.
+            Gated by model_config.TRIANGLE_MUL_DIVIDE_BY_LENGTH.
+
+    ORACLE  intellifold2  the trunk gate loaded if2's deliberately bf16 blob
+            against native's fp32 checkpoint, and reported the STORAGE dtype as
+            a disagreement. z 6.98e-02 -> 3.77e-05 (1 block), 9.60e+00 ->
+            8.96e-04 (48). SIGNATURE: the only model in the panel whose blob
+            holds any bf16 at all, and a gate that turns bf16 off in both FORWARD
+            passes while saying nothing about the weights.
+            Fixed by rounding native to match; IF2_FP32_BLOB=1 and
+            IF2_NO_BF16_WEIGHTS=1 keep both directions measurable.
+
+Three cells that looked identical to those two were neither, and now say so:
+openfold3, boltz2 and protenix2 read BAD/LOOSE on z at 48 blocks while a 1e-6
+perturbation of the gate's own input moves its output FURTHER than our port does.
+They grade FLOOR. `trunk_parity FLOOR=<eps>` is how a cell earns that, and rf3
+failing to earn it is how its /L was found -- so the exemption discriminates.

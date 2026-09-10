@@ -1,21 +1,67 @@
 # STATE OF PLAY -- 2026-09-10
 
-## IN FLIGHT: the authoritative full run
+## L0 AND L1 ARE AT PARITY (2026-09-10)
 
-`dev/oracles/parity_runs/2026-09-10-full/`. Markers `MODULESDONE` then
-`FULLDONE` in `full.log`, which is in a SESSION SCRATCHPAD -- the trap
-[[harness-rot]] describes -- so if it is gone, re-run from the repo:
+The full run was launched and then STOPPED after L1 on purpose, to debug one
+cell at a time. Its markers in the driver log are FALSE -- `MODULESDONE` and
+`FULLDONE` printed because killing the driver let the enclosing shell chain
+finish, not because those levels ran. Trust the per-cell logs and the audit.
 
-    FORCE=1 LOGDIR=$PWD/dev/oracles/parity_runs/<name> \
-      bash dev/oracles/run_all_parity.sh L0 L1 L1i L1b L1t L1d L2 L3 L4
+    dev/oracles/parity_runs/2026-09-10-full/     L0 + L1 complete
+
+    ~/venv/bin/python dev/oracles/parity_audit.py dev/oracles/parity_runs/2026-09-10-full
+    -> 44 comparisons in 28 logs;  PARITY=34  CLOSE=6  FLOOR=4  (no LOOSE, no BAD)
+    ~/venv/bin/python dev/oracles/gate_applies.py <gate> <model>     # hole or n/a
+
+Zero holes, zero LOOSE, zero BAD. To carry on from where it stopped:
+
+    FORCE=1 LOGDIR=$PWD/dev/oracles/parity_runs/2026-09-10-full \
+      bash dev/oracles/run_all_parity.sh L1b L1t L1d L2 L3 L4
     FORCE=1 LOGDIR=... bash dev/oracles/run_all_parity.sh L5 L6
 
-Read it with BOTH tools -- `gate_applies.py` for holes and `parity_audit.py`
-for whether the OK cells agree -- and remember that `L1.trunk` at full depth is
-a smoke test while `L1.trunk1` (one block) is the port measurement.
+### What L1 cost, and what it was worth
 
-This is the FIRST run that can answer "are we at parity": the previous one was
-stopped partway to do the debugging below, and everything below landed after it.
+Two real findings, both in cells that had read BAD for a reason nobody had
+checked. Both came from refusing the easy story about the OTHER models' identical
+symptom -- BAD at 48 blocks, PARITY at one -- which had already been written into
+the driver as an amplifier.
+
+  * **intellifold2 was measuring its own blob's dtype.** if2 is the only port
+    that stores the trunk in bfloat16 (a deliberate, measured, fold-neutral
+    policy), and the gate loaded those rounded weights against native's fp32
+    checkpoint. z 6.98e-02 -> 3.77e-05 at one block, 9.60e+00 -> 8.96e-04 at 48.
+    An ORACLE bug -- the tenth signature in [[oracle-bug-signatures]].
+  * **rosettafold3 divides its triangle multiplication by the sequence length.**
+    `right / float(L)` sitting in front of a LayerNorm, observable only through
+    the norm's epsilon. z 1.24e-01 -> 5.25e-03, corr 0.999989 -> 1.000000. A PORT
+    bug -- the sixteenth. Fold-neutral on real input at 68 and 121 residues,
+    stated plainly because the fold is where it would have been noticed.
+
+Two harness improvements outlast both:
+
+  * `trunk_parity FLOOR=<eps>` measures whether a cell has any RESOLUTION left,
+    by perturbing its input and seeing how far its own output moves.
+    `parity_audit` grades a row at or below its own measured floor as FLOOR
+    rather than BAD -- not a pass, a statement that the cell cannot answer and
+    `L1.trunk1` has to. Three of the four suspect cells are genuinely
+    unresolvable; rf3 was not, which is how the /L was found. A cell with no
+    floor row is still graded on its number, so this cannot quietly excuse
+    anything.
+  * `trunk_parity NATIVE_F64=1` bounds the REFERENCE's own arithmetic noise. It
+    is what ruled out ill-conditioning for rf3: native's float32-vs-float64
+    error stayed flat at 3e-06 across all 48 blocks while ours climbed to 3e-02.
+
+### Reading the trunk cells, and the method that found the /L
+
+`L1.trunk` at 48 blocks is a smoke test on synthetic input; `L1.trunk1` at one
+block is the port measurement. The localisation ladder, to reach for first next
+time -- each rung kills one explanation:
+
+    per block, on NATIVE's own input          nothing compounds
+    -> native fp32 vs float64 at that block   rules out conditioning
+    -> our block k-1 / k / k+1                rules out an index shift
+    -> sub-module by sub-module               narrows to the module
+    -> the line
 
 ## HOLES: 66 -> 0
 

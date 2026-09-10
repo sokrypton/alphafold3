@@ -188,7 +188,21 @@ fi
 # --- L1 / L1b: the trunk, and the MSA stack inside it ---------------------
 if want L1; then
   echo "== L1 trunk pairformer"
-  for m in $MODELS; do gate L1.trunk "$m" '^  (single|pair|s|z) ' dev/oracles/trunk_parity.py "$m"; done
+  # FLOOR=1e-6: this cell has no resolution left for some models, and saying so
+  # requires MEASURING it rather than arguing it. The gate perturbs its own
+  # input by 1e-6 and emits `s_floor`/`z_floor`; parity_audit grades a row at or
+  # below its own floor as FLOOR instead of BAD. openfold3 reads 2.27e-01 on z
+  # against a 5.31e-01 floor, boltz2 3.92e-02 against 6.82e-02, protenix2
+  # 1.50e-02 against 4.94e-02 -- all three unresolvable. rosettafold3 did NOT
+  # clear its floor here (1.24e-01 against 2.44e-02) and that turned out to be a
+  # real port bug, the /L in its triangle multiplication, so the floor is doing
+  # discriminating work and not just excusing rows.
+  # In a subshell so FLOOR does not leak into the cells below it: `VAR=v fn`
+  # leaves VAR set in the calling shell for a bash FUNCTION, unlike a command.
+  for m in $MODELS; do
+    (export FLOOR=1e-6
+     gate L1.trunk "$m" '^  (single|pair|s|z) ' dev/oracles/trunk_parity.py "$m")
+  done
   # AND AT ONE BLOCK, which is the cell that means something. At full depth this
   # gate measures an AMPLIFIER on synthetic input: rosettafold3's z reads
   # 5.8e-04 at one block, 5.0e-04 at four and 1.2e-01 at 48, where the single
