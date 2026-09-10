@@ -508,7 +508,13 @@ _FEATURISE = {
     # list corrupts the last ~64 atoms' attention, which is what the atom gate's
     # DIAG showed: max|d| 0.0000 at the median, rising only over the final seven
     # tokens. AF3_NO_ESM_DROP_OXT keeps it, for the A/B.
+    # ...and its self-MSA is the query ONCE. AF3 hands a chain with no
+    # alignments two identical rows (one from the paired MSA, one from the
+    # unpaired); native emits depth 1. See model_features._dedupe_self_msa for
+    # the measurement -- it moves the trunk's MSA injection by 4.3%.
+    # AF3_NO_ESM_DEDUPE_MSA=1 keeps AF3's two rows, for the A/B.
     **{m: dict(atom_keys_subset_size=192, lm_pair=True,
+               dedupe_self_msa=not os.environ.get('AF3_NO_ESM_DEDUPE_MSA'),
                esmfold2_ref_pos=not os.environ.get('AF3_NO_ESM_REF_POS'),
                **({} if os.environ.get('AF3_NO_ESM_DROP_OXT')
                   else dict(drop_atoms=('OXT',))))

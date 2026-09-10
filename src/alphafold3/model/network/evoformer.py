@@ -220,6 +220,26 @@ class _RelativeEncodingProjection(hk.Module):
             + w_chain[chain_idx])
 
 
+# Per-stage taps for the ESMFold2 trunk, OFF unless AF3_ESM_TRUNK_TAPS is set.
+#
+# These existed while the port was being built and were deleted afterwards on
+# the principle that debug taps should not ship. That was wrong twice over:
+# `esmfold2_localise_trunk.py` still looks for this exact name and degrades to
+# "headline only", and when L1.trunk_ref finally got graded (2026-09-10, after a
+# parser fix that had been hiding the cell) there was no way to localise inside
+# the recurrence. A tap that is gated off costs nothing and is the difference
+# between a number and a diagnosis.
+#
+# Names match esmfold2_reference.TAPS so the harness can compare them directly.
+ESM_TRUNK_TAPS = {}
+
+
+def _esm_tap(name, value):
+  if os.environ.get('AF3_ESM_TRUNK_TAPS'):
+    ESM_TRUNK_TAPS.setdefault(name, []).append(value)
+  return value
+
+
 class Evoformer(hk.Module):
   """Creates 'single' and 'pair' embeddings."""
 
@@ -798,6 +818,7 @@ class Evoformer(hk.Module):
         pair_activations = self._embed_bonds(
             batch=batch, pair_activations=pair_activations
         )
+        _esm_tap('z_init', pair_activations)
         if self.config.msa_stack.num_layer:
           # ESMFold2-Fast disables the MSA encoder outright
           # (msa_encoder.enabled false); it folds from ESM-C alone. Skipping the
@@ -824,7 +845,9 @@ class Evoformer(hk.Module):
         pair_activations = self._embed_lm_pair(
             batch=batch, pair_activations=pair_activations,
             pair_mask=pair_mask, key=key, use_dropout=use_dropout)
+        _esm_tap('z_inject', pair_activations)
         pair_activations = _add_prev(pair_activations, None)
+        _esm_tap('z_parcae', pair_activations)
       elif chai:
         pair_activations = self._relative_encoding(batch, pair_activations)
         pair_init = pair_activations
@@ -931,6 +954,7 @@ class Evoformer(hk.Module):
       )
 
       pair_pre_coda = pair_activations
+      _esm_tap('z_pre_coda', pair_activations)
       if pair_only and self.config.coda.num_layer:
         # ESMFold2 finishes the trunk with a readout projection and a short
         # "coda" of pair blocks, AFTER the recycle loop. AF3 has no post-trunk

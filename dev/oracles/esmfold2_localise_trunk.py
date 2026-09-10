@@ -53,7 +53,12 @@ from alphafold3.model import feat_batch
 # the reference runs n_loops + 1 = 4 parcae passes; one pass with a zero carry
 # is a DIFFERENT function, so the harness has to recycle too or the comparison
 # measures the loop count rather than the trunk.
-N_PASSES = 4
+# PASSES=n sweeps BOTH sides together (the reference takes n_loops = n - 1).
+# It is one knob on purpose: the two counts must never be set independently, or
+# the cell measures the loop count. That is also why the sweep is the first rung
+# of the ladder here -- the parcae recurrence is stateful, so a per-pass
+# difference and a compounding one look identical in the headline.
+N_PASSES = int(os.environ.get('PASSES', 4))
 
 @hk.transform
 def fwd(b):
@@ -98,7 +103,8 @@ pref={k: jnp.asarray(v) for k,v in CV.map_esmfold2_to_af3(sd).items()}
 # self-MSA asks the reference for `msa_encoder.embed.weight` and dies. None is
 # the correct input there, not an empty MSA.
 msa = R.self_msa(f) if dims.get('n_msa') else None
-z,_,_ = R.trunk(f, lm_hidden, pref, dims, n_loops=3, key=jax.random.PRNGKey(0),
+z,_,_ = R.trunk(f, lm_hidden, pref, dims, n_loops=N_PASSES - 1,
+                key=jax.random.PRNGKey(0),
                 lm_dropout=0.0, msa=msa)
 zr = np.asarray(z)
 # stage-by-stage, pass 0: which of z_init / z_inject / z_parcae first diverges

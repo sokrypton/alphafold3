@@ -282,6 +282,45 @@ def _zero_msa(batch):
   return batch
 
 
+def _dedupe_self_msa(batch):
+  """ESMFold2's self-MSA is the query ONCE, not the query twice.
+
+  AF3 concatenates a paired and an unpaired MSA, and each one begins with the
+  query -- so a chain with no alignments at all arrives with `num_alignments 2`
+  and two IDENTICAL unmasked rows. Native ESMFold2's own featuriser emits a
+  depth-1 MSA for that input: its dump carries `feat.msa` at (1, 1, 68), and
+  `esmfold2_reference.self_msa` is the query alone.
+
+  Two identical rows are NOT free, even though an outer-product MEAN over
+  duplicates is unchanged. Measured on 6MRR at one pass: the trunk's MSA
+  injection reads std 619.2 against native's 593.9 (corr 0.998823), and feeding
+  the reference the same duplicated row reproduces our number to 3.7e-07 --
+  which is what identified the depth, rather than the encoder, as the
+  difference. The pair-weighted averaging and the row transition are what make
+  it depth-sensitive.
+
+  Only the leading duplicate is dropped, and only when the rows are actually
+  equal, so a real alignment whose first row happens to be the query is left
+  alone.
+  """
+  msa = np.asarray(batch['msa'])
+  mask = np.asarray(batch['msa_mask'])
+  live = np.flatnonzero(mask.any(-1))
+  if live.size < 2:
+    return batch
+  a, b = live[0], live[1]
+  if not np.array_equal(msa[a], msa[b]):
+    return batch
+  m = mask.copy()
+  m[b] = False
+  batch['msa_mask'] = m
+  if 'num_alignments' in batch:
+    batch['num_alignments'] = np.asarray(
+        np.asarray(batch['num_alignments']) - 1, dtype=np.asarray(
+            batch['num_alignments']).dtype)
+  return batch
+
+
 def _attach_esm(batch, esm):
   """Put ESM2 embeddings on the protein tokens, in order; everything else zero.
 
@@ -505,6 +544,8 @@ def apply(batch, spec, *, refeaturise=None, model_dir=None, esm=None,
     chiral_features.attach_chiral_features(batch)
   if knobs.get('zero_msa_without_alignment') and not has_msa:
     _zero_msa(batch)
+  if knobs.get('dedupe_self_msa'):
+    _dedupe_self_msa(batch)
   if knobs.get('lm_pair') and lm_pair is not None:
     _attach_lm_pair(batch, lm_pair)
   if knobs.get('esm') and esm is not None:
