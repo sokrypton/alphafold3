@@ -198,6 +198,32 @@ def native_if2(model, n, mask, blocks=None):
                         no_heads_single=nh_single, no_blocks=n_blocks,
                         transition_n=trans_n, pair_dropout=0.0, inf=1e9,
                         eps=1e-8)
+  # ROUND NATIVE'S WEIGHTS THE WAY THE BLOB STORES THEM. if2 is the only port
+  # whose blob stores the trunk in bfloat16 -- a deliberate, measured policy
+  # that mirrors AF3's own (see converters/intellifold2.py `_record_dtype`).
+  # The gate already turns bf16 off in both FORWARD passes, so without this it
+  # loads bf16-rounded weights and compares them against native's fp32
+  # checkpoint: the difference is the STORAGE dtype, not the port. Measured
+  # 2026-09-10 -- the shipped blob reads s 1.05e-02 / z 6.98e-02 while an
+  # fp32-converted blob (IF2_FP32_BLOB=1) reads s 4.44e-06 / z 3.58e-05, so
+  # the entire reading was the rounding.
+  #
+  # The rule is exactly the converter's: LayerNorm scale/offset stay fp32,
+  # every other pairformer tensor rounds. Verified by count against a loaded
+  # blob -- 20 fp32 and 31 bf16 per block, which is the 10 layer norms' 20
+  # tensors and the remaining 31 (`linear_q.bias` among them, because the
+  # converter keys on the haiku names 'scale'/'offset', not on being a bias).
+  if not os.environ.get('IF2_NO_BF16_WEIGHTS'):
+    n_round = 0
+    for k in list(sub):
+      if '.layer_norm' in k:
+        continue
+      sub[k] = sub[k].to(torch.bfloat16).float()
+      n_round += 1
+    print('  native: %d of %d tensors bf16-rounded to match the blob '
+          "(set IF2_NO_BF16_WEIGHTS=1 to measure the storage policy instead)"
+          % (n_round, len(sub)))
+
   missing, unexpected = net.load_state_dict(sub, strict=False)
   print('  native: %d tensors, %d missing, %d unexpected %s'
         % (len(sub), len(missing), len(unexpected), list(missing)[:2]))

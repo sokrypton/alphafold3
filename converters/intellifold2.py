@@ -311,6 +311,13 @@ _F32_TRUNK_WEIGHTS = {
 
 def _record_dtype(scope, name):
   import ml_dtypes
+  # DEBUG ONLY: build the same blob at full precision, so a gate that runs with
+  # bfloat16='none' can tell a port bug from this storage policy. The L1.trunk1
+  # gate reads z max|d|/rms 6.98e-02 for if2 against <=1.4e-03 for every other
+  # port, and the trunk weights it loads are bf16-rounded while native's are
+  # not; this knob is how that is measured rather than argued.
+  if os.environ.get('IF2_FP32_BLOB'):
+    return np.float32
   if 'diffusion_head' in scope or 'evoformer_conditioning' in scope:
     return np.float32
   if name in ('scale', 'offset') or scope in _F32_TRUNK_WEIGHTS:
