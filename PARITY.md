@@ -1,67 +1,101 @@
 # STATE OF PLAY -- 2026-09-10
 
-## L0 AND L1 ARE AT PARITY (2026-09-10)
+## L0 THROUGH L1d ARE AT PARITY (2026-09-10)
 
-The full run was launched and then STOPPED after L1 on purpose, to debug one
-cell at a time. Its markers in the driver log are FALSE -- `MODULESDONE` and
-`FULLDONE` printed because killing the driver let the enclosing shell chain
-finish, not because those levels ran. Trust the per-cell logs and the audit.
+Six levels closed, one cell at a time. The run was launched as a full matrix and
+then stopped after L1 on purpose, to debug rather than accumulate. Its
+`MODULESDONE`/`FULLDONE` markers in the driver log are FALSE -- they printed
+because killing the driver let the enclosing shell chain finish. Trust the
+per-cell logs and the audit.
 
-    dev/oracles/parity_runs/2026-09-10-full/     L0 + L1 complete
+    dev/oracles/parity_runs/2026-09-10-full/     L0, L1, L1i, L1b, L1t, L1d
 
     ~/venv/bin/python dev/oracles/parity_audit.py dev/oracles/parity_runs/2026-09-10-full
-    -> 44 comparisons in 28 logs;  PARITY=34  CLOSE=6  FLOOR=4  (no LOOSE, no BAD)
+    -> 96 comparisons in 64 logs;  PARITY=86  FLOOR=10   no CLOSE, no LOOSE, no BAD
     ~/venv/bin/python dev/oracles/gate_applies.py <gate> <model>     # hole or n/a
 
-Zero holes, zero LOOSE, zero BAD. To carry on from where it stopped:
+No SKIP, FAIL or WARN anywhere in the summary either: every cell that applies,
+ran. To carry on:
 
     FORCE=1 LOGDIR=$PWD/dev/oracles/parity_runs/2026-09-10-full \
-      bash dev/oracles/run_all_parity.sh L1b L1t L1d L2 L3 L4
+      bash dev/oracles/run_all_parity.sh L2 L3 L4
     FORCE=1 LOGDIR=... bash dev/oracles/run_all_parity.sh L5 L6
 
-### What L1 cost, and what it was worth
+### The findings, and what kind each was
 
-Two real findings, both in cells that had read BAD for a reason nobody had
-checked. Both came from refusing the easy story about the OTHER models' identical
-symptom -- BAD at 48 blocks, PARITY at one -- which had already been written into
-the driver as an amplifier.
+Two port bugs, three oracle bugs, one shipped-artifact change -- and the two
+harness fixes mattered more than any single cell.
 
-  * **intellifold2 was measuring its own blob's dtype.** if2 is the only port
-    that stores the trunk in bfloat16 (a deliberate, measured, fold-neutral
-    policy), and the gate loaded those rounded weights against native's fp32
-    checkpoint. z 6.98e-02 -> 3.77e-05 at one block, 9.60e+00 -> 8.96e-04 at 48.
-    An ORACLE bug -- the tenth signature in [[oracle-bug-signatures]].
-  * **rosettafold3 divides its triangle multiplication by the sequence length.**
-    `right / float(L)` sitting in front of a LayerNorm, observable only through
-    the norm's epsilon. z 1.24e-01 -> 5.25e-03, corr 0.999989 -> 1.000000. A PORT
-    bug -- the sixteenth. Fold-neutral on real input at 68 and 121 residues,
-    stated plainly because the fold is where it would have been noticed.
+  PORT    rosettafold3  triangle multiplication divides by float(L) before the
+          centre LayerNorm, observable only through the norm's epsilon.
+          L1.trunk z 1.24e-01 -> 5.25e-03. Fold-neutral on real input.
+  PORT    rosettafold3  outer product applies its output bias BEFORE the divide;
+          ours divided the bias too, contributing bias/8 at depth 8. The error
+          was a per-channel constant matching -0.88 * proj_out.bias.
+          L1b.msa 1.84e-01 -> 2.52e-05.
+  PORT    esmfold2      our featurisation fed the MSA encoder the query TWICE
+          (AF3 concatenates a paired and an unpaired MSA, each starting with the
+          query); native emits depth 1. L1.trunk_ref 5.59e-03 -> 3.00e-06.
+          6MRR neutral, 1QYS 0.085 A WORSE -- kept because native's input is the
+          standard, and the number is recorded rather than hidden.
+  ORACLE  intellifold2  the trunk gate compared if2's deliberately-bf16 blob
+          against native's fp32 checkpoint. L1.trunk 9.60e+00 -> 8.96e-04.
+  ORACLE  intellifold2  the same exposure in the msa gate, 1.05e-01 -> 3.39e-05.
+  ARTIFACT intellifold2 the template embedder LEAVES the bf16 region (7.9 MB of
+          the 1284 MB the policy saves). It could not be fixed gate-side:
+          rounding native made it worse, because the converter rounds AFTER a
+          transform that does not commute. L1t.template 1.57e-01 -> 7.19e-05.
+          The published HF copy is behind by those 7.9 MB -- not republished.
 
-Two harness improvements outlast both:
+### The two harness fixes
 
-  * `trunk_parity FLOOR=<eps>` measures whether a cell has any RESOLUTION left,
-    by perturbing its input and seeing how far its own output moves.
-    `parity_audit` grades a row at or below its own measured floor as FLOOR
-    rather than BAD -- not a pass, a statement that the cell cannot answer and
-    `L1.trunk1` has to. Three of the four suspect cells are genuinely
-    unresolvable; rf3 was not, which is how the /L was found. A cell with no
-    floor row is still graded on its number, so this cannot quietly excuse
-    anything.
-  * `trunk_parity NATIVE_F64=1` bounds the REFERENCE's own arithmetic noise. It
-    is what ruled out ill-conditioning for rf3: native's float32-vs-float64
-    error stayed flat at 3e-06 across all 48 blocks while ours climbed to 3e-02.
+  * **parity_audit could not read 36 of its own 80 comparisons.** The regex
+    required `max|d|` and excluded '>' from the name, so `msa -> pair`,
+    `relerr`-only rows and nameless rows all silently vanished -- every L1b cell
+    plus L1.trunk_ref, esmfold2's ONLY trunk gate. Four BAD cells were hiding
+    there. Unparsed `corr` lines are now reported and make the tool exit
+    non-zero.
+  * **FLOOR: a cell can have no resolution left.** `trunk_parity FLOOR=<eps>`
+    perturbs the gate's input and reports how far its own output moves; a row at
+    or below that grades FLOOR, not BAD. It is not a pass -- it says the cell
+    cannot answer. The exemption must be EARNED by measuring, so a cell with no
+    floor row is still graded on its number. This is what separated rf3's real
+    /L bug from three genuine noise cells with an identical symptom.
+    `NATIVE_F64=1` is the companion: it bounds the REFERENCE's own arithmetic
+    noise, and is what ruled out ill-conditioning for rf3 (flat at 3e-06 across
+    all 48 blocks while ours climbed to 3e-02).
 
-### Reading the trunk cells, and the method that found the /L
+All ten FLOOR rows are the trunk pairformer on synthetic input -- eight at 48
+blocks and, for the OF3 family, two at ONE block, where openfold3's single track
+already reaches rms 16750 from an N(0, 0.5) input.
 
-`L1.trunk` at 48 blocks is a smoke test on synthetic input; `L1.trunk1` at one
-block is the port measurement. The localisation ladder, to reach for first next
-time -- each rung kills one explanation:
+### Two things NOT closed, recorded in HOLES.md
 
-    per block, on NATIVE's own input          nothing compounds
-    -> native fp32 vs float64 at that block   rules out conditioning
-    -> our block k-1 / k / k+1                rules out an index shift
-    -> sub-module by sub-module               narrows to the module
+  * `L1b.msa_nonuniform` is a silent duplicate of the uniform cell for 13 of 14
+    models: `NONUNIFORM=1` is read only inside boltz2's adapter. It reports OK
+    while testing nothing, so `gate_applies` cannot see it. rf3's OPM is
+    therefore verified only for a uniform mask -- and it takes NO mask argument
+    and divides by the raw padded row count, so this is a live question.
+  * `real_trunk_parity.py` exists, is documented, has two native dumps beside
+    it, and the driver never runs it. It covers the input embedder, the trunk on
+    a REAL input, and the recycling loop -- the three things nothing else does,
+    and exactly what would verify the two OF3 cells the synthetic gate cannot.
+
+### The localisation ladder that found all three port bugs
+
+Each rung kills one explanation. Reach for it before reading source:
+
+    per block / per sub-module, on NATIVE's own input   nothing compounds
+    -> FLOOR: perturb the input, move our own output    is the cell resolvable?
+    -> NATIVE_F64: the reference against itself         is it ill-conditioned?
+    -> our block k-1 / k / k+1                          is it an index shift?
+    -> sub-module by sub-module                          which module?
+    -> feed the reference OUR input                      is it an input diff?
     -> the line
+
+The last rung matters: two of today's five findings were the harness feeding the
+two sides different things, and one of those looked exactly like a port bug
+until the reference was handed our own input.
 
 ## HOLES: 66 -> 0
 
