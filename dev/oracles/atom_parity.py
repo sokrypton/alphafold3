@@ -500,10 +500,18 @@ def native_rf3(model, fb, feats, pos_noisy, s, z, n_tok):
       same thing the port does.
     * element is NOT shifted (128 classes on AF3's indexing), matching the
       absence of a `fold_element_index_shift` call in the rf3 converter.
-    * `use_chiral_features` is ON in rf3's config and `process_ch` IS in the
-      checkpoint -- it is the one rf3 term the port does not implement. This
-      gate runs with it OFF and drops that tensor, so it measures everything
-      else exactly; RF3_CHIRAL=1 turns it back on to size the missing term.
+    * `use_chiral_features` is ON in rf3's config, `process_ch` IS in the
+      checkpoint, AND THE PORT IMPLEMENTS IT
+      (`atom_cross_attention.py`: `_chiral_position_grads` ->
+      `_atom_chiral_to_features`, converted from `process_ch`). This docstring
+      used to say it was "the one rf3 term the port does not implement" and the
+      gate ran native with it OFF -- so it compared a graph that HAS the term
+      against one that does not, and read q_atom max|d|/rms 2.01e-01 for it.
+      With the centres handed to native it is 6.34e-06.
+      The tell was ZERO_POS=1 making the whole thing exact (7.11e-06): the
+      chirality signal is the gradient of a dihedral error with respect to the
+      NOISY COORDINATES, so it is the only term that vanishes with them.
+      RF3_NO_CHIRAL=1 restores the old, wrong comparison.
   Weights come from the `shadow.` EMA copy, which is what the converter reads.
   """
   import torch
@@ -520,7 +528,7 @@ def native_rf3(model, fb, feats, pos_noisy, s, z, n_tok):
   if not sub:
     raise SystemExit('no %r keys in %s' % (pre, ckpt))
 
-  chiral = bool(os.environ.get('RF3_CHIRAL'))
+  chiral = not os.environ.get('RF3_NO_CHIRAL')
   if not chiral:
     sub.pop('process_ch.weight', None)
   n_feat = sub['process_input_features.weight'].shape[1]
@@ -557,6 +565,29 @@ def native_rf3(model, fb, feats, pos_noisy, s, z, n_tok):
       'ref_pos_ground_truth': torch.zeros(n_atom, 3),
       'has_atom_level_embedding': torch.zeros(n_atom, 1),
   }
+  # THE CHIRALITY FEATURES, in native's PACKED atom indexing. OUR graph adds
+  # rf3's chirality term unconditionally -- `_chiral_position_grads` on
+  # `batch.chirals`, which 6MRR populates with 213 centres -- so running native
+  # with `use_chiral_features` off compares a graph that has the term against
+  # one that does not, and the difference lives entirely in the noisy-coordinate
+  # path because that is what the gradient is taken with respect to. ZERO_POS=1
+  # made q_atom exact (7.11e-06) while the default read 2.01e-01, which is what
+  # sent me here.
+  #
+  # Our centre indices address the DENSE (num_token, max_atoms) layout (max 1612
+  # of 1632 slots on 6MRR); native's address its packed 574. The remap is the
+  # cumulative count of real atoms, and an index that lands on a padding slot
+  # would be a featurisation bug rather than something to paper over -- so it is
+  # asserted.
+  if chiral:
+    _ch = fb.chirals
+    _m = np.asarray(feats['mask']).reshape(-1)
+    _dense2packed = np.cumsum(_m) - 1
+    _c = np.asarray(_ch.centers).astype(int)
+    assert _m[_c].all(), 'a chiral centre indexes a padding slot'
+    f['chiral_centers'] = t(_dense2packed[_c], torch.long)
+    f['chiral_center_dihedral_angles'] = t(np.asarray(_ch.angles))
+    print('  chiral: %d centres, remapped dense -> packed' % len(_c))
   # The checkpoint carries `process_atom_level_embedding.*` -- rf3's conformer
   # embedding, which the yaml in the repo does not switch on but these weights
   # have. Leaving it out is not neutral: the MLP has biases and a LayerNorm

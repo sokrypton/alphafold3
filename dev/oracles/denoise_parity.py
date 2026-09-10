@@ -283,7 +283,9 @@ def native_rf3(model, fb, feats, pos_noisy, noise, s_inputs_449, s, z):
       against of3's -- the bug conditioning_parity.py was written to catch);
     * `use_atom_level_embedding`, whose all-zero input still contributes a
       constant (see atom_parity.py::native_rf3);
-    * `use_chiral_features` OFF, the one rf3 term the port does not implement.
+    * `use_chiral_features` ON, with the centres remapped into native's packed
+      atom indexing. The port DOES implement this term; running native without
+      it cost 0.38 A/atom here and 2.01e-01 on the atom encoder.
   """
   import torch
 
@@ -298,7 +300,7 @@ def native_rf3(model, fb, feats, pos_noisy, noise, s_inputs_449, s, z):
   sub = {k[len(pre):]: v for k, v in raw.items() if k.startswith(pre)}
   if not sub:
     raise SystemExit('no %r keys in %s' % (pre, ckpt))
-  chiral = bool(os.environ.get('RF3_CHIRAL'))
+  chiral = not os.environ.get('RF3_NO_CHIRAL')
   if not chiral:
     sub.pop('atom_attention_encoder.process_ch.weight', None)
 
@@ -383,6 +385,18 @@ def native_rf3(model, fb, feats, pos_noisy, noise, s_inputs_449, s, z):
       'ref_pos_ground_truth': torch.zeros(n_atom, 3),
       'has_atom_level_embedding': torch.zeros(n_atom, 1),
   }
+  # THE CHIRALITY CENTRES, in native's packed indexing -- the port implements
+  # rf3's chirality term and running native without it compared two different
+  # graphs. See the long note in `atom_parity.native_rf3`; it was worth 0.38
+  # A/atom on this gate.
+  if chiral:
+    _m = np.asarray(feats['mask']).reshape(-1)
+    _d2p = np.cumsum(_m) - 1
+    _c = np.asarray(fb.chirals.centers).astype(int)
+    assert _m[_c].all(), 'a chiral centre indexes a padding slot'
+    f['chiral_centers'] = t(_d2p[_c], torch.long)
+    f['chiral_center_dihedral_angles'] = t(np.asarray(fb.chirals.angles))
+    print('  chiral: %d centres, remapped dense -> packed' % len(_c))
   if ale:
     f['atom_level_embedding'] = torch.zeros(8, n_atom, ale_dim)
   # UNBATCHED token ids, single and pair -- only the coordinates carry rf3's
