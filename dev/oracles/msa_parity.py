@@ -456,7 +456,11 @@ def native_esmfold2(model, msa, s_inputs, z, n_msa):
 
 NATIVES = {'rosettafold3': native_rf3, 'intellifold2': native_if2,
            'opendde': native_opendde, 'boltz2': native_boltz2,
-           **{m: native_esmfold2 for m in ('esmfold2')}}
+           # ('esmfold2',) -- WITH THE COMMA. Without it this iterates the
+           # STRING and registers eight single-character keys ('e', 's', 'm',
+           # ...), so `esmfold2` had no adapter and the gate reported a HOLE for
+           # a module that has been implemented all along.
+           **{m: native_esmfold2 for m in ('esmfold2',)}}
 try:
   from denoise_parity import _OF3_CKPT as _OF3
   NATIVES.update({m: native_of3 for m in _OF3})
