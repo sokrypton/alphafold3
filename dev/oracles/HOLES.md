@@ -493,3 +493,37 @@ module here. Constructing it directly with the checkpoint's own
 `pairformer_args` asks for `attention.norm_s` (16 tensors the checkpoint does
 not have) while ConfidenceModule's build asks for `pre_norm_s` and loads clean.
 Build it through ConfidenceModule, as the gate does. [[three-code-copies]].
+
+## boltz2's template module is V2, and we implement V1 (2026-09-10)
+
+Found by generalising the relative-position finding: read the CHECKPOINT's
+flags, not the class defaults. boltz2's hyper_parameters carry
+`use_templates_v2: True`, and `models/boltz2.py:231` selects `TemplateV2Module`
+over `TemplateModule` on it. `template_parity.py:263` builds `TemplateModule`.
+
+The two classes take the SAME weights -- both load the checkpoint's 81
+`template_module.*` tensors with 0 missing and 0 unexpected -- so only the
+forward differs, in exactly one place:
+
+    v1   asym_mask = (asym_id[:, :, None] == asym_id[:, None, :])
+         a_tij = a_tij * asym_mask...
+    v2   tmlp_pair_mask = (visibility_ids[..., :, None] == visibility_ids[..., None, :])
+         a_tij = a_tij * tmlp_pair_mask...
+
+v1 masks the template pair features by SAME CHAIN; v2 masks by matching
+`visibility_ids`, a per-template field. Our `Boltz2TemplateEmbedding._features`
+takes `asym_mask_2d` -- the v1 convention.
+
+**Inert on everything currently gated, live on a complex.** With one chain and
+one template both masks are all-ones, which is why `L1t.template` reads 4e-05
+for boltz2 and why this survived. It diverges as soon as a template covers more
+than one chain, or when visibility_ids partition a chain.
+
+NOT FIXED. `visibility_ids` is a boltz feature our featuriser does not produce,
+so this is a featurisation job and not a one-line branch. Two things follow:
+
+  * `L1t.template boltz2` is verified for the single-chain case ONLY, and the
+    gate should build TemplateV2Module so that stops being invisible.
+  * [[multimer-parity-status]] records boltz2 templates on a complex as
+    "partial" -- this is a candidate explanation, and it is testable by giving
+    the gate a two-chain template.
