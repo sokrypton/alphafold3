@@ -25,6 +25,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from confidence_parity import _cmp                      # noqa: E402
+from diffusion_parity import _stub_layer_norm           # noqa: E402
 
 
 def native_boltz2(model, batch, s_inputs, bonds, bond_types, n):
@@ -289,7 +290,204 @@ def native_rf3(model, batch, s_inputs, bonds, bond_types, n):
   return np.asarray(z)
 
 
-NATIVES = {'boltz2': native_boltz2, 'rosettafold3': native_rf3}
+_OF3_CKPT = {'openfold3': 'of3-p2-155k.pt', 'openbind0': 'of3-ob-174k.pt'}
+
+
+def native_of3(model, batch, s_inputs, bonds, bond_types, n):
+  """-> z_init from OpenFold3's own `InputEmbedder` tail (of3, openbind0).
+
+      z = linear_z_i(s_input)[..., None, :] + linear_z_j(s_input)[..., None, :, :]
+      z = z + linear_relpos(relpos_complex(batch, r_max, s_max))
+      z = z + linear_token_bonds(token_bonds[..., None])
+
+  The axes are the OPPOSITE of rf3's: here `[..., None, :]` on an [n, c] tensor
+  is [n, 1, c], the ROW, and `[..., None, :, :]` the column -- where rf3's
+  `unsqueeze(-3)` makes its first term the column. Same-looking code, mirrored
+  meaning, which is exactly how the rf3 adapter got it wrong first.
+  """
+  import torch
+
+  from openfold3.core.utils.relpos import relpos_complex
+
+  ckpt = os.path.expanduser('~/' + _OF3_CKPT[model])
+  sd = torch.load(ckpt, map_location='cpu', weights_only=False)
+  sd = sd.get('state_dict', sd.get('model', sd))
+  pre = 'input_embedder.'
+  g = lambda k: sd[pre + k]
+  t = lambda x, d=torch.float32: torch.tensor(np.asarray(x), dtype=d)
+  lin = lambda w, x: torch.nn.functional.linear(x, g(w))
+
+  c_z, c_s_inputs = g('linear_z_i.weight').shape
+  n_relpos = g('linear_relpos.weight').shape[1]
+  print('  checkpoint: c_z %d, c_s_inputs %d, relpos %d'
+        % (c_z, c_s_inputs, n_relpos))
+  # of3's 449-channel s_inputs with ITS restype permutation, handed back in our
+  # 447-wide layout -- the same contract conditioning_parity uses.
+  from converters.openfold3 import _AF3_TO_OF3_AATYPE as _remap
+  idx = np.concatenate([384 + np.asarray(_remap), 416 + np.asarray(_remap),
+                        [448], np.arange(384)])
+  rng = np.random.default_rng(0)
+  s449 = (rng.normal(size=(n, c_s_inputs)) * 0.5).astype(np.float32)
+  s449[:, np.setdiff1d(np.arange(c_s_inputs), idx)] = 0.0
+  _OURS['s_inputs'] = s449[:, idx]
+  si = t(s449)
+
+  tf = batch.token_features
+  b = {k: t(np.asarray(getattr(tf, k)).astype(np.int64), torch.long)
+       for k in ('asym_id', 'residue_index', 'entity_id', 'token_index',
+                 'sym_id')}
+  # r_max / s_max are of3's own config values, and 2*(2*r+2) + (2*s+2) + 1 has
+  # to come out at the relpos linear's input width -- asserted, not assumed.
+  r_max, s_max = 32, 2
+  assert 2 * (2 * r_max + 2) + (2 * s_max + 2) + 1 == n_relpos, n_relpos
+  with torch.no_grad():
+    z = (lin('linear_z_i.weight', si)[..., None, :]
+         + lin('linear_z_j.weight', si)[..., None, :, :])
+    if not os.environ.get('NORELPE'):
+      z = z + lin('linear_relpos.weight',
+                  relpos_complex(b, r_max, s_max).to(torch.float32))
+    else:
+      print('  NORELPE: relative position encoding dropped on both sides')
+    z = z + lin('linear_token_bonds.weight', t(bonds)[..., None])
+  return np.asarray(z)
+
+
+_PROTENIX_SRC = {
+    'protenix1': ('protenix', '~/protenix_weights/'
+                  'protenix_base_default_v1.0.0.pt'),
+    'protenix2': ('protenix', '~/protenix_weights/protenix-v2.pt'),
+    'opendde': ('opendde', '~/opendde_weights/opendde.pt'),
+}
+
+
+def native_protenix(model, batch, s_inputs, bonds, bond_types, n):
+  """-> z_init from protenix's own `Protenix.forward` head (also opendde).
+
+      s_init = linear_no_bias_sinit(s_inputs)
+      z_init = zinit1(s_init)[..., None, :] + zinit2(s_init)[..., None, :, :]
+      z_init = z_init + relative_position_encoding(relp)
+      z_init = z_init + linear_no_bias_token_bond(token_bonds[..., None])
+
+  THE COMPOSE is what makes this family different from of3 and rf3: the two
+  pair projections read `s_init`, not `s_inputs`, so the converter has to fold
+  `zinit @ sinit` into one matrix against our single projection of target_feat.
+  A gate on z_init is the only thing that can check that fold, and this is it.
+
+  Axes as of3's: `[..., None, :]` is the ROW.
+  """
+  import importlib
+
+  import torch
+
+  _stub_layer_norm()
+  pkg, ckpt_path = _PROTENIX_SRC[model]
+  RelativePositionEncoding = getattr(
+      importlib.import_module(pkg + '.model.modules.embedders'),
+      'RelativePositionEncoding')
+
+  sd = torch.load(os.path.expanduser(ckpt_path), map_location='cpu',
+                  weights_only=False)
+  sd = sd.get('model', sd.get('state_dict', sd))
+  g = lambda k: sd['module.' + k]
+  t = lambda x, d=torch.float32: torch.tensor(np.asarray(x), dtype=d)
+  lin = lambda w, x: torch.nn.functional.linear(x, g(w))
+
+  c_s, c_s_inputs = g('linear_no_bias_sinit.weight').shape
+  c_z = g('linear_no_bias_zinit1.weight').shape[0]
+  print('  checkpoint: c_z %d, c_s %d, c_s_inputs %d' % (c_z, c_s, c_s_inputs))
+  from converters.openfold3 import _AF3_TO_OF3_AATYPE as _remap
+  idx = np.concatenate([384 + np.asarray(_remap), 416 + np.asarray(_remap),
+                        [448], np.arange(384)])
+  rng = np.random.default_rng(0)
+  s449 = (rng.normal(size=(n, c_s_inputs)) * 0.5).astype(np.float32)
+  s449[:, np.setdiff1d(np.arange(c_s_inputs), idx)] = 0.0
+  _OURS['s_inputs'] = s449[:, idx]
+
+  tf = batch.token_features
+  ifd = {k: t(np.asarray(getattr(tf, k)).astype(np.int64), torch.long)[None]
+         for k in ('asym_id', 'residue_index', 'entity_id', 'token_index',
+                   'sym_id')}
+  rp = RelativePositionEncoding(c_z=c_z)
+  rp.load_state_dict(
+      {'linear_no_bias.weight': g('relative_position_encoding.linear_no_bias.weight')},
+      strict=False)
+  rp.eval()
+  with torch.no_grad():
+    s_init = lin('linear_no_bias_sinit.weight', t(s449))
+    z = (lin('linear_no_bias_zinit1.weight', s_init)[..., None, :]
+         + lin('linear_no_bias_zinit2.weight', s_init)[..., None, :, :])
+    if not os.environ.get('NORELPE'):
+      # `generate_relp` returns the feature DICT with a 'relp' entry added;
+      # forward takes that tensor (protenix.py: `relative_position_encoding(
+      # input_feature_dict["relp"])`).
+      z = z + rp(rp.generate_relp(ifd)['relp'])[0]
+    else:
+      print('  NORELPE: relative position encoding dropped on both sides')
+    z = z + lin('linear_no_bias_token_bond.weight', t(bonds)[..., None])
+  return np.asarray(z)
+
+
+def native_if2(model, batch, s_inputs, bonds, bond_types, n):
+  """-> z_init from IntelliFold-2's own `InputEmbedder` (embedders.py:172-186).
+
+      z = linear_z_i(s).unsqueeze(-2) + linear_z_j(s).unsqueeze(-3)
+      z = z + relative_position_encoding(asym, residue, entity, token, sym)
+      z = z + linear_token_bonds(token_bonds[..., None])
+
+  A third spelling of the same axes: `unsqueeze(-2)` is the ROW, so i is the row
+  and j the column -- of3's convention, rf3's mirrored. And if2's s_inputs is
+  447 channels, OUR layout, so unlike every other model in this gate there is no
+  restype permutation to undo.
+  """
+  import torch
+
+  from intellifold.openfold.model.embedders import RelativePositionEncoding
+
+  sd = torch.load(os.path.expanduser('~/model_v2/intellifold_v2.pt'),
+                  map_location='cpu', weights_only=False)
+  sd = sd.get('state_dict', sd.get('model', sd))
+  pre = 'backbone_trunk.input_embedder.'
+  g = lambda k: sd[pre + k]
+  t = lambda x, d=torch.float32: torch.tensor(np.asarray(x), dtype=d)
+  lin = lambda w, x: torch.nn.functional.linear(x, g(w))
+
+  c_z, c_s_inputs = g('linear_z_i.weight').shape
+  n_relpos = g('relative_position_encoding.linear_relpos.weight').shape[1]
+  print('  checkpoint: c_z %d, c_s_inputs %d (OUR layout), relpos %d'
+        % (c_z, c_s_inputs, n_relpos))
+  # main's synthetic array is `evoformer.seq_channel` wide, which is right only
+  # for boltz2; here the width is the 447-channel target_feat. Built at the
+  # checkpoint's own width and handed back for our side to use.
+  if s_inputs.shape[-1] != c_s_inputs:
+    rng = np.random.default_rng(0)
+    s_inputs = (rng.normal(size=(n, c_s_inputs)) * 0.5).astype(np.float32)
+    _OURS['s_inputs'] = s_inputs
+  si = t(s_inputs)
+  tf = batch.token_features
+  ids = [t(np.asarray(getattr(tf, k)).astype(np.int64), torch.long)[None]
+         for k in ('asym_id', 'residue_index', 'entity_id', 'token_index',
+                   'sym_id')]
+  rp = RelativePositionEncoding(c_z=c_z, r_max=32, s_max=2)
+  miss, _ = rp.load_state_dict(
+      {'linear_relpos.weight': g('relative_position_encoding.linear_relpos.weight')},
+      strict=False)
+  assert not miss, list(miss)[:3]
+  rp.eval()
+  with torch.no_grad():
+    z = (lin('linear_z_i.weight', si).unsqueeze(-2)
+         + lin('linear_z_j.weight', si).unsqueeze(-3))
+    if not os.environ.get('NORELPE'):
+      z = z + rp(*ids, dtype=z.dtype)[0]
+    else:
+      print('  NORELPE: relative position encoding dropped on both sides')
+    z = z + lin('linear_token_bonds.weight', t(bonds)[..., None])
+  return np.asarray(z)
+
+
+NATIVES = {'boltz2': native_boltz2, 'rosettafold3': native_rf3,
+           'intellifold2': native_if2}
+NATIVES.update({m: native_of3 for m in _OF3_CKPT})
+NATIVES.update({m: native_protenix for m in _PROTENIX_SRC})
 LOOPS = {'boltz2': native_boltz2_loop}
 
 
@@ -307,11 +505,22 @@ def ours(model, cfg, model_dir, batch, s_inputs):
 
   def fwd():
     ev = evo.Evoformer(cfg.evoformer, cfg.global_config, name='evoformer')
+    single_act = None
+    if cfg.global_config.model == 'opendde':
+      # OpenDDE builds its pair init from the SINGLE EMBEDDING, not from
+      # target_feat -- `_seq_pair_embedding`'s `single_act` argument, and the
+      # reason its left/right projections are (384, 384) where everyone else's
+      # are (447, 384). Building s_init here creates `single_activations` in
+      # this transform, which the blob has.
+      import haiku as _hk
+      from alphafold3.model.components import haiku_modules as hm
+      single_act = hm.Linear(cfg.evoformer.seq_channel,
+                             name='single_activations')(jnp.asarray(s_inputs))
     # It returns (pair_activations, pair_mask) -- pair FIRST. Unpacking it the
     # other way round broadcasts a (n, n) mask against a (n, n, c) tensor and
     # says so, which is the good outcome.
     pair, _ = ev._seq_pair_embedding(  # pylint: disable=protected-access
-        batch.token_features, jnp.asarray(s_inputs))
+        batch.token_features, jnp.asarray(s_inputs), single_act=single_act)
     pair = ev._relative_encoding(batch, pair)  # pylint: disable=protected-access
     return ev._embed_bonds(batch, pair)        # pylint: disable=protected-access
 
