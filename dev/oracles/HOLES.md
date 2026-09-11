@@ -884,6 +884,60 @@ downstream immediately instead of being waved at as "its head amplifies more".
 
 The residual ~6e-03 IS the bf16 -- that part of the earlier entry stands.
 
+## CORRECTION 2026-09-11: plain 5K9P is BISTABLE, and two of my attributions were draws
+
+The fold RMSD on this target is a PER-PROCESS DRAW from two basins, for both
+implementations, with the same seed and the same precision. Measured, protenix1,
+identical command repeated:
+
+    ours   11.362  11.362  1.555  11.362  ...      (11.362 reproduces to 3 decimals)
+    native  1.854  10.139  1.854  1.848
+
+The two outcomes are each reproducible WITHIN a process to three decimals and
+flip BETWEEN processes, which is the signature of XLA autotuning choosing one of
+two kernel plans per process (and something equivalent on native's side), not of
+continuous noise. It is also why the driver's cache-warmed cells report one
+value consistently: a cached executable is one fixed plan.
+
+TWO THINGS I ATTRIBUTED WRONGLY BEFORE MEASURING THE REPEAT:
+
+  1. **"protenix1 folds 1.583 at the shipped matmul default and 11.362 at
+     `highest`."** Both numbers are real; the cause is not. Repeating either
+     configuration gives both outcomes. I had started changing the DRIVER on
+     this basis (per-level matmul precision) -- reverted, and the driver keeps
+     `highest` everywhere.
+  2. **"protenix2's plain 5K9P is decided by precision: native bf16 6.999,
+     native fp32 12.342."** Also a draw: native protenix2 bf16, repeated, gives
+     8.952 / 12.148 / 11.503, and ours gives 12.183 / 12.183 / 12.683. Both
+     sides span 7-12.5 on this target. The structure-to-structure numbers in
+     that entry stand as measurements (ours sits ~1 A from native's fp32 samples
+     and 4-10 A from its bf16 ones) -- what was wrong is calling the mechanism
+     precision rather than basin choice, and those two dumps were simply in
+     different basins.
+
+I also briefly read the vendor PYTHONPATH overlay as the lever (11.738 with,
+1.530 without). Same coin. The probe that settled it took four runs and prints
+a coordinate hash: two configurations x two repeats, and the two outcomes
+appeared in BOTH configurations.
+
+**WHAT STILL STANDS, and why.** The template + MSA-depth fixes are supported by
+the TRUNK, which is deterministic and was measured against native's own
+tensors: per-cycle 0.99973 / 0.98542 / 0.93123 before, and 0.99999891 /
+0.99999545 after, with the MSA-depth term the seed of the compounding. The fold
+evidence is that BEFORE the fix every run of several was 8.97-12.89 -- the good
+basin never appeared -- and after it, it does. That is a frequency change, not
+the deterministic 10.98 -> 1.53 jump the earlier entry reads as. Both basins'
+VALUES agree between implementations (ours 1.53-1.60 and 11.4-12.7, native 1.85
+and 10.1), which is the best available statement of agreement on a bistable
+target.
+
+**THE RULE, since this is the third time a fold number has misled here:** on a
+target where the samples cluster far from the reference, repeat the WHOLE
+PROCESS before attributing anything to a code or configuration change. A
+5-sample spread inside one process is not the band; the band is across
+processes. And prefer a deterministic activation comparison (trunk, module) as
+the evidence -- fold RMSD is the thing being explained, not the measurement.
+
 ## SOLVED 2026-09-11: protenix's empty template and its depth-1 self MSA
 
 Two INPUT conventions, worth 9.4 A on plain ubiquitin, and neither moved a

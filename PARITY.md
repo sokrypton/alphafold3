@@ -139,6 +139,37 @@ Also note L6's status column is blind: it reports OK whenever a number was
 produced. A 10 A fold and a 1.5 A fold both read OK, which is how this survived
 until the numbers were read by hand.
 
+### plain 5K9P is BISTABLE, and fold RMSD there is a per-process draw (2026-09-11)
+
+Repeating the identical command, same seed, same precision:
+
+    ours protenix1     11.362  11.362  1.555  11.362
+    native protenix1    1.854  10.139   1.854  1.848
+    ours protenix2     12.183  12.183  12.683
+    native protenix2    6.999   8.952  12.148  11.503  (and 12.342 in fp32)
+
+Each outcome is reproducible to three decimals WITHIN a process and flips
+BETWEEN processes -- XLA autotuning picking one of two kernel plans per process,
+and something equivalent on native's side. A cache-warmed driver cell therefore
+reports one value consistently, which is what made this look like a
+configuration effect.
+
+**Two attributions of mine were coin flips and are retracted**: that protenix1's
+fold was decided by the matmul precision (I had begun changing the driver on
+that basis; reverted), and that protenix2's was decided by bf16-vs-fp32. Both
+configurations produce both outcomes.
+
+**So on this target, use the trunk.** It is deterministic and it is what supports
+the two fixes above: per-cycle 0.99973 / 0.98542 / 0.93123 before, 0.99999891 /
+0.99999545 after. The fold evidence is that before the fix the good basin never
+appeared in several runs (8.97-12.89) and after it does, and that both basins'
+VALUES agree between implementations. That is the honest statement for a
+bistable target; "10.98 -> 1.53" reads as deterministic and is not.
+
+**The rule for this whole document:** on a target whose samples cluster far from
+the reference, repeat the WHOLE PROCESS before attributing anything to a code or
+config change. The 5-sample spread inside one process is not the band.
+
 ### The two protenix conventions are a SWEEP nobody has run (2026-09-11)
 
 Both faults behind protenix1's 9 A were INPUT conventions with all-green module

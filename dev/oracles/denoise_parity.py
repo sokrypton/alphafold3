@@ -721,7 +721,7 @@ def ours(model, cfg, model_dir, fb, pos_dense, noise, s_inputs, s, z):
   from alphafold3.model import params as afp
   from alphafold3.model.network import diffusion_head
 
-  cfg.global_config.bfloat16 = 'none'
+  cfg.global_config.bfloat16 = os.environ.get('BF16', 'none')
   full = afp.get_model_haiku_params(model_dir=model_dir)
   emb = {'single': jnp.asarray(s), 'pair': jnp.asarray(z),
          'target_feat': jnp.asarray(s_inputs)}

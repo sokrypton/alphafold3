@@ -536,7 +536,13 @@ _FEATURISE = {
     # The signature in the gate is unmistakable once the layout is right: q per
     # 32-atom window read 39.7 / 45.3 at windows 0-1 and 15.5 / 26.6 at 16-17,
     # against 0.1-2.1 across the whole interior.
-    'boltz2': dict(modified_as_one_token=True, padded_keys=True),
+    # dedupe_self_msa: boltz's own featuriser emits a DEPTH-1 MSA for a chain
+    # with no alignments -- `dummy_msa` holds one sequence, and the pairing takes
+    # the first row of each chain and then finds nothing to add, so its batch
+    # carries msa at (1, 1, 68). Read off boltz's inference data module, not
+    # inferred. AF3 hands the same input the query TWICE.
+    'boltz2': dict(modified_as_one_token=True, padded_keys=True,
+                   dedupe_self_msa=not os.environ.get('AF3_NO_BOLTZ2_DEDUPE_MSA')),
     # opendde runs its diffusion on an expanded structural-token set, and pads
     # the atom key window rather than sliding it in bounds.
     # struct_num_tokens is deliberately absent: the structural-token count
@@ -587,7 +593,13 @@ _FEATURISE = {
     # windows 16 and 17 ALONE. With both, the whole encoder is exact at full
     # depth: a_token 2.33e-05, q_atom 1.23e-05, every window at the numerical
     # floor.
-    'intellifold2': dict(qblock_keys=True),
+    # dedupe_self_msa: IntelliFold-2 forks boltz's featuriser, `dummy_msa` and
+    # the pairing loop included, so a chain with no alignments gets a DEPTH-1
+    # MSA (one dummy sequence, first row per chain, nothing left to pair or
+    # append). AF3 hands the same input the query twice.
+    'intellifold2': dict(qblock_keys=True,
+                         dedupe_self_msa=not os.environ.get(
+                             'AF3_NO_IF2_DEDUPE_MSA')),
     # rf3 (atomworks) renames atomised atoms to their ELEMENT symbol, carries
     # chirality features, aligns restypes to its own alphabet, and calls an
     # atomised polymer token UNKNOWN where AlphaFold 3 keeps the parent residue
@@ -599,11 +611,17 @@ _FEATURISE = {
     # Same convention as opendde and protenix; it was missed here because rf3
     # was already in KEY_MASKED_ATOM_ATTENTION and that list is about the MASK,
     # not about where the window sits.
+    # dedupe_self_msa: rf3 runs atomworks, whose MSA transform early-returns with
+    # `full_encoded_msa = expand_dims(encoded["seq"], 0)` -- the query alone,
+    # shape [1, n_tokens] -- when no polymer MSA is present. AF3 hands the same
+    # input the query twice.
     'rosettafold3': dict(chirals=True, atomized_element_names=True,
                          restype_alignment=True,
                          atomized_unknown_restype=True,
                          atomized_backbone_bonds=True,
-                         padded_keys=True),
+                         padded_keys=True,
+                         dedupe_self_msa=not os.environ.get(
+                             'AF3_NO_RF3_DEDUPE_MSA')),
     # chai-1's four input conventions, every one of them silent when forgotten:
     # it takes the atom key window MODULO the atom count where AF3 slides it back
     # in bounds; it numbers its atoms without the C-terminal OXT; it carries its

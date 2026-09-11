@@ -37,7 +37,10 @@ seq = sys.argv[3] if len(sys.argv) > 3 else (
     'MQIFVKTLTGKTITLEVEPSDTIENVKAKIQDKEGIPPDQQRLIFAGKQLEDGRTLSDYNIQKESTLHLVLRLRGG')
 N_PASSES = int(os.environ.get('PASSES', 1))
 batch, cfg, model_dir = fold_check._fold_setup(model, seq, None)
-cfg.global_config.bfloat16 = 'none'
+# BF16 mirrors fold_check's knob, because the FOLD path runs the trunk in
+# bfloat16 by default while this gate wants fp32 -- and for protenix1 that
+# difference decides the basin (see HOLES.md).
+cfg.global_config.bfloat16 = os.environ.get('BF16', 'none')
 
 
 @hk.transform
@@ -66,7 +69,11 @@ def fwd(b):
 
 b = jax.tree_util.tree_map(jnp.asarray, utils.remove_invalidly_typed_feats(batch))
 p = afp.get_model_haiku_params(model_dir=model_dir)
-p = {(k[len('diffuser/'):] if k.startswith('diffuser/') else k): v
+# Calling Evoformer directly drops the Model's own `diffuser/` scope prefix, and
+# the blob's ROOT scope ('diffuser' itself, which holds boltz2's
+# evoformer_conditioning_embed_atom_features_bias) becomes haiku's '~'.
+p = {('~' if k == 'diffuser'
+      else k[len('diffuser/'):] if k.startswith('diffuser/') else k): v
      for k, v in p.items()}
 out, pass_rms, _ = fwd.apply(p, jax.random.PRNGKey(0), b)
 print('  pair rms per pass:', ' '.join('%.4f' % float(x) for x in pass_rms))
