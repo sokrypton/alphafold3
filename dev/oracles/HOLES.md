@@ -930,8 +930,80 @@ NEXT, and it is the same unrun gate as before: `real_trunk_parity.py` compares
 the trunk on a REAL input, which is the only regime where the OF3 family's cell
 has resolution. It needs an of3 equivalent of `native_trunk_dump.sh` (that one
 dumps protenix). Both checkpoints are on disk and `openfold3/run_openfold.py`
-has a CLI, but a native of3 fold needs GPU torch, which ~/venv does not have and
-must not get.
+has a CLI. (The "needs GPU torch, which ~/venv does not have and must not get"
+that stood here was half right: ~/venv must not get it, and did not -- see the
+ANSWERED entry below, which ran the fold from a separate venv.)
+
+### ANSWERED 2026-09-11: native openbind0 folds ubiquitin to 2.38 A. OURS IS A BUG.
+
+The measurement this entry kept asking for, finally made. Native PyTorch
+openbind0, its own featuriser, its own runner, single sequence, five samples:
+
+| | plain 5K9P (CA-RMSD, best of 5) |
+|---|---|
+| **native openbind0** (`of3-ob-174k.pt`, v0.5.0 tree) | **2.383** (2.383-2.531) |
+| **our openbind0** | **10.388** (10.4-12.7) |
+| native openfold3 (`of3-p2-155k.pt`, main tree) | 1.308 |
+| our openfold3 | 1.391 |
+
+The control is what makes it decisive: our openfold3 reproduces native openfold3
+(1.391 vs 1.308, inside sampling noise) on the SAME target, through the SAME
+code. So the harness, the scoring and the featurisation are all fine, and the
+4.4x gap on openbind0 is OURS. Everything this entry ruled out was ruled out
+correctly -- and the conclusion those exclusions pointed at, "consistent with
+the checkpoint's own behaviour", was WRONG. Six ruled-out alternatives are not a
+measurement, which is why that was written down as an inference and not a
+finding.
+
+Two notes, both load-bearing for the next person:
+
+  * **`~/openfold-3` at main CANNOT load openbind0.** `load_state_dict(strict=True)`
+    fails with 24 missing `blocks.N.attention_pair_bias.layer_norm_z.weight` and
+    one unexpected `diffusion_transformer.layer_norm_z.weight`, twice over (the
+    file carries two copies). That is exactly the convention split
+    `model_config.PER_BLOCK_PAIR_LAYER_NORM` already records -- so no patch is
+    needed, only the right tree: `git worktree add ~/openfold-3-v050 v0.5.0`,
+    whose tag IS the openbind release (`Merge pull request #375 from
+    aqlaboratory/release/openbind`). It loads strict and runs.
+  * **of3 native inference needs a GPU, full stop.** Forcing
+    `pl_trainer_args.accelerator: cpu` gets through weight loading and then dies
+    in the sampler with `0 active drivers ([]). There should only be one.`. On
+    the GPU the whole 5-sample job takes **15 s**, so it never needed the CPU --
+    it was run alongside a live L6 cell holding 17.2 of 23 GB and fit anyway.
+
+The environment, since the symlink dir was not enough (`pdbeccdutils` is real
+work, not a shim, and `lmdb` / `func_timeout` / `memory_profiler` / `kalign` are
+in none of our venvs):
+
+    ~/of3_venv            a venv layered on boltz_gpu_venv by ONE .pth line:
+                          site-packages/_boltz_gpu.pth ->
+                            /home/ubuntu/boltz_gpu_venv/lib/python3.12/site-packages
+                          (`venv --system-site-packages` inherits the BASE
+                           interpreter, not the venv it was called from, so the
+                           .pth is the part that does the work)
+                          + pip install pdbeccdutils lmdb func-timeout
+                            memory_profiler pydantic lightning awscrt wandb
+                            ml_collections biotite absl-py boto3
+    ~/of3_stub/kalign.py  the ONE genuine stub. Not on PyPI (of3 gets it from
+                          pixi), template-realignment only, and it RAISES --
+                          `--use_templates false` must never reach it.
+
+    PYTHONPATH=/home/ubuntu/openfold-3-v050:$HOME/of3_stub ~/of3_venv/bin/python \
+      openfold3/run_openfold.py predict --query_json <q>.json \
+      --inference_ckpt_path ~/of3-ob-174k.pt --num_diffusion_samples 5 \
+      --num_model_seeds 1 --use_msa_server false --use_templates false \
+      --output_dir <out>
+
+`~/venv` and `~/boltz_venv` are untouched; nothing was installed into either.
+
+WHERE TO LOOK NEXT. The two models share every line of our code and every
+converter path but one, and the checkpoints differ by name in exactly those 25
+LayerNorm tensors (4890 vs 4936 tensors, `converters/openfold3.py`
+`has_shared_pair_norm`). That is a DIFFUSION-side convention, and the failure is
+TRUNK-side (distogram contact precision 0.303 vs openfold3's 0.868), so the two
+facts do not yet meet. Which makes the next measurement a real-input trunk
+comparison against a native openbind0 fold -- now buildable, because that fold
+runs.
 
 ### NOT ANSWERED: native PyTorch openbind0 has NOT been run on ubiquitin
 
