@@ -942,10 +942,26 @@ the model's own low confidence -- it is not the measurement.
 
 What the measurement needs, and the two routes:
 
-  1. **A native of3 fold.** `openfold3/run_openfold.py` has a CLI and both
-     checkpoints are on disk (~/of3-ob-174k.pt, ~/of3-p2-155k.pt). It needs a
-     query JSON, a runner YAML, and GPU torch -- ~/venv's torch is CPU-only and
-     must stay that way; ~/boltz_gpu_venv has torch+cu130 but not of3's deps.
+  1. **A native of3 fold. THE GPU ROUTE EXISTS -- corrected 2026-09-11.** I
+     wrote that this was blocked on GPU torch; that was wrong, and it was
+     repeating a comment in `native_trunk_dump.sh` instead of checking. Measured:
+
+         ~/venv           torch 2.13.0+cpu   cuda False
+         ~/venv_esm       torch 2.13.0+cu130 cuda True
+         ~/boltz_gpu_venv torch 2.13.0+cu130 cuda True
+
+     of3 was missing four packages there, resolved the way this repo already
+     resolves such things (`~/boltz2_extra`, `px_deps`) -- a directory of
+     SYMLINKS, nothing installed:
+
+         ~/of3_deps -> gemmi, ml_collections, absl, biotite  (from ~/venv)
+
+         PYTHONPATH=/home/ubuntu/openfold-3:$HOME/of3_deps \
+           ~/boltz_gpu_venv/bin/python ...
+
+     Verified: `PairFormerStack` imports, cuda True, and of3-ob-174k.pt loads
+     (4890 tensors). Both checkpoints are on disk. A full native fold still
+     needs a query JSON and runner YAML for `openfold3/run_openfold.py`.
   2. **A real-input TRUNK comparison**, which is cheaper and enough: our trunk
      is the module the failure points at, and of3's 48-block stack already runs
      on CPU inside `trunk_parity` in ~2 min. Feed native's stack the REAL (s, z)

@@ -110,7 +110,11 @@ recorded in HOLES.md: six alternatives ruled out by measurement, localised to
 the trunk (its distogram's top-L contact precision is 0.303 against openfold3's
 0.868), and the model reports its own failure (pLDDT 50.5 / PAE 11.12).
 
-**NATIVE PYTORCH openbind0 HAS NOT BEEN RUN on this target.** The route is a
+**NATIVE PYTORCH openbind0 HAS NOT BEEN RUN on this target**, but it is NOT
+blocked: `~/of3_deps` (symlinks to gemmi / ml_collections / absl / biotite,
+nothing installed) puts of3 on `~/boltz_gpu_venv`, where cuda is True and
+of3-ob-174k.pt loads. My earlier "needs GPU torch we do not have" was wrong --
+repeated from a comment instead of checked. The route is a
 real-input TRUNK comparison -- `trunk_in_pair` / `trunk_in_single` /
 `trunk_out_pair` taps now exist in `evoformer.py` behind AF3_ESM_TRUNK_TAPS --
 built by calling `ev.Evoformer` DIRECTLY, the way `esmfold2_localise_trunk.py`
