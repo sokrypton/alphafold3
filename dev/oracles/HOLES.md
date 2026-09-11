@@ -932,3 +932,34 @@ has resolution. It needs an of3 equivalent of `native_trunk_dump.sh` (that one
 dumps protenix). Both checkpoints are on disk and `openfold3/run_openfold.py`
 has a CLI, but a native of3 fold needs GPU torch, which ~/venv does not have and
 must not get.
+
+### NOT ANSWERED: native PyTorch openbind0 has NOT been run on ubiquitin
+
+Stated plainly because everything above is our JAX port compared against native
+MODULES in-process, never against a native FOLD. So "consistent with the
+checkpoint's own behaviour" is an inference from six ruled-out alternatives plus
+the model's own low confidence -- it is not the measurement.
+
+What the measurement needs, and the two routes:
+
+  1. **A native of3 fold.** `openfold3/run_openfold.py` has a CLI and both
+     checkpoints are on disk (~/of3-ob-174k.pt, ~/of3-p2-155k.pt). It needs a
+     query JSON, a runner YAML, and GPU torch -- ~/venv's torch is CPU-only and
+     must stay that way; ~/boltz_gpu_venv has torch+cu130 but not of3's deps.
+  2. **A real-input TRUNK comparison**, which is cheaper and enough: our trunk
+     is the module the failure points at, and of3's 48-block stack already runs
+     on CPU inside `trunk_parity` in ~2 min. Feed native's stack the REAL (s, z)
+     our graph builds for ubiquitin and compare the pair output.
+
+Route 2 was attempted and hit a trap worth recording: tapping the generic trunk
+path from a full `fold_check.fold` run captures JAX TRACERS, not arrays --
+recycling runs inside `model.py`'s `fori_loop`, so anything appended from there
+is traced (`TracerArrayConversionError: ... traced array with shape
+bfloat16[76,384]`). The ESMFold2 taps avoid this only because
+`esmfold2_localise_trunk.py` calls `ev.Evoformer` directly in its own
+`hk.transform` with no recycle loop. That is the pattern to copy: build the
+Evoformer directly, not through `Model`.
+
+`evoformer.py` now carries `trunk_in_pair` / `trunk_in_single` /
+`trunk_out_pair` taps on the generic path alongside the ESMFold2 ones, gated off
+behind AF3_ESM_TRUNK_TAPS, so route 2 needs only the direct-Evoformer harness.

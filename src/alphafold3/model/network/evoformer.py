@@ -949,9 +949,12 @@ class Evoformer(hk.Module):
                                 pairformer_fn,
                                 self.config.pairformer.block_remat)
 
+      _esm_tap('trunk_in_pair', pair_activations)
+      _esm_tap('trunk_in_single', single_activations)
       pair_activations, single_activations = pairformer_stack(
           (pair_activations, single_activations)
       )
+      _esm_tap('trunk_out_pair', pair_activations)
 
       pair_pre_coda = pair_activations
       _esm_tap('z_pre_coda', pair_activations)
