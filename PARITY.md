@@ -96,6 +96,31 @@ The error's SHAPE names the fault: a per-channel constant is a bias term
 transposed terms swapped; a uniform ratio across modules sharing one input is
 that input.
 
+### Where to resume (2026-09-11)
+
+L6 is RUNNING and partially complete -- resume it WITHOUT `FORCE` so finished
+cells are skipped:
+
+    LOGDIR=$PWD/dev/oracles/parity_runs/2026-09-10-full \
+      bash dev/oracles/run_all_parity.sh L6
+
+L6's first 21 cells found **openbind0 folding plain ubiquitin to 10.4 A** where
+openfold3 reaches 1.4 A on identical input through identical code. Fully
+recorded in HOLES.md: six alternatives ruled out by measurement, localised to
+the trunk (its distogram's top-L contact precision is 0.303 against openfold3's
+0.868), and the model reports its own failure (pLDDT 50.5 / PAE 11.12).
+
+**NATIVE PYTORCH openbind0 HAS NOT BEEN RUN on this target.** The route is a
+real-input TRUNK comparison -- `trunk_in_pair` / `trunk_in_single` /
+`trunk_out_pair` taps now exist in `evoformer.py` behind AF3_ESM_TRUNK_TAPS --
+built by calling `ev.Evoformer` DIRECTLY, the way `esmfold2_localise_trunk.py`
+does. Tapping through `fold_check.fold` returns tracers, because recycling runs
+in a `fori_loop`.
+
+Also note L6's status column is blind: it reports OK whenever a number was
+produced. A 10 A fold and a 1.5 A fold both read OK, which is how this survived
+until the numbers were read by hand.
+
 ### What is still open
 
   * **esmfold2's 2 BAD rows** are native's per-module bf16 in the confidence
