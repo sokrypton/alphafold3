@@ -724,3 +724,33 @@ which is the rel_pos residual's max|d| to the digit.
 so with the re-embedding now exact the remaining ~2.6e-02 is in the folding
 trunk stack, the row-attention pooling, or the four heads. Those are all
 hookable in the same bit-exact replay, so the next subtraction is mechanical.
+
+### ...and what remains is the confidence PAIRFORMER
+
+With the re-embedding exact, the next subtraction puts the rest in the stack.
+Our confidence pairformer, run on NATIVE's exact tapped `z_base` and built the
+way `confidence_head` builds it (with_single=True, pair attention off for
+PAIR_ONLY_TRUNK; 26 scopes, 0 unmapped):
+
+    trunk_out   corr 0.99999524   rms ours/nat 1.0003
+                rms(d)/rms 3.10e-03   p99.9/rms 3.43e-02   max/rms 4.41e-01
+
+So the BULK agrees to 0.3% and a thin tail does not -- and the tail is what the
+audit grades. Three explanations tested and rejected:
+
+  * AMPLIFICATION. The stack multiplies the pair's magnitude 123-fold (rms 2.7
+    -> 333), but its GAIN on a perturbation of its own input is only 1.4x to
+    2.0x, stable across three decades. Our z_base enters 7.60e-03 out; 1.4x of
+    that is ~1e-02, not 4.4e-01.
+  * BF16. Native's confidence tensors are NOT bf16-representable (z_base
+    max|d| 6.2e-02, trunk_out 3.1e+01 when round-tripped), so this head runs
+    fp32 -- unlike the rel_pos it receives, which IS exactly bf16 because the
+    TRUNK computed it. The two live in different precisions and only the first
+    is explained by autocast.
+  * a wrong isolation. The first attempt built the stack with_single=False and
+    got the same number as with_single=True, so the reading is not an artifact
+    of how the probe assembles it.
+
+NEXT: the sub-module diff inside one confidence pairformer block -- the two
+triangle multiplications and the transition -- which is the ladder that found
+rf3's `/L`. Native's head replays bit-exactly, so each can be hooked.
