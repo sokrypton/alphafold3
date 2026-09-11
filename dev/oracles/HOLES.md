@@ -570,3 +570,32 @@ on 2026-09-10 after BF16=all moved only the third digit. The untested
 possibility remains that native's own output is that noisy; it needs two dumps
 from ~/venv_esm and the spread between them, which is the same method
 [[esm-tower-numerical-modes]] used for the tower.
+
+### esmfold2 confidence: "native is noisy" is REFUTED (2026-09-11)
+
+The measurement that was named as next -- two dumps from ~/venv_esm and the
+spread between them -- is done. Native is indeed NOT reproducible run to run:
+
+    conf.in.z                       max|d| 12.0      (3.64e-01 relative)
+    conf.in.s_inputs                max|d| 3.1e-02   (2.07e-01)
+    conf.out.pae                    max|d| 4.95e-01  (7.08e-02)
+    conf.out.plddt                  max|d| 2.3e-03   (3.20e-03)
+    conf.in.relative_position_encoding   IDENTICAL
+
+That is not numerical noise, it is BY DESIGN: ESMFold2 keeps 25% dropout on the
+LM pair rep at INFERENCE, resampled every loop
+(`config.lm_encoder.per_loop_lm_dropout`; disabling it costs ~18 A on 6MRR).
+The relative-position encoding, which has no stochastic input, is bit-identical
+across the two runs -- which is the control that says the rest is the dropout
+and not the tower's numerical band [[esm-tower-numerical-modes]].
+
+**It does not excuse our gap.** The confidence gate INJECTS `conf.in.*` from one
+dump and compares against `conf.out.*` from that SAME dump, so the run-to-run
+variation cancels exactly. Our head differs by 4.31e-01 on inputs it was handed
+verbatim. The remaining possibility named on 2026-09-10 -- "that NATIVE's own
+output is that noisy" -- is therefore refuted for this cell, and the four rows
+are OUR head.
+
+Worth keeping in view for OTHER esmfold2 cells though: any gate that re-runs
+native rather than injecting a dump is comparing against one draw of a
+stochastic trunk, and a 3.64e-01 spread on z is large enough to matter.
