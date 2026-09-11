@@ -427,7 +427,24 @@ class ConfidenceHead(hk.Module):
           self.config.pairformer.num_layer
       )(pairformer_fn)
 
+      pair_stack_in = pair_act
       pair_act, single_act = pairformer_stack((pair_act, single_act))
+      if self.global_config.model in model_config.PAIR_ONLY_TRUNK:
+        # ESMFold2 ADDS the trunk's output to the pair that entered it:
+        #
+        #     pair_delta = self.folding_trunk(pair, ...)
+        #     pair.add_(pair_delta.float())         modeling_esmfold2.py:53-54
+        #
+        # and `FoldingTrunk.forward` returns the FULL updated pair, not a delta,
+        # despite that variable's name -- its blocks are already residual. So the
+        # pair the heads read carries z_base twice, and dropping the outer add
+        # feeds them a different tensor entirely.
+        #
+        # This was the whole of the family's remaining L4 gap. Our heads on
+        # native's own tapped trunk output read pae 2.53e-02 (esmfold2) and
+        # 1.10e-01 (esmfold2_fast); on z_base + that output they read 1.35e-06
+        # and 1.11e-06, rms ratio 1.0000 both.
+        pair_act = pair_stack_in + pair_act
       pair_act = pair_act.astype(jnp.float32)
       if self.global_config.model in model_config.PAIR_ONLY_TRUNK:
         # No trunk single exists, so there is nothing to read: ESMFold2 builds

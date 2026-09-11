@@ -846,3 +846,40 @@ gates compile.
 
 NOT for timing work -- [[jax-cache-override]] records benchmarks silently
 measuring cache hits. The parity matrix compares NUMBERS, so a hit is free.
+
+### RESOLVED: the esmfold2 confidence gap was a MISSING OUTER RESIDUAL
+
+And my bf16 attribution above was over-claimed. Native does
+
+    pair_delta = self.folding_trunk(pair, ...)      modeling_esmfold2.py:53
+    pair.add_(pair_delta.float())                                       :54
+    ...
+    pae_logits = self.pae_head(self.pae_ln(pair))                       :108
+
+and `FoldingTrunk.forward` returns the FULL updated pair, not a delta -- its
+blocks are already residual, and the variable's name at the call site is
+misleading. So the tensor the heads read carries z_base TWICE. Our graph
+replaced the pair with the stack's output and dropped the outer add.
+
+Fed native's own tapped trunk output, our heads read pae 2.53e-02 (esmfold2)
+and 1.10e-01 (esmfold2_fast); fed z_base + that output they read 1.35e-06 and
+1.11e-06, rms ratio 1.0000 both. The cell:
+
+    esmfold2       pae 2.62e-02 -> 5.98e-03   pde 2.23e-02 -> 4.83e-03
+                   plddt 3.62e-03 -> 9.73e-04  resolved 3.81e-03 -> 5.95e-04
+    esmfold2_fast  pae 1.08e-01 -> 6.83e-03   pde 1.19e-01 -> 6.56e-03
+                   plddt 1.41e-02 -> 5.45e-04  resolved 3.19e-02 -> 7.72e-04
+
+**BAD = 0.** boltz2 shares the method and is not in PAIR_ONLY_TRUNK, so it does
+not take the branch; re-checked at 4.99e-06.
+
+WHAT I GOT WRONG, since the reasoning was recorded above as settled: the bf16
+measurements are all correct -- native's tri_mul tensors DO round-trip through
+bfloat16 at max|d| 0, autocast is on `pair.is_cuda`, and the per-sub-module cost
+IS ~0.5%. What was wrong was concluding that this explained the CELL. The tell
+was there and I passed it: esmfold2_fast read 4x worse than esmfold2 while their
+per-sub-module errors were identical (5.04e-03 vs 4.99e-03). Identical parts
+cannot produce a 4x different whole, and that asymmetry should have sent me
+downstream immediately instead of being waved at as "its head amplifies more".
+
+The residual ~6e-03 IS the bf16 -- that part of the earlier entry stands.
