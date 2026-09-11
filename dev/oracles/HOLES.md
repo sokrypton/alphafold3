@@ -655,3 +655,37 @@ NEXT: an element-wise diff of the 139-wide FEATURE vectors, not their
 projections. Both sides project the same `embed.weight` -- the converter maps
 `rel_pos.embed.weight` straight into `rel_pos_project` -- so the disagreement is
 in the features and a per-bucket diff will name it in one measurement.
+
+### CORRECTION: rel_pos is NOT the remaining esmfold2 term
+
+The entry above inferred that rel_pos accounted for the rest, because each
+model's z_base residual matched its rel_pos residual in MAGNITUDE. Both halves
+of that were tested and it is wrong:
+
+  * our 139-wide relative-position FEATURES are BIT-IDENTICAL to native's
+    (max|d| 0.0 across all four blocks, captured by hooking native's
+    `rel_pos.embed` input). The features are not the problem.
+  * the projected relpos differs only because NATIVE COMPUTED IT IN BF16 --
+    its dumped tensor is EXACTLY bf16-representable (round-trips at max|d|
+    0.000e+00), which ESMFold2's `autocast(bfloat16)` trunk explains. Not a port
+    bug.
+  * and injecting native's own relpos into our head barely moves anything:
+    z_base 1.69e-02 -> 1.53e-02, full_pae 2.59e-02 -> 2.57e-02. So rel_pos is
+    about a tenth of the residual, not the whole of it.
+
+Two magnitude coincidences in a row, and both looked convincing. The standing
+lesson holds harder than it reads: a number that matches in magnitude is not a
+cause until substituting it changes the answer.
+
+STILL OPEN: ~1.5e-02 on z_base for esmfold2 (2.6e-02 on its pae; esmfold2_fast
+2.7e-02 and 1.06e-01), from another term in the re-embedding. `rms ours/nat` is
+0.9992 -- ours slightly SMALL -- with a small constant part and partial
+antisymmetry.
+
+NEXT: the term-by-term numerical diff that found boltz2's bug in one step. The
+tooling now exists and the method is proven -- native's confidence head REPLAYS
+bit-exactly on the dump's recorded inputs (max|d| 0.000e+00), so each of
+z_norm / s_to_z / s_to_z_transpose / s_to_z_prod / distogram can be hooked
+individually and subtracted. Do that instead of reading the source again: every
+finding today that survived came from a subtraction, and both that did not came
+from a resemblance.
