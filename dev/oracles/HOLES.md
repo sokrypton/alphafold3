@@ -977,7 +977,7 @@ TWO HARNESS FAULTS OF MINE ON THE WAY, both of which briefly read as findings:
     identical to 8 digits across passes. That one read as "our recycling is
     inert", which would have been a serious bug had it been true.
 
-## protenix2 under the same two fixes: five cases better, ubiquitin worse (OPEN)
+## protenix2 under the same two fixes: five cases better, and ubiquitin CLOSED
 
 Both conventions are CONFIRMED for protenix2 by its own native dump -- 4
 template slots with slot 0 all gap (31) and slots 1-3 all 0, `msa` at (1, 76),
@@ -1004,8 +1004,40 @@ L6 before -> after (2026-09-10 driver row -> re-measured):
 | protein_6mrr | 0.691 | 0.983 | |
 | **plain_5k9p** | 7.476 | **12.684** | **6.999** |
 
-**plain_5k9p is OPEN and it is the one row that went the wrong way.** What is
-already established about it:
+**plain_5k9p is CLOSED, and it is not a port bug: the target is
+PRECISION-DECIDED for protenix2.**
+
+    native protenix2, bf16 autocast (its default)   6.999 A
+    native protenix2, fp32                         12.342 A
+    ours (BF16=none 12.304, BF16=all 12.028)       12.3-12.7 A
+
+And the structure-to-structure comparison, which is the port claim rather than a
+score against the crystal:
+
+    ours vs native-fp32   0.711 / 1.053 / 1.337 / 1.366 / 1.756 A
+    ours vs native-bf16   4.175 / 7.946 / 7.950 / 8.088 / 9.967 A
+
+We reproduce native-in-fp32 to about 1 A and are nowhere near native-in-bf16. So
+the port is faithful and the 6.999 is native's bf16 arithmetic landing in a
+different basin on a chaotic target -- protenix2's OWN bf16-vs-fp32 trunk differs
+at corr 0.854 with max|d| 434 after 10 cycles, while our trunk sits at corr
+0.994 / max|d| 74 against its fp32 reference, i.e. well INSIDE its own
+precision band.
+
+**What this leaves as a real opportunity, not a bug.** protenix INFERS under
+torch autocast bf16, so bf16 is arguably part of the convention rather than a
+degradation of it, and on this target it is worth 5 A. Our `BF16=all` is a
+different thing -- it casts parameters, where autocast keeps LayerNorm, softmax
+and accumulation in fp32 -- and it does not reproduce the basin (12.028).
+Matching torch's autocast semantics is an open question for the whole family,
+and this is the first target where it demonstrably matters.
+
+The old 7.476 we used to print was, as suspected, a different wrong answer: with
+the template term missing the trajectory differed and happened to land near
+native's bf16 number. Two wrongs pointing the same way is exactly what
+[[protenix2-5k9p-retraction]] warns about.
+
+What was established on the way:
 
   * it is not the conventions -- the trunk is exact to 1e-7 at one cycle WITH
     them, and worse without either.
@@ -1017,11 +1049,12 @@ already established about it:
   * protenix1, same conventions, same code, lands at 1.532 against its native's
     1.855. So nothing family-wide is left broken.
 
-The next measurement, in order: our trunk against a 10-CYCLE native dump (one
-cycle is exact, and protenix's recycling is where a small difference compounds
--- it is what took protenix1 from 0.99973 to 0.93123 over three cycles), then
-`fold_with_native_trunk.py` to split trunk from diffusion. Both are one command
-each now.
+Both of the "next measurements" were then made: the 10-cycle trunk comparison
+(corr 0.994 against a floor of 0.854, so inside the band) and the fold in both
+precisions on both sides. They are one command each -- `native_protenix_dump.py`
+with CYCLES=10 and DTYPE, `native_protenix_fold.py` with DTYPE, and
+`score_native_cif.py` pointed at two PREDICTIONS rather than at the crystal,
+which is what turned a 5 A "gap" into a 1 A agreement.
 
 ## SOLVED 2026-09-11: openbind0's end-node pair bias was transposed. 10.4 -> 2.4 A
 
