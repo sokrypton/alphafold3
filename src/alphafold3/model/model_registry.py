@@ -554,7 +554,24 @@ _FEATURISE = {
     # protenix1: p_atom_pair corr 0.844, and a denoise step 1.16 A/atom whose
     # error sat at the chain ends (1.95 vs 0.53 interior) and in the final
     # partial window (2.93) -- the signature of sliding against padding.
-    **{m: dict(padded_keys=True) for m in model_config.PROTENIX_FAMILY},
+    # empty_template_gap: protenix's own featuriser fills its one empty
+    # template with the GAP restype and zero-pads the rest, and its template
+    # embedder divides by the padded slot count -- so the term is live with no
+    # template at all. See model_features._empty_template_gap and
+    # model_config.TEMPLATE_MEAN_OVER_ALL_SLOTS.
+    # dedupe_self_msa: protenix's own featuriser emits a DEPTH-1 self MSA (its
+    # dump carries msa at (1, 76)); AF3 concatenates a paired and an unpaired
+    # MSA and so hands a chain with no alignments the query TWICE. The outer
+    # product mean over duplicates is unchanged, but the pair-weighted averaging
+    # and the row transition are depth-sensitive -- see
+    # model_features._dedupe_self_msa, which esmfold2 needed first.
+    # Both are env-overridable for A/B on a target, the way the esmfold2 dedupe
+    # already is -- a convention that changes a fold by 9 A deserves a switch
+    # that can be flipped without an edit.
+    **{m: dict(padded_keys=True,
+               empty_template_gap=not os.environ.get('AF3_NO_PX_TEMPLATE_GAP'),
+               dedupe_self_msa=not os.environ.get('AF3_NO_PX_DEDUPE_MSA'))
+       for m in model_config.PROTENIX_FAMILY},
     # EXPERIMENT (see the if2 tail investigation): align the atom key window's
     # edge to the atom count rounded up to a whole query block, which is what
     # if2's own reshape-into-windows forces.

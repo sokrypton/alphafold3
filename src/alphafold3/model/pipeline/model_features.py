@@ -282,6 +282,35 @@ def _zero_msa(batch):
   return batch
 
 
+def _empty_template_gap(batch, gap_index=21):
+  """protenix's "no template" slot is a GAP template, not a zero template.
+
+  Both pipelines pad the template axis to 4 slots and mask every atom, so the
+  distogram, the unit vector and both masks come out zero either way. The
+  RESTYPE one-hot does not: AF3's `empty_template_features` fills `aatype` with
+  0, protenix's featuriser fills its one empty template with the GAP class and
+  zero-pads the other three. Measured on native protenix1 at ubiquitin, its
+  template_aatype is exactly that -- slot 0 all 31 (gap), slots 1-3 all 0.
+
+  So the term is applied only when there is no real template anywhere, which is
+  the case protenix builds that way; a batch carrying a real template is left
+  alone, matching [real, 0, 0, 0].
+
+  `gap_index` is in OUR vocabulary: `template_modules._AF3_TO_OF3` maps 21 -> 31,
+  which is the class the converted `a_proj` column expects.
+  """
+  aatype = batch.get('template_aatype')
+  mask = batch.get('template_atom_mask')
+  if aatype is None or mask is None:
+    return
+  aatype, mask = np.asarray(aatype), np.asarray(mask)
+  if not aatype.shape[0] or mask.any():
+    return                                  # no slots, or a real template
+  aatype = aatype.copy()
+  aatype[0] = gap_index
+  batch['template_aatype'] = aatype
+
+
 def _dedupe_self_msa(batch):
   """ESMFold2's self-MSA is the query ONCE, not the query twice.
 
@@ -546,6 +575,8 @@ def apply(batch, spec, *, refeaturise=None, model_dir=None, esm=None,
     _zero_msa(batch)
   if knobs.get('dedupe_self_msa'):
     _dedupe_self_msa(batch)
+  if knobs.get('empty_template_gap'):
+    _empty_template_gap(batch)
   if knobs.get('lm_pair') and lm_pair is not None:
     _attach_lm_pair(batch, lm_pair)
   if knobs.get('esm') and esm is not None:

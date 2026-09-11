@@ -718,6 +718,24 @@ DIFFUSION_PROJECTED_RELPOS = (('boltz2', 'rosettafold3') + ESMFOLD2_FAMILY
 TRANSPOSED_COLUMN_PAIR_BIAS = ('openfold3', 'opendde', 'boltz2') + PROTENIX_FAMILY
 
 
+# Models whose template embedder averages over ALL template SLOTS, including the
+# padded empty ones, rather than over the templates actually present.
+#
+# Boltz divides by the number of PRESENT templates, so with none it contributes
+# exactly zero. protenix divides by `num_templates` -- the padded slot count,
+# fixed at 4 by its featuriser (`TemplateFeaturizer.max_templates`) -- so its
+# term is NEVER zero: `v = z_proj(z_norm(z)) + a_proj(a_tij)` keeps a
+# Z-dependent part even when every template feature is masked out, and that part
+# is fed to the trunk on every recycle.
+#
+# This is not a detail. With the term dropped our protenix1 folded ubiquitin to
+# 10.98 A against native's 1.86 -- and disabling the SAME term in native
+# (TemplateEmbedder.forward -> 0) took native to 8.40, i.e. onto our number. A
+# real template is diluted by the empty slots under this convention, which is
+# the vendor's own arithmetic and not something to correct.
+TEMPLATE_MEAN_OVER_ALL_SLOTS = PROTENIX_FAMILY
+
+
 # Models whose TEMPLATE stack adds an OUTER residual around the whole pairformer
 # (`v = v + stack(v)`) rather than replacing the activation (`v = stack(v)`).
 #

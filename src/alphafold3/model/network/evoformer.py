@@ -220,7 +220,10 @@ class _RelativeEncodingProjection(hk.Module):
             + w_chain[chain_idx])
 
 
-# Per-stage taps for the ESMFold2 trunk, OFF unless AF3_ESM_TRUNK_TAPS is set.
+# Per-stage taps for the trunk, OFF unless AF3_ESM_TRUNK_TAPS is set. Named for
+# ESMFold2, which needed them first; the *_generic / z_after_* entries serve the
+# stock path every other model takes, and found protenix1's z 25% too large at
+# the pairformer input.
 #
 # These existed while the port was being built and were deleted afterwards on
 # the principle that debug taps should not ship. That was wrong twice over:
@@ -853,7 +856,9 @@ class Evoformer(hk.Module):
         pair_init = pair_activations
         pair_activations = _add_prev(pair_activations, pair_init)
       else:
+        _esm_tap('z_before_prev', pair_activations)
         pair_activations = _add_prev(pair_activations, None)
+        _esm_tap('z_after_prev', pair_activations)
         pair_activations = self._relative_encoding(batch, pair_activations)
 
       # chai has NO bond feature: its 163-column token-pair stream is
@@ -868,6 +873,7 @@ class Evoformer(hk.Module):
             batch=batch, pair_activations=pair_activations
         )
 
+      _esm_tap('z_init_generic', pair_activations)
       pair_activations, key = self._embed_template_pair(
           batch=batch,
           pair_activations=pair_activations,
@@ -875,6 +881,7 @@ class Evoformer(hk.Module):
           key=key,
           use_dropout=use_dropout,
       )
+      _esm_tap('z_after_template', pair_activations)
       if single_activations is None:   # stock path: not hoisted for opendde above
         single_activations = hm.Linear(
             self.config.seq_channel, name='single_activations'
@@ -896,6 +903,8 @@ class Evoformer(hk.Module):
       )
 
       if not pair_only:   # already run above, into the parcae injection
+        # the MSA module's own before/after, so a divergence in the stock trunk
+        # can be attributed to init / template / msa rather than to the stack
         pair_activations, key = self._embed_process_msa(
             msa_batch=batch.msa,
             pair_activations=pair_activations,
@@ -912,6 +921,7 @@ class Evoformer(hk.Module):
             # this takes it to 0.999993.
             single_post_recycle=single_activations,
         )
+        _esm_tap('z_after_msa', pair_activations)
       del key  # Unused after this point.
 
 

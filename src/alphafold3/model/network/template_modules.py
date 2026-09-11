@@ -538,9 +538,15 @@ class Boltz2TemplateEmbedding(hk.Module):
 
     v_all = hk.vmap(per_template, in_axes=0, out_axes=0,
                     split_rng=False)(aatype, atom_positions, atom_mask)  # (T,N,N,64)
-    present = (atom_mask.reshape(T, -1).sum(-1) > 0).astype(v_all.dtype)  # (T,)
-    num_t = jnp.clip(present.sum(), 1.0, None)
-    u = jnp.einsum('t,tijc->ijc', present, v_all) / num_t             # (N,N,64)
+    if self.global_config.model in model_config.TEMPLATE_MEAN_OVER_ALL_SLOTS:
+      # protenix divides by the PADDED slot count and sums every slot, so the
+      # Z-dependent half of v survives with no template at all. See
+      # model_config.TEMPLATE_MEAN_OVER_ALL_SLOTS for what dropping this cost.
+      u = v_all.sum(0) / (1e-7 + T)
+    else:
+      present = (atom_mask.reshape(T, -1).sum(-1) > 0).astype(v_all.dtype)  # (T,)
+      num_t = jnp.clip(present.sum(), 1.0, None)
+      u = jnp.einsum('t,tijc->ijc', present, v_all) / num_t           # (N,N,64)
     out = hm.Linear(z.shape[-1], use_bias=False, name='u_proj')(jax.nn.relu(u))
     return out.astype(dtype)
 
