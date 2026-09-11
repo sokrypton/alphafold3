@@ -1451,8 +1451,20 @@ def map_esmfold2_to_af3_graph(sd, dims=None):
       's_to_z_prod_in1/weights': remap_s_inputs(t(sd['%s.s_to_z_prod_in1.weight' % ch])),
       's_to_z_prod_in2/weights': remap_s_inputs(t(sd['%s.s_to_z_prod_in2.weight' % ch])),
       's_to_z_prod_out/weights': t(sd['%s.s_to_z_prod_out.weight' % ch]),
-      'left_target_feat_project/weights': remap_s_inputs(t(sd['%s.s_to_z.weight' % ch])),
-      'right_target_feat_project/weights':
+      # ORIENTATION, and it was SWAPPED here until 2026-09-11. Native adds
+      # `s_to_z(s).unsqueeze(2)` -- shape (B, N, 1, c), so indexed by i, the ROW
+      # -- and `s_to_z_transpose(s).unsqueeze(1)` on the COLUMN
+      # (modeling_esmfold2.py ConfidenceHead.forward). The graph's
+      # `_boltz2_reembed` adds `right_target_feat_project(...)[:, None]` on the
+      # ROW and `left_target_feat_project(...)[None]` on the COLUMN, so s_to_z
+      # is the RIGHT one. converters/boltz2.py already maps it that way round.
+      #
+      # Swapping two terms that are each other's transpose makes the error
+      # EXACTLY ANTISYMMETRIC, which is how this was found: our z_base against
+      # native's tapped z_base read corr 0.876 with ||d - d.T|| = 2||d|| to the
+      # digit. Nothing else in the re-embedding can produce that shape.
+      'right_target_feat_project/weights': remap_s_inputs(t(sd['%s.s_to_z.weight' % ch])),
+      'left_target_feat_project/weights':
           remap_s_inputs(t(sd['%s.s_to_z_transpose.weight' % ch])),
       'rel_pos_project/weights': t(sd['rel_pos.embed.weight']),
       'token_bonds_project/weights': t(sd['token_bonds.weight'])[:1],
