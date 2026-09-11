@@ -599,3 +599,26 @@ are OUR head.
 Worth keeping in view for OTHER esmfold2 cells though: any gate that re-runs
 native rather than injecting a dump is comparing against one draw of a
 stochastic trunk, and a 3.64e-01 spread on z is large enough to matter.
+
+### ...and the relpos residual is real but too small to be the gap
+
+With the chain-bucket flag now passed, our confidence rel_pos against NATIVE's
+dumped `in.relative_position_encoding` -- the exact tensor native adds, so this
+comparison needs no reimplementation:
+
+    corr 0.99999768   rms ours/nat 1.0001   max|d| 0.02061   max|d|/rms 1.74e-02
+    error largely ANTISYMMETRIC (||d - d.T|| / ||d|| = 1.20)
+
+Real, and NOT the remaining 4.31e-01: 0.0206 absolute on a z of rms 33.0 is
+6e-4 relative, and the scale factor from z to pae is known from the two dumps --
+a 3.64e-01 relative change in z moved pae by 7.08e-02, so 6e-4 would move it by
+~1e-04. Two orders too small. An antisymmetric residual points at an orientation
+or offset term in the bucketing rather than the chain predicate, and it is worth
+closing on its own.
+
+So, for the esmfold2 confidence rows, ELIMINATED so far: the bin convention, the
+boltz-only terms our shared re-embedding adds, the learned distogram, native's
+own reproducibility, and now rel_pos. NEXT: build native's `z_base` from the
+dump's inputs and the checkpoint's confidence weights and compare it against our
+`_boltz2_reembed` output -- the term-by-term diff that found boltz2's bug in one
+step. The dump has every input, so nothing needs to be re-run in ~/venv_esm.
