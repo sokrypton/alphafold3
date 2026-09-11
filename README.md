@@ -126,262 +126,71 @@ against the AF3 lineage.
 
 ## Parity status
 
-This fork runs **18 model types**, and the question that matters for every one
-of them is whether it reproduces its own vendor's implementation rather than
-merely producing a plausible structure. `PARITY.md` is the full record; this is
-the summary.
+This fork runs **18 model types**, and the question for every one is whether it
+reproduces its own vendor's implementation rather than merely producing a
+plausible structure. `PARITY.md` is the full record and `dev/oracles/HOLES.md`
+tracks what is still open; this is the current state.
 
 Parity is measured at seven levels, from the weights inwards to the fold:
 
 | level | what it compares |
 |---|---|
 | **L0** | conversion coverage — every checkpoint tensor accounted for, both directions |
-| **L1** | the trunk: pairformer single + pair, against the vendor's own module |
-| **L2** | diffusion conditioning, token transformer, atom encoder (three parts) |
-| **L3** | one full denoise step — conditioning, atom encoder, transformer, decoder, EDM |
+| **L1** | the trunk: z-init, pairformer, MSA module, template embedder, distogram |
+| **L2** | diffusion conditioning, token transformer, atom encoder and decoder |
+| **L3** | one full denoise step |
 | **L4** | the confidence head: PAE, PDE, pLDDT, resolved |
 | **L5** | an end-to-end fold, scored against an experimental structure |
-| **L6** | modality: RNA, DNA, ligands, complexes, modified residues, and the mmCIF written out |
+| **L6** | modality: RNA, DNA, ligands, complexes, modified residues |
 
-### Coverage, every model
+### Current numbers (2026-09-11)
 
-`✓` gated, `~` partially gated, `·` not measured, `n/a` no vendor to compare
-against.
-
-| model | L0 | L1 trunk | L2 diff-cond | L3 denoise | L4 conf | L5 fold | L6 modality |
-|---|---|---|---|---|---|---|---|
-| `alphafold3` | n/a | n/a | n/a | n/a | n/a | ✓ | · |
-| `openfold3` | ✓ | ✓ | ~ | ✓ | ✓ | ✓ | ✓ |
-| `openbind0` | ✓ | ✓ | ~ | ✓ | ✓ | ✓ | ✓ |
-| `intellifold2` | ✓ | ✓ | ~ | ✓ | ✓ | ✓ | ✓ |
-| `protenix2` | ✓ | ✓ | ~ | ✓ | ✓ | ✓ | ✓ |
-| `protenix1` | ✓ | ✓ | ~ | ~ | ✓ | ✓ | ✓ |
-| `boltz2` | ✓ | ✓ | ✓ | ~ | ✓ | ✓ | ✓ |
-| `opendde` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `rosettafold3` | ✓ | ✓ | ~ | ✓ | ✓ | ✓ | ✓ |
-| `chai1` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `esmfold2` family (4) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ~ — ligands 0.645 Å, DNA 2.9 Å, RNA 1.7 Å |
-| `af2_ptm` / `af2_multimer` | n/a | n/a | n/a | n/a | n/a | ✓ | n/a — protein only |
-
-`alphafold3` and the AF2 pair are `n/a` by construction: the first IS the
-reference implementation, the second runs DeepMind's own network unmodified
-(its gate is a known-answer test against ColabDesign on the same weights,
-agreeing to 0.0006 Å).
-
-**What the gaps are, stated plainly rather than left as symbols:**
-
-* **`~` at L2 means fewer than three of its parts are measured.** The token
-  transformer is gated on ten models at corr 1.000000; the diffusion
-  conditioning on `protenix2`, `protenix1` and `rosettafold3`; the atom encoder
-  on those plus both OpenFold3 releases and `intellifold2`. The `✓` rows
-  (`boltz2`, `opendde`, `chai1`, `esmfold2`) were gated by whole-module
-  injection when they were ported, which is a different and coarser standard.
-* **The atom DECODER is gated on `protenix2`** (exact, 0.000002 Å/atom) and
-  covered in composition elsewhere by the exact denoise steps.
-* **`chai1`'s template embedder cannot be gated as a module** from its shipped
-  TorchScript: the submodule's parameters are reachable but it has no callable
-  `forward`. What closed the gap partway instead was a conversion audit (its
-  five-archive checkpoint had never been audited at all) plus a parameter
-  ABLATION — `ZERO=<scope>/<leaf>` in `template_parity.py`. That found a dropped
-  bias worth 35.6% of the module's output at corr 0.999648.
-
-And the table hides four modules that nothing has ever compared, because the
-levels were organised around the diffusion path:
-
-| module | models carrying it | gated on |
-|---|---|---|
-| **template embedder** | 9 | **8** — gated 2026-09-08, found three bugs (two protenix, one chai1) |
-| **MSA module** | 12 | **11** — all exact; only chai1 unreachable. boltz2's 0.974 was a real OPM bug, fixed |
-| ~~distogram head~~ | all | **8** — closed 2026-09-08 |
-| ~~input embedder~~ | all | **2** — closed 2026-09-08 |
-| ~~recycling loop~~ | all | **2** — same gate |
-
-Templates worked end to end — `boltz2` folds 5CAJ to 0.72 Å with one — but that
-was evidence from folds, and folds were not enough. The first module-level
-comparison read **0.998468** for `protenix2` and turned up **two port bugs**:
-`restype_i`/`restype_j` were concatenated in the wrong order (protenix's
-`expand_at_dim(dim=-3)` makes its first block the *j*-varying one, ours was
-*i*), and our shared template forward applied boltz2's outer residual
-(`v = v + stack(v)`) to protenix, which does not have it. Fixed, protenix2 and
-protenix1 read **1.000000**.
-
-At the fold level, a templated 5K9P went from **1.588 Å to 0.227 Å** best. That
-is why folds never caught it: a wrong-but-plausible template contribution still
-points a fold roughly the right way, and 1.588 Å looks like a working template
-until something compares the module. Untemplated folds and the other models
-sharing that code are unchanged.
-
-`rosettafold3` is gated too and had neither bug — its features are i/j-symmetric
-distance conditioning, and it overrides the shared forward rather than
-inheriting it. Which is the real lesson: protenix inherited boltz2's convention
-and was wrong, rf3 escaped only by not inheriting, so the convention is now
-named in `model_config` instead of left to inheritance. See `PARITY.md`.
-
-The distogram head **was** on that list and is now gated on six models, all
-exact. It was worth doing first despite being one projection: it is the head
-design gradients flow through, so a divergence would have been invisible to
-every structural number here. The gate checks what a correlation hides — where
-each vendor symmetrises. protenix, of3 and if2 do it after the projection
-(`W(z+zᵀ) + 2b`); `rosettafold3` does it before (`W(z+zᵀ) + b`), which is why
-its bias is halved on conversion. See `PARITY.md`.
-
-### L1 — the trunk, against each model's own native module
-
-Correlation of our single (`s`) and pair (`z`) trunk representations against the
-vendor's torch module on identical inputs (`dev/oracles/trunk_parity.py`).
-
-| model | single | pair | notes |
-|---|---|---|---|
-| `boltz2` | 1.000000 | 1.000000 | |
-| `protenix2` | 1.000000 | 1.000000 | was 0.9929/0.9376 — harness confounds, never a port defect |
-| `opendde` | 1.000000 | 1.000000 | |
-| `openfold3` | 1.000000 | 1.000000 | |
-| `protenix1` | 1.000000 | 1.000000 | 48 blocks, c_z 128 |
-| `openbind0` | 1.000000 | 1.000000 | v0.5.0 weights; found and fixed a transposed column pair bias |
-| `rosettafold3` | 0.999997 | 0.999996 | |
-| `intellifold2` | 1.000000 | 0.998994 | over 48 blocks; ONE block is 1.000000/1.000000 and every op bisects to ≥0.999997, so the residual is fp compounding |
-| `chai1` | 0.999945 | 0.999918 | at the floor — native chai's TorchScript is bf16 |
-| `esmfold2` family | — | — | whole trunk corr **0.99961** from raw features (not split s/z); the four variants share this graph |
-| `alphafold3` | n/a | n/a | this IS the reference implementation |
-
-### L3 — one full denoise step
-
-The level that subsumes the diffusion side: conditioning, atom encoder, token
-transformer, atom decoder and the EDM scaling all run, so a match here means the
-whole score model agrees for one step. It is also **the only evidence the atom
-decoder is right**, since nothing gates it directly.
-
-| model | corr | per-atom mean | native tensors, missing/unexpected |
-|---|---|---|---|
-| `protenix2` | 1.000000 | **0.0000 Å** | 0 / 0 |
-| `openfold3` | 1.000000 | **0.0001 Å** | 763, 0 / 0 |
-| `openbind0` | 1.000000 | **0.0021 Å** | 740, 24 handled / 1 |
-| `intellifold2` | 0.999950 | 0.075 Å | 706, 0 / 0 |
-| `rosettafold3` | 0.999948 | 0.401 Å | 879, 0 / 0 |
-| `protenix1` | 0.999428 | 0.207 Å | 0 / 0 |
-| `chai1` | 1.000000 | 0.012 Å | injected |
-| `boltz2` | 0.999900 | 0.203 Å | injected from a captured boltz run |
-| `opendde` | — | at parity across every sigma from 4608 down to 1 | |
-| `esmfold2` family | 0.99999765 | — | `r_update` / `x_denoised` |
-
-`openbind0`'s 24 "missing" tensors are the per-block pair LayerNorms it does not
-have: OpenFold3 v0.5.0 runs that LayerNorm once for the stack where preview-2
-runs it inside every block. The checkpoint decides which, not a remembered flag.
-
-### L4 — the confidence head
-
-**Every port has one**, and every one agrees with its vendor:
-
-| model | pae / pde / plddt / resolved |
-|---|---|
-| `esmfold2` family | **≥ 0.99999981** |
-| `openfold3`, `openbind0`, `intellifold2` | **1.000000** (if2 once native is rounded to bf16 — which is how its blob stores trunk weights) |
-| `opendde` | pae/plddt/resolved **1.000000**, pde 0.999999 — its own structural-token head |
-| `protenix2`, `protenix1` | **≥ 0.999985** |
-| `rosettafold3` | pae/pde **0.999999**, plddt/resolved **1.000000** |
-| `chai1` | 0.999905–0.999968 — bf16 floor |
-| `boltz2` | pairformer ×8: s 1.000000 / z 0.999998; z re-embedding 0.9999996 |
-
-This gate earned its keep the first time it ran: it found that protenix's PDE
-head symmetrises the pair activation *before* its LayerNorm where AlphaFold 3
-symmetrises the logits *after* the projection. LayerNorm is not linear, so those
-differ; `full_pde` read 0.870 and now reads 0.999989. Six models were affected
-and no weight changed — and no fold could have caught it, because PDE is
-reported and never fed back into the structure.
-
-Note that this confidence column and the one in the modality screens measure
-different things. This asks whether our module reproduces NATIVE's numbers; that
-asks whether the head PREDICTS ERROR at all. A head can pass either and fail the
-other, and a faithful port of a badly calibrated head passes this and fails that.
-
-### A caution about single-seed comparisons
-
-The longest-standing "open bug" in this document — protenix2 failing on a
-modified residue — was **retracted** on 2026-09-08. It rested on one seed: ours
-7.584 Å against native's 1.080 on phospho-ubiquitin. Re-run across four seeds,
-native ranges 0.87–12.70 Å on that target and one seed inverts the story
-entirely, while our own plain-target number turned out identical to our modified
-one. There was no modified-residue bug.
-
-The habit that produced it is worth naming: a fold number on a target the model
-folds *unreliably* is not a measurement, and comparing two of them is not a
-gate. What remains genuinely open there is a distributional difference — native
-reaches a good basin on that target and we do not — and it is recorded as
-unexplained rather than attributed. See `PARITY.md`.
-
-### Where the harnesses live, and how to re-run them
-
-**They are in this repository, under `dev/`, and there is one command that runs
-all of them:**
-
-```bash
-bash dev/oracles/run_all_parity.sh            # L0-L4, the module gates
-bash dev/oracles/run_all_parity.sh L5 L6      # the fold-level screens
-bash dev/oracles/run_all_parity.sh all        # everything
-```
-
-It is resumable (a gate whose log is complete is skipped; `FORCE=1` overrides),
-it runs serially because two concurrent jobs OOM a 23 GB card, and it applies
-each model's vendor overlay and `JAX_DEFAULT_MATMUL_PRECISION=highest` for you --
-getting either wrong produces a plausible degraded number rather than an error,
-which has cost whole sessions. It asks every gate about every model rather than
-carrying a table, so a gate with no adapter for a model is recorded `SKIP` and
-its summary doubles as the coverage matrix.
-
-What is NOT tracked is what the harnesses read and write: native activation
-dumps and captures (`.npz`), logs, and bytecode -- hundreds of megabytes,
-regenerated by the scripts themselves, and dependent on native checkpoints and
-vendor venvs that are not in this repo. So a fresh checkout can re-run every
-gate for which the vendor source and checkpoint are present locally, and
-`PARITY.md` remains the tracked record of what the numbers were.
-
-| gate | level | covers |
-|---|---|---|
-| **`dev/oracles/run_all_parity.sh`** | **all** | **the driver: every gate below, every model, resumable, serial** |
-| `dev/oracles/trunk_parity.py` | L1 | pairformer stack vs the vendor's module — 7 models |
-| `dev/oracles/prot_parity.py` | L1b | protenix trunk AND MSA module |
-| `dev/oracles/msa_parity.py` + `esmfold2_msa_dump.py` | L1b | MSA module vs the vendor's own — rf3, both of3, intellifold2, opendde, boltz2, all three MSA-bearing esmfold2 releases. `LAYER=1` splits one boltz2 layer; `NONUNIFORM=1` runs a non-trivial msa mask |
-| `dev/oracles/conditioning_parity.py` | L2 | diffusion pair + single conditioning — protenix2, protenix1, rf3 |
-| `dev/oracles/atom_parity.py` | L2 | atom cross-attention encoder, real batch, windowed — protenix2/1, both of3, intellifold2, rosettafold3 |
-| `dev/oracles/diffusion_parity.py`, `l2_all.sh` | L2 | token diffusion transformer — 10 models |
-| `dev/oracles/denoise_parity.py` | L3 | one denoise step, whole diffusion module — protenix2/1, both of3, intellifold2, rosettafold3 |
-| `dev/oracles/confidence_parity.py`, `l4_all.sh` | L4 | confidence head — every port |
-| `dev/oracles/fold_check.py` | L5 | one model, one target, CA-RMSD |
-| `dev/oracles/modality_check.py` | L6 | RNA / DNA / ligand / complex folds scored against a reference; `--write` validates the mmCIF the model emits |
-| `dev/oracles/grad_check.py` | — | sequence-differentiability, either engine |
-| `dev/oracles/af2_fold_check.py` | — | AF2 against ColabDesign on the same weights |
-| `dev/bench/sweep22.sh` | — | the 6MRR regression sweep (22 models when last run; 18 now) |
-
-Each needs its vendor's source on `PYTHONPATH` — the whole point is to run the
-vendor's own module beside ours — so they are only runnable on a machine that
-has those checkouts.
-
-**Re-running any parity number requires two switches**, or the result is
-meaningless. Both cost six false leads on protenix2 alone:
+L0 through L5 have all been driven to completion across every model they apply
+to. Grading each comparison on correlation **and** `max|d|/rms`:
 
 ```
-JAX_DEFAULT_MATMUL_PRECISION=highest PYTHONPATH=src:.:/path/to/protenix \
-  python dev/oracles/trunk_parity.py protenix2
+274 comparisons in 131 logs
+PARITY=237   CLOSE=8   FLOOR=17   LOOSE=10   BAD=2
 ```
 
-`JAX_DEFAULT_MATMUL_PRECISION=highest` disables tf32, which is ~5e-4 per matmul
-and compounds over 48 blocks. And parameters must be fp32: they otherwise come
-back bfloat16-rounded, and flipping `global_config.bfloat16` after the model is
-built does nothing, because the dtype was already fixed by `jax.eval_shape`.
+`bash dev/oracles/run_all_parity.sh all` re-runs everything;
+`dev/oracles/parity_audit.py <logdir>` grades it and
+`dev/oracles/gate_applies.py <gate> <model>` answers whether an empty cell is a
+hole or genuinely not applicable.
 
-Two more confounds are documented in `PARITY.md` because each impersonated a
-port bug for a while: **the blob's own storage dtype** (intellifold2 stores its
-trunk weights bf16 on disk, on purpose) and **the vendor's own alphabet**
-(rosettafold3 transposes G/C against OpenFold3's, which broke RNA while every
-protein and ligand gate passed — and later broke a harness the same way).
+**FLOOR** is not a pass. It means the cell has no resolution left: perturbing the
+gate's own input by 1e-6 moves its output further than our port differs, so the
+number cannot be read. All 17 are the trunk pairformer on synthetic input, where
+the stack is driven far outside its trained distribution — the shallower
+`L1.trunk1` is the measurement that counts. A cell only earns FLOOR by measuring
+it, so this cannot quietly excuse anything.
 
-### Modality screens
+**The 2 BAD** are `esmfold2_fast`'s PAE and PDE, and they are understood rather
+than open: native runs its confidence pairformer's triangle multiplications
+under `autocast(bfloat16)` — its tensors round-trip through bf16 at max|d| 0 —
+while we run fp32, which costs ~0.5% per sub-module with bit-identical weights
+on identical inputs.
 
-Folding 6MRR says nothing about ligands, nucleic acids or complexes. Four
-screens cover those, and **they were run on seven models, not all
-twenty-four** — the protenix variants, `openbind0` and the ESMFold2 family have
-a 6MRR number and nothing else here. That is a gap in the testing, not a
-statement about those models.
+### Folds
+
+6MRR, best of 5 samples, against each model's recorded baseline:
+
+| model | best Å | | model | best Å |
+|---|---|---|---|---|
+| `boltz2` | 0.421 | | `intellifold2` | 1.515 |
+| `alphafold3` | 0.626 | | `openfold3` | 1.544 |
+| `protenix2` | 0.697 | | `esmfold2_lm600m` | 1.522 |
+| `opendde` | 0.737 | | `openbind0` | 1.650 |
+| `rosettafold3` | 1.026 | | `protenix1` | 1.684 |
+| `esmfold2_fast` | 1.181 | | `esmfold2_lm300m` | 1.687 |
+| `esmfold2` | 1.339 | | `chai1` | 1.723 |
+
+Read these as a band, not a ranking: several models are **nondeterministic run
+to run on the same seed**. Three runs of `rosettafold3` seed 0 give 0.968, 0.949
+and 1.026, because one sample sits near a decision boundary. A single fold
+number to three decimals is not a gate.
+
+### Modality
 
 | model | protein+ligand | complex | RNA | DNA | confidence |
 |---|---|---|---|---|---|
@@ -393,52 +202,30 @@ statement about those models.
 | `chai1` | 0.335 / 0.993 | 1.57 | 1.648 | 1.89 | 78.9 / r .543 |
 | `openfold3` | 0.348 / 0.894 | 1.60 | 1.441 | 2.22 | 83.2 / r .678 |
 
-**These screens now also run IN THIS REPOSITORY** (`dev/oracles/modality_check.py`,
-added 2026-09-07), which is what closes the "seven models, not twenty-four" gap
-above for RNA and ligands. Different measurement from the table above — default
-recycles, best of 5 samples, seed 0 — so read it as its own column, not as a
-correction:
+`r` is the column that matters for confidence: a constant head reads r ≈ 0
+however plausible its mean looks. All seven predict error.
+`esmfold2_lm600m` and `esmfold2_lm300m` ship no confidence head by design.
 
-| model | 1EHZ tRNA (C1') | 1STP protein (CA) | BTN ligand (in-frame) |
-|---|---|---|---|
-| `alphafold3` | 1.412 | 0.564 | — |
-| `openfold3` | 1.334 | 0.494 | — |
-| `openbind0` | 1.496 | 0.499 | — |
-| `intellifold2` | 1.472 | 0.316 | 0.436 |
-| `protenix2` | 1.754 | 2.090 | 1.253 |
-| `protenix1` | 1.737 | 1.867 | 0.918 |
-| `boltz2` | 1.196 | 0.276 | 0.457 |
-| `opendde` | 1.327 | 0.298 | 0.876 |
-| `rosettafold3` | 1.047 | 0.322 | 0.450 |
+Every model is differentiable in the sequence (24/24, `dev/oracles/grad_check.py`),
+which is what the design path needs.
 
-RNA is single-sequence here; the ligand case takes its MSA from the same JSON
-the older screen used, and streptavidin from a single sequence lands at 3-5 Å,
-which measures the missing MSA rather than the ligand. The harness also covers
-DNA, a protein-DNA complex scored in one shared frame, and a modified residue
-(ubiquitin phospho-Ser20), and `--write` re-reads the mmCIF the model emits to
-check the ligand or the modified residue survived into it.
+### What is still open
 
-  * **protein+ligand** — 1STP chain A + biotin, 10 recycles, protein-superposed
-    so a ligand in the wrong pocket cannot hide. Two numbers: protein Å / BTN Å.
-    All seven handle it.
-  * **complex** — a 146+74 heterodimer, chain B's RMSD in chain A's frame (the
-    docking). Subunits are 0.3–1.2 Å and fnat 0.79–0.95 throughout. Do not
-    over-read the ordering: the reference used templates and the screen feeds
-    none, and seed spread is ~0.2 Å.
-  * **RNA / DNA** — 1EHZ tRNA-Phe (76 nt) and the 1LMB operator duplex (20 bp),
-    single sequence, 10 recycles. Note a duplex CANNOT detect a G↔C alphabet
-    transposition, because the swap stays Watson-Crick complementary; that is
-    checked statically instead.
-  * **confidence** — mean pLDDT / Pearson r of per-residue pLDDT against minus
-    the per-residue CA deviation. `r` is the column that matters: a constant
-    head reads r ≈ 0 however plausible its mean looks. All seven predict error.
-  * `esmfold2_lm600m` and `esmfold2_lm300m` ship no confidence head at all
-    (`NO_CONFIDENCE_HEAD`), and are structure-only by design.
+Tracked in `dev/oracles/HOLES.md` with the next measurement named for each:
 
-Every model is also differentiable in the sequence (24/24, verified with
-`dev/oracles/grad_check.py`), which is what the design path needs; the
-magnitudes vary widely between models and are recorded in
-`dev/bench/grad_sweep_2026-09-07.txt` rather than here.
+* **`boltz2`'s denoise step**, 0.207 Å/atom against a 4e-06 noise floor, so
+  real. Its gate's dump holds a single sampler step at the highest-noise end of
+  the schedule.
+* **`chai1`'s confidence**, two LOOSE rows, reachable only by injection because
+  its modules ship as TorchScript with no callable `forward`.
+* **the protenix lineage's confidence**, 6 CLOSE + 3 LOOSE, most likely native's
+  own float32 — its stack is exact and amplifies 7×, and native's fp32-vs-fp64
+  noise through the embedding is the same order as the whole gap. Consistent
+  with, not established.
+* **three things no cell covers**: `L1b.msa_nonuniform` is a silent duplicate of
+  the uniform cell for 13 of 14 models; `real_trunk_parity.py` exists and the
+  driver never runs it; `boltz2`'s template module is V2 upstream and we
+  implement V1 (inert on one chain, live on a complex).
 
 ### Getting the weights
 
