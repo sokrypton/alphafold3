@@ -733,6 +733,17 @@ TRANSPOSED_COLUMN_PAIR_BIAS = ('openfold3', 'opendde', 'boltz2') + PROTENIX_FAMI
 # (TemplateEmbedder.forward -> 0) took native to 8.40, i.e. onto our number. A
 # real template is diluted by the empty slots under this convention, which is
 # the vendor's own arithmetic and not something to correct.
+#
+# opendde carries protenix's TemplateEmbedder line for line -- `return 0` when
+# template_aatype is absent, `u / (1e-7 + num_templates)` over the padded slot
+# count -- but it is deliberately ABSENT here, because it does not run this
+# module: it takes the generic AF3 `TemplateEmbedding`, which already divides by
+# the slot count. What opendde needed was only the GAP restype in its empty
+# slots (model_features._empty_template_gap, slots='all'). Measured, with no
+# template supplied, the template term's rms is 6.66 for opendde, 24.39 for
+# openfold3, 9.53 for intellifold2 and 17.32 for protenix1 -- none of them zero,
+# so the claim in TemplateEmbedding's own comment that "the empty slots
+# contribute exactly zero" is wrong for every one of them.
 TEMPLATE_MEAN_OVER_ALL_SLOTS = PROTENIX_FAMILY
 
 

@@ -550,7 +550,15 @@ _FEATURISE = {
     # to fit it ("Can't pad to a smaller shape" for anything larger). Left unset,
     # attach_structural_batch rounds the true count up to a multiple of 32, which
     # keeps shapes stable across similar inputs without capping them.
-    'opendde': dict(opendde=True, padded_keys=True),
+    # empty_template_gap ('all'): opendde's `make_dummy_feature` fills the whole
+    # (4, N) template_aatype block with 31 -- its own comment says "# gap" --
+    # and its TemplateEmbedder divides by the padded slot count, so the template
+    # term is LIVE with no template supplied. Same convention as protenix, but
+    # every slot is a gap template rather than only the first.
+    'opendde': dict(opendde=True, padded_keys=True,
+                    empty_template_gap=not os.environ.get(
+                        'AF3_NO_DDE_TEMPLATE_GAP'),
+                    empty_template_gap_slots='all'),
     # PER FAMILY, not per model. One `protenix/model/modules/primitives.py`
     # serves every protenix release, so the padded key window is a property of
     # the implementation and not of a checkpoint. It was set for protenix2

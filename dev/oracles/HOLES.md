@@ -884,6 +884,44 @@ downstream immediately instead of being waved at as "its head amplifies more".
 
 The residual ~6e-03 IS the bf16 -- that part of the earlier entry stands.
 
+## The EMPTY-TEMPLATE sweep: opendde needed the gap too, intellifold2 does not (2026-09-11)
+
+The other half of the protenix pair, swept the same way. Two questions per
+vendor: what an empty template SLOT contains, and what the embedder DIVIDES by.
+
+**First, a claim in our own code that is wrong for every model.** The generic
+`TemplateEmbedding` comment said "the empty slots contribute exactly zero". They
+do not: an empty slot still carries the Z-DEPENDENT half of the embedding
+(`z_proj(z_norm(z))`, or AF3's equivalent), so the template term is LIVE with no
+template at all. Measured as the rms of `z_after_template - z_init_generic` with
+no template supplied:
+
+    openfold3    24.39        intellifold2   9.53
+    protenix1    17.32        opendde        6.66
+
+That is what made protenix1's missing term worth 9 A, and it means a "no
+template" batch is not a no-op path for anybody.
+
+| model | empty slot | divisor | verdict |
+|---|---|---|---|
+| `protenix1/2` | slot 0 GAP, slots 1-3 zero | padded slot count | FIXED (worth 9 A) |
+| `opendde` | **ALL FOUR slots GAP** -- `make_dummy_feature` does `torch.full(..., 31)` with its own `# gap` comment | padded slot count, and it takes the GENERIC module which already divides that way | FIXED: the gap restype only (`empty_template_gap_slots='all'`) |
+| `intellifold2` | **ZERO, deliberately**: `[STD_RESIDUES_WITH_GAP["-"]] * num_res ... * 0` with the comment "use 0 to indicate empty template, instead of 'GAP'" | slot count | matches us, nothing to do |
+| `boltz2` | ONE slot, `template_mask` all zero | mean over PRESENT templates, so zero | matches us |
+| `openfold3`, `openbind0` | zero | slot count | matches us, and proven: our of3 trunk agrees with native at 0.99993 on a real input, which it could not if this term differed |
+| `rosettafold3` | n/a -- its embedder has no template gating at all and always contributes | one pass | already gated at corr 1.000000 |
+| `chai1` | its own path | `clamp_min(n_templates, 1)` | already recorded |
+
+opendde's is from its CODE plus the divisor already matching, not from an
+activation comparison -- there is no native opendde real-input trunk dump yet,
+and that is the check that would close it. Its folds moved inside their bands
+(6MRR 0.734 -> 0.808, plain 5K9P 1.591 -> 1.641), which after the bistability
+lesson is not evidence either way.
+
+`TEMPLATE_MEAN_OVER_ALL_SLOTS` stays protenix-only on purpose: opendde does not
+run the fused module, so adding it there would have been an inert config entry
+implying a branch that never fires. I added it and then took it out.
+
 ## The self-MSA DEPTH sweep: 6 of 10 vendors emit ONE row, and we fed two (2026-09-11)
 
 protenix's depth-1 MSA turned out to be a family question, so it was swept

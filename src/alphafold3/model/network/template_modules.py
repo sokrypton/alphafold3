@@ -211,10 +211,19 @@ class TemplateEmbedding(hk.Module):
     # over 4 slots and divided by 4. chai divides by clamp_min(n_templates, 1)
     # -- the count of templates it actually has; the clamp only makes sense for
     # a real count, since a padded one is never 0. With the per-template mask
-    # applied above the empty slots contribute exactly zero, so the two differ
-    # by a pure scale: 1 real template of 4 slots reaches the trunk at a QUARTER
+    # applied above the empty slots contribute little, so the two differ close
+    # to a pure scale: 1 real template of 4 slots reaches the trunk at a QUARTER
     # of chai's amplitude. Invisible on the 4-real-template oracle capture,
     # which is why the trunk gate could not see it.
+    #
+    # "EXACTLY zero" was wrong, and it mattered. An empty slot still carries the
+    # Z-DEPENDENT half of the embedding, so this term is LIVE with no template
+    # at all -- measured rms 24.39 for openfold3, 9.53 for intellifold2, 6.66
+    # for opendde, 17.32 for protenix1 (whose 9 A ubiquitin bug was exactly this
+    # term going missing, in the fused module). So a "no template" batch is not
+    # a no-op path, and what those empty slots CONTAIN is a real convention:
+    # protenix fills the first with the gap restype, opendde fills all four
+    # (model_features._empty_template_gap).
     denom = 1e-7 + num_templates
     if self.global_config.model == 'chai1':
       present = (templates.atom_mask.reshape(num_templates, -1).sum(-1) > 0)
