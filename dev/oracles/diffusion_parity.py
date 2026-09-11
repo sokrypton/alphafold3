@@ -169,6 +169,24 @@ def native_protenix(model, n):
   return a, s, z, np.asarray(ref[0]), n_blocks
 
 
+
+def _of3_kwargs(cls, **kw):
+  """Drop kwargs a RELEASE does not take, and say so.
+
+  The two OF3 releases have different constructors -- main's
+  DiffusionTransformer / AtomAttentionEncoder take `use_ada_layer_norm`, v0.5.0's
+  do not -- and openbind0 must be built against v0.5.0 (its end-node pair bias
+  convention differs; see model_config.TRANSPOSED_COLUMN_PAIR_BIAS). Filtering
+  by the real signature keeps ONE adapter for both instead of a name test.
+  """
+  import inspect
+
+  ok = inspect.signature(cls.__init__).parameters
+  dropped = sorted(k for k in kw if k not in ok)
+  if dropped:
+    print('  (release does not take %s -- dropped)' % ', '.join(dropped))
+  return {k: v for k, v in kw.items() if k in ok}
+
 def native_of3(model, n):
   """-> (a, s, z, ref, n_blocks) from OpenFold3's own DiffusionTransformer.
 
@@ -223,17 +241,23 @@ def native_of3(model, n):
   s = (rng.normal(size=(n, c_s)) * 0.5).astype(np.float32)
   z = (rng.normal(size=(n, n, c_z)) * 0.5).astype(np.float32)
 
-  net = DiffusionTransformer(c_a=c_a, c_s=c_s, c_z=c_z, c_hidden=c_hidden,
-                             no_heads=heads, no_blocks=n_blocks,
-                             n_transition=n_transition,
-                             use_ada_layer_norm=True, n_query=None,
-                             n_key=None, inf=1e9, blocks_per_ckpt=None)
+  net = DiffusionTransformer(**_of3_kwargs(
+      DiffusionTransformer, c_a=c_a, c_s=c_s, c_z=c_z, c_hidden=c_hidden,
+      no_heads=heads, no_blocks=n_blocks, n_transition=n_transition,
+      use_ada_layer_norm=True, n_query=None, n_key=None, inf=1e9,
+      blocks_per_ckpt=None))
   missing, unexpected = net.load_state_dict(sub, strict=False)
   print('  native: %d tensors, %d missing, %d unexpected %s  (%s pair LN)'
         % (len(sub), len(missing), len(unexpected), list(missing)[:2],
            'single' if single_ln else 'per-block'))
   z_in = torch.tensor(z)[None]
-  if single_ln:
+  # v0.5.0's own DiffusionTransformer CARRIES the shared LayerNorm and applies
+  # it in forward, so against that tree nothing is missing and no emulation is
+  # wanted. The surgery below is only for running a v0.5.0 checkpoint on MAIN's
+  # code, which is what this adapter used to do -- and which is exactly the
+  # mistake that cost openbind0 10.4 A on ubiquitin, so it is now the fallback
+  # rather than the path.
+  if single_ln and missing:
     expect = {'blocks.%d.attention_pair_bias.layer_norm_z.weight' % i
               for i in range(n_blocks)}
     assert set(missing) == expect, 'unexpected missing: %s' % sorted(

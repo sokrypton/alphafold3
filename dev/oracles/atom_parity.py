@@ -253,6 +253,24 @@ def _config_dict(**kw):
   return ml_collections.ConfigDict(kw)
 
 
+
+def _of3_kwargs(cls, **kw):
+  """Drop kwargs a RELEASE does not take, and say so.
+
+  The two OF3 releases have different constructors -- main's
+  DiffusionTransformer / AtomAttentionEncoder take `use_ada_layer_norm`, v0.5.0's
+  do not -- and openbind0 must be built against v0.5.0 (its end-node pair bias
+  convention differs; see model_config.TRANSPOSED_COLUMN_PAIR_BIAS). Filtering
+  by the real signature keeps ONE adapter for both instead of a name test.
+  """
+  import inspect
+
+  ok = inspect.signature(cls.__init__).parameters
+  dropped = sorted(k for k in kw if k not in ok)
+  if dropped:
+    print('  (release does not take %s -- dropped)' % ', '.join(dropped))
+  return {k: v for k, v in kw.items() if k in ok}
+
 def native_of3(model, fb, feats, pos_noisy, s, z, n_tok):
   """-> (a, q_l, c_l, p_lm, pad_mask) from OpenFold3's own AtomAttentionEncoder.
 
@@ -318,14 +336,18 @@ def native_of3(model, fb, feats, pos_noisy, s, z, n_tok):
       'num_atoms_per_token': t(mask.sum(1), torch.long)[None],
       'atom_to_token_index': t(feats['atom_to_token_idx'], torch.long)[None],
   }
-  net = AtomAttentionEncoder(
+  # `use_ada_layer_norm` exists on main and not on v0.5.0, and openbind0 has to
+  # be built against v0.5.0 -- so the kwargs are filtered by the real signature
+  # (see _of3_kwargs) rather than by a model-name test.
+  net = AtomAttentionEncoder(**_of3_kwargs(
+      AtomAttentionEncoder,
       # of3 reads c_atom_ref with attribute access, so a plain dict fails --
       # it wants an ml_collections ConfigDict.
       c_atom_ref=_config_dict(element=n_elem, name_chars=256), c_atom=c_atom,
       c_atom_pair=c_atom_pair, c_token=c_token, add_noisy_pos=True,
       c_hidden=32, no_heads=heads, no_blocks=n_blocks, n_transition=2,
       n_query=32, n_key=128, use_ada_layer_norm=True, c_s=c_s, c_z=c_z,
-      blocks_per_ckpt=None, inf=1e9)
+      blocks_per_ckpt=None, inf=1e9))
   missing, unexpected = net.load_state_dict(sub, strict=False)
   print('  native: %d tensors, %d missing, %d unexpected %s'
         % (len(sub), len(missing), len(unexpected), list(missing)[:2]))

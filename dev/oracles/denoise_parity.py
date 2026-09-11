@@ -499,7 +499,11 @@ def native_of3(model, fb, feats, pos_noisy, noise, s_inputs_449, s, z):
 
   net = DiffusionModule(cfg)
   missing, unexpected = net.load_state_dict(sub, strict=False)
-  if single_ln:
+  # Against v0.5.0's OWN tree the shared LayerNorm is part of the module, so
+  # nothing is missing and the surgery below must not run. It exists only for
+  # the case of a v0.5.0 checkpoint on main's code -- which is how openbind0's
+  # transposed end-node pair bias went uncaught for four days.
+  if single_ln and missing:
     expect = {'diffusion_transformer.blocks.%d.attention_pair_bias.'
               'layer_norm_z.weight' % i for i in range(n_dt)}
     assert set(missing) == expect, 'unexpected missing: %s' % sorted(
