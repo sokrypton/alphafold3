@@ -709,9 +709,13 @@ DIFFUSION_PROJECTED_RELPOS = (('boltz2', 'rosettafold3') + ESMFOLD2_FAMILY
 
 
 # Models that compute the column-attention pair bias from the TRANSPOSED pair
-# representation, as OpenFold3 preview-2 does. openbind is deliberately absent;
-# see the note at modules.py, where the measurement that settled openbind0 lives.
-TRANSPOSED_COLUMN_PAIR_BIAS = ('openfold3', 'openbind0', 'opendde', 'boltz2') + PROTENIX_FAMILY
+# representation, as OpenFold3 preview-2 does.
+#
+# openbind0 is ABSENT, and it is the one member of the OF3 lineage that is: its
+# release (v0.5.0) computes this bias the OTHER way round. Both facts are
+# measured, against each release's own source tree -- see the note at modules.py,
+# where the derivation and the oracle bug that hid it for four days live.
+TRANSPOSED_COLUMN_PAIR_BIAS = ('openfold3', 'opendde', 'boltz2') + PROTENIX_FAMILY
 
 
 # Models whose TEMPLATE stack adds an OUTER residual around the whole pairformer

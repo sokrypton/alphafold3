@@ -34,6 +34,14 @@ PY_ESM=${PY_ESM:-~/venv_esm/bin/python}
 #     ~/openfold-3 covers openfold3 + openbind0.
 V_protenix=/home/ubuntu/protenix
 V_of3=/home/ubuntu/openfold-3
+# openbind0 is OF3 v0.5.0 and its RELEASE matters, not just its repository:
+# v0.5.0's end-node triangle attention transposes the pair bias and main's does
+# not, while main loads openbind0's pairformer tensors without complaint (the
+# releases differ by name only in the diffusion LayerNorms). Pointing this at
+# main certified the wrong convention for four days and cost 10.4 A on
+# ubiquitin. The tree is a worktree of the v0.5.0 tag:
+#   git -C ~/openfold-3 worktree add ~/openfold-3-v050 v0.5.0
+V_of3_ob=/home/ubuntu/openfold-3-v050
 V_if2=/home/ubuntu/IntelliFold
 V_dde=/home/ubuntu/OpenDDE
 V_rf3=/home/ubuntu/rf3_extra:/home/ubuntu/foundry_rf3/src:/home/ubuntu/foundry_rf3/models/rf3/src
@@ -43,7 +51,8 @@ V_boltz2=/home/ubuntu/BoltzDesign1/boltz2/src
 vendor () {
   case "$1" in
     protenix1|protenix2)                echo "$V_protenix" ;;
-    openfold3|openbind0)                echo "$V_of3" ;;
+    openfold3)                          echo "$V_of3" ;;
+    openbind0)                          echo "$V_of3_ob" ;;
     intellifold2)                       echo "$V_if2" ;;
     opendde)                            echo "$V_dde" ;;
     rosettafold3)                       echo "$V_rf3" ;;

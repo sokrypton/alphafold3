@@ -12,7 +12,7 @@ Vendor overlay per model (they can be concatenated):
 
   protenix family   /home/ubuntu/protenix
   openfold3         /home/ubuntu/openfold-3
-  openbind0         /home/ubuntu/openfold-3
+  openbind0         /home/ubuntu/openfold-3-v050   (the v0.5.0 tag)
   intellifold2      /home/ubuntu/IntelliFold
   rosettafold3      /home/ubuntu/rf3_extra:/home/ubuntu/foundry_rf3/src:\
                     /home/ubuntu/foundry_rf3/models/rf3/src

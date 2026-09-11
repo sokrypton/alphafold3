@@ -1,0 +1,13 @@
+{
+ "queries": {
+  "plain_5k9p": {
+   "chains": [
+    {
+     "molecule_type": "protein",
+     "chain_ids": ["A"],
+     "sequence": "MQIFVKTLTGKTITLEVEPSDTIENVKAKIQDKEGIPPDQQRLIFAGKQLEDGRTLSDYNIQKESTLHLVLRLRGG"
+    }
+   ]
+  }
+ }
+}

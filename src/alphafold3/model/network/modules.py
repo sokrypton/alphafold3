@@ -308,35 +308,57 @@ class GridSelfAttention(hk.Module):
     # TriangleAttention (end-node) computes to_b from the NON-transposed pair and does
     # NOT transpose the bias (it transposes only the pair before attention), so it is
     # excluded from the list below.
-    # openbind0 (OpenFold3 >= 0.5.0) IS in the list, and this was the one
-    # openbind convention taken on reading rather than measurement until
-    # 2026-09-07. It is now settled three ways, and the answer was the opposite
-    # of the documented default:
     #
-    #   1. UPSTREAM SOURCE. v0.5.0's TriangularAttention gained a
-    #      `transpose_bias` argument (triangular_attention.py:109) which selects
-    #      permute_final_dims(linear_z(x), (2, 1, 0)) over (2, 0, 1) at :166 --
-    #      and base_blocks.py:397 passes it True for the end node. v0.5.0
-    #      transposes.
-    #   2. ACTIVATION COMPARISON. dev/oracles/trunk_parity.py openbind0 against
-    #      native OpenFold3: without the transposition s 0.999113 / z 0.471977,
-    #      with it s 1.000000 / z 1.000000. The whole divergence was this one
-    #      axis swap; the rest of the trunk was already exact. Note the SHAPE of
-    #      that failure -- single nearly intact, pair destroyed -- which is what
-    #      a transposed pair bias looks like.
-    #   3. Its sibling release, openfold3, was already in the list.
+    # openbind0 (OpenFold3 v0.5.0) IS EXCLUDED TOO, and that was settled twice --
+    # wrongly on 2026-09-07, then correctly on 2026-09-11 when a native
+    # openbind0 FOLD became runnable. The whole episode is worth keeping, because
+    # the wrong answer came with three pieces of supporting evidence.
     #
-    # Why it survived: NEITHER SETTING CHANGES ANY WEIGHT (linear_z is still per
-    # block and identically shaped), so no shape gate and no coverage audit can
-    # see it. And folding cannot discriminate it -- measured at the time:
+    # WHAT THE SOURCE ACTUALLY SAYS. Both releases hand their end-node attention
+    # an ALREADY-TRANSPOSED pair (`z.transpose(-2, -3)` around the call in
+    # base_blocks.py), and the bias is a permutation of `linear_z` applied to
+    # that transposed tensor:
+    #
+    #   main / preview-2   permute_final_dims(lz(zT), (2, 0, 1)) -> b[h,i,j] = lz(z)[j,i,h]
+    #   v0.5.0             permute_final_dims(lz(zT), (2, 1, 0)) -> b[h,i,j] = lz(z)[i,j,h]
+    #
+    # We compute the bias from the NON-transposed `act`, i.e. lz(z)[i,j,h], and
+    # then optionally swap. So preview-2 needs the swap and v0.5.0 needs NO swap:
+    # the two releases are opposite, and it is v0.5.0's EXTRA transposition in
+    # the permute tuple that cancels our own.
+    #
+    # WHY THE FIRST ANSWER WAS WRONG. It read the permute tuples -- (2, 1, 0)
+    # "transposes", so openbind0 was put in the list -- without carrying through
+    # that the input is already transposed. And it was CONFIRMED by
+    # `trunk_parity.py`, which reported z 0.471977 without the swap and 1.000000
+    # with it. That measurement was real and it was against the wrong code:
+    # `~/openfold-3` is checked out at main, whose PairFormerStack loads
+    # openbind0's pairformer tensors happily (the two releases differ by name
+    # only in the DIFFUSION LayerNorms), so the oracle ran main's convention
+    # over v0.5.0's weights and certified main's answer. A native reference has
+    # to be the right RELEASE, not just the right repository -- the gates now
+    # point openbind0 at `~/openfold-3-v050` (a worktree of the v0.5.0 tag,
+    # which IS the openbind release).
+    #
+    # WHAT IT COST, and why nothing cheaper would have found it: 10.4 A on plain
+    # ubiquitin where native openbind0 gets 2.4 and our openfold3 gets 1.4.
+    # NEITHER SETTING CHANGES ANY WEIGHT (linear_z is still per block and
+    # identically shaped), so no shape gate and no coverage audit can see it;
+    # the trunk gate on random inputs grades FLOOR; and fold quality on the
+    # panel this port was accepted on could not discriminate it either:
     #
     #   6MRR, single sequence     1.702 A (absent)  vs 1.712 A (present)
     #   1STP + MSA, seed 1        0.548 A           vs 0.763 A
     #   1STP + MSA, seed 7        0.532 A           vs 0.460 A
     #
-    # The two seeds disagreed about which was better, so one seed would have
-    # "confirmed" either answer. The correct setting is very slightly WORSE on
-    # 6MRR best-of-5, which is the point: fold quality was never the evidence.
+    # Two seeds disagreed about which was better, so one seed would have
+    # "confirmed" either answer. What DID find it: one block of the trunk
+    # pairformer, sub-module by sub-module, on native's own real input, with
+    # native's tf32-vs-fp32 spread measured first as the floor (max|d| 0.09).
+    # Four of the five pair sub-modules were exact to 2e-5 for both releases and
+    # `pair_attention2` read corr 0.93 for openbind0 -- and, with the setting
+    # flipped, corr 0.93 for openfold3. Exactly complementary, which is what a
+    # convention that differs between two releases looks like.
     if (self.transpose
         and self.global_config.model in model_config.TRANSPOSED_COLUMN_PAIR_BIAS):
       nonbatched_bias = jnp.swapaxes(nonbatched_bias, -1, -2)

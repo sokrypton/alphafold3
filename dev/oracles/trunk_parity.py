@@ -18,7 +18,9 @@ read) and asserts the second, so a caller who forgets the env var is told.
 
 NATIVE ADAPTERS. One vendor implementation usually serves a whole family, which
 is the leverage here: `~/protenix` covers all six protenix models and
-`~/openfold-3` covers openfold3 + openbind0. Dims come from the CHECKPOINT, not
+`~/openfold-3` covers openfold3; openbind0 needs `~/openfold-3-v050` (the
+v0.5.0 tag, which is the openbind release) -- main will LOAD its pairformer and
+then run preview-2's end-node bias convention over it. Dims come from the CHECKPOINT, not
 from constants -- the family shares an implementation but not its widths
 (protenix2 is c_z 256, protenix1 c_z 128), and
 hardcoding one model's shape is what left five with no gate.
@@ -383,8 +385,12 @@ _OF3_CKPT = {'openfold3': 'of3-p2-155k.pt', 'openbind0': 'of3-ob-174k.pt'}
 def native_of3(model, n, mask, blocks=None):
   """-> (s, z, s_ref, z_ref, n_blocks). Covers openfold3 and openbind0.
 
-  Both releases run the same `~/openfold-3` implementation; openbind0 is v0.5.0
-  weights over it. Block count and c_z come from the checkpoint, and every other
+  The two releases need DIFFERENT trees. main's PairFormerStack loads
+  openbind0's pairformer tensors without complaint -- the releases differ by
+  name only in the diffusion LayerNorms -- but its end-node triangle attention
+  transposes the pair bias where v0.5.0 does not, so running openbind0 here
+  against main certifies the wrong convention (it did, for four days). The
+  driver supplies the tree; this asserts it got the right one. Block count and c_z come from the checkpoint, and every other
   kwarg is asserted by load_state_dict reporting zero missing -- so a release
   that widened something fails loudly here instead of comparing mismatched
   tensors.
@@ -392,6 +398,18 @@ def native_of3(model, n, mask, blocks=None):
   import torch
 
   from openfold3.core.model.latent.pairformer import PairFormerStack
+
+  # Which release is on PYTHONPATH, checked rather than assumed: v0.5.0's
+  # TriangleAttention takes `transpose_bias`, main's does not.
+  import inspect
+
+  from openfold3.core.model.layers.triangular_attention import TriangleAttention
+  has_tb = 'transpose_bias' in inspect.signature(TriangleAttention.forward).parameters
+  want_tb = model == 'openbind0'
+  assert has_tb == want_tb, (
+      'wrong openfold-3 release for %s: TriangleAttention %s transpose_bias. '
+      'openbind0 needs ~/openfold-3-v050, openfold3 needs ~/openfold-3'
+      % (model, 'has' if has_tb else 'lacks'))
 
   ckpt = os.path.expanduser('~/' + _OF3_CKPT[model])
   sd = torch.load(ckpt, map_location='cpu', weights_only=False)
