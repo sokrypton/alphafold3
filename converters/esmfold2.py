@@ -1441,15 +1441,28 @@ def map_esmfold2_to_af3_graph(sd, dims=None):
 
   RE = CH + '/~_boltz2_reembed'
   put(RE, {
-      's_inputs_norm/scale': _remap_vec(_arr(sd['%s.s_inputs_norm.weight' % ch])),
-      's_inputs_norm/offset': _remap_vec(_arr(sd['%s.s_inputs_norm.bias' % ch])),
+      # 451-WIDE, not 447. `s_inputs_norm` is a LayerNorm, so dropping the four
+      # columns AF3's 31-class blocks lack is NOT exact -- it subtracts a
+      # different mean and divides by a different width, rescaling every term
+      # downstream of it. Exactly the trap [[dropped-vocab-columns]] describes,
+      # and the diffusion's `single_cond_initial_norm` already solved it this
+      # way (`permute_s_inputs` / `_permute_vec`: AF3's block ORDER, ESM's block
+      # WIDTHS, which is what the graph's `_widen` produces).
+      #
+      # Measured 2026-09-11, term by term against native's captured terms:
+      # z_norm was exact at 2.00e-06 while all THREE s_inputs-derived terms were
+      # low by the same ~0.5% -- s_to_z 2.73e-02 (rms ratio 0.9952),
+      # s_to_z_transpose 2.77e-02 (0.9950), s_to_z_prod_out 8.06e-02 (0.9912).
+      # One shared input, one shared error.
+      's_inputs_norm/scale': _permute_vec(_arr(sd['%s.s_inputs_norm.weight' % ch])),
+      's_inputs_norm/offset': _permute_vec(_arr(sd['%s.s_inputs_norm.bias' % ch])),
       's_norm/scale': _arr(sd['%s.s_norm.weight' % ch]),
       's_norm/offset': _arr(sd['%s.s_norm.bias' % ch]),
-      's_input_to_s/weights': remap_s_inputs(t(sd['%s.s_input_to_s.weight' % ch])),
+      's_input_to_s/weights': permute_s_inputs(t(sd['%s.s_input_to_s.weight' % ch])),
       'z_norm/scale': _arr(sd['%s.z_norm.weight' % ch]),
       'z_norm/offset': _arr(sd['%s.z_norm.bias' % ch]),
-      's_to_z_prod_in1/weights': remap_s_inputs(t(sd['%s.s_to_z_prod_in1.weight' % ch])),
-      's_to_z_prod_in2/weights': remap_s_inputs(t(sd['%s.s_to_z_prod_in2.weight' % ch])),
+      's_to_z_prod_in1/weights': permute_s_inputs(t(sd['%s.s_to_z_prod_in1.weight' % ch])),
+      's_to_z_prod_in2/weights': permute_s_inputs(t(sd['%s.s_to_z_prod_in2.weight' % ch])),
       's_to_z_prod_out/weights': t(sd['%s.s_to_z_prod_out.weight' % ch]),
       # ORIENTATION, and it was SWAPPED here until 2026-09-11. Native adds
       # `s_to_z(s).unsqueeze(2)` -- shape (B, N, 1, c), so indexed by i, the ROW
@@ -1463,9 +1476,9 @@ def map_esmfold2_to_af3_graph(sd, dims=None):
       # EXACTLY ANTISYMMETRIC, which is how this was found: our z_base against
       # native's tapped z_base read corr 0.876 with ||d - d.T|| = 2||d|| to the
       # digit. Nothing else in the re-embedding can produce that shape.
-      'right_target_feat_project/weights': remap_s_inputs(t(sd['%s.s_to_z.weight' % ch])),
+      'right_target_feat_project/weights': permute_s_inputs(t(sd['%s.s_to_z.weight' % ch])),
       'left_target_feat_project/weights':
-          remap_s_inputs(t(sd['%s.s_to_z_transpose.weight' % ch])),
+          permute_s_inputs(t(sd['%s.s_to_z_transpose.weight' % ch])),
       'rel_pos_project/weights': t(sd['rel_pos.embed.weight']),
       'token_bonds_project/weights': t(sd['token_bonds.weight'])[:1],
       # ESMFold2's distance-bin EMBEDDING is a Linear on the one-hot, so it maps

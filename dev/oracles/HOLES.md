@@ -689,3 +689,38 @@ z_norm / s_to_z / s_to_z_transpose / s_to_z_prod / distogram can be hooked
 individually and subtracted. Do that instead of reading the source again: every
 finding today that survived came from a subtraction, and both that did not came
 from a resemblance.
+
+### esmfold2's confidence s_inputs LayerNorm: the THIRD dropped-vocab site
+
+Found by the term-by-term subtraction, which named it in one measurement after
+two failed resemblance arguments. Against native's captured terms:
+
+    z_norm                  2.00e-06   rms ours/nat 1.0000   <- exact
+    s_to_z (row)            2.73e-02                0.9952
+    s_to_z_transpose (col)  2.77e-02                0.9950
+    s_to_z_prod_out         8.06e-02                0.9912
+
+Three terms low by the SAME ~0.5%, one exact. They share exactly one input --
+`s_inputs_norm` -- and that is a LayerNorm taken over 447 channels where native
+takes it over 451. Dropping the four columns AF3's 31-class blocks lack is exact
+for a bias-free Linear and NOT for a LayerNorm, which is
+[[dropped-vocab-columns]] for the third time (openfold3 from the start,
+protenix/rf3 2026-09-07, opendde and now this one 2026-09-10/11).
+
+Fixed the way the DIFFUSION already fixed its own `single_cond_initial_norm`:
+the graph widens 447 -> 451 with ESMFold2's permutation (its gap sits at class
+1, so this is not a pad-with-zeros) and the converter emits the 451-wide
+weights via the existing `permute_s_inputs` / `_permute_vec`. boltz2 shares the
+method and must not widen -- gated on PAIR_ONLY_TRUNK.
+
+    all four terms      -> 7.6e-07 .. 2.7e-06, rms ratio 1.0000  (exact)
+    z_base   esmfold2      1.69e-02 -> 7.60e-03   rms ratio 0.9993 -> 1.0000
+             esmfold2_fast 2.67e-02 -> 1.10e-02
+
+and what is LEFT of z_base is native's bf16: the residual max|d| is 0.02061,
+which is the rel_pos residual's max|d| to the digit.
+
+**THE OUTPUT GAP IS DOWNSTREAM.** full_pae barely moved (2.59e-02 -> 2.62e-02),
+so with the re-embedding now exact the remaining ~2.6e-02 is in the folding
+trunk stack, the row-attention pooling, or the four heads. Those are all
+hookable in the same bit-exact replay, so the next subtraction is mechanical.

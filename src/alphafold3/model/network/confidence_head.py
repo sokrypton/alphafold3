@@ -22,6 +22,7 @@
 from alphafold3.common import base_config
 from alphafold3.model import model_config
 from alphafold3.model.network import evoformer
+from alphafold3.constants import residue_names
 from alphafold3.model.network import featurization
 from alphafold3.model.atom_layout import atom_layout
 from alphafold3.constants import atom_types
@@ -180,6 +181,34 @@ class ConfidenceHead(hk.Module):
     dtype = pair_act.dtype
     n = pair_act.shape[0]
 
+    # WIDEN 447 -> 451 FIRST for ESMFold2, because `s_inputs_norm` is a
+    # LayerNorm: it subtracts the mean over the width and divides by it, so
+    # normalising 447 channels where native normalises 451 rescales every term
+    # that reads s_inputs. Exactly the trap diffusion_head.py already handles
+    # for `single_cond_initial_norm`, and the same permutation -- ESMFold2 puts
+    # the gap at class 1, below the residues, so this is NOT a pad-with-zeros.
+    #
+    # Measured term by term against native's captured terms (2026-09-11):
+    # z_norm exact at 2.00e-06 while all three s_inputs-derived terms were low
+    # by the same ~0.5% -- one shared input, one shared error.
+    #
+    # boltz2 shares this method and must NOT widen: its s_inputs is AF3's own
+    # 447 and its weights are converted at that width.
+    if self.global_config.model in model_config.PAIR_ONLY_TRUNK:
+      n_af3 = residue_names.POLYMER_TYPES_NUM_WITH_UNKNOWN_AND_GAP
+      zero = jnp.zeros_like(target_feat[..., :1])
+
+      def _widen(block):
+        out = jnp.concatenate(
+            [zero, block[..., 21:22], block[..., :21], block[..., 22:n_af3],
+             zero], axis=-1)
+        assert out.shape[-1] == n_af3 + 2, (out.shape[-1], n_af3 + 2)
+        return out
+
+      target_feat = jnp.concatenate(
+          [_widen(target_feat[..., :n_af3]),
+           _widen(target_feat[..., n_af3:2 * n_af3]),
+           target_feat[..., 2 * n_af3:]], axis=-1)
     s_inputs = hm.LayerNorm(name='s_inputs_norm')(target_feat)
     single_act = hm.LayerNorm(name='s_norm')(single_act)
     single_act = single_act + hm.Linear(
