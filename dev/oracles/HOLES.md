@@ -884,6 +884,54 @@ downstream immediately instead of being waved at as "its head amplifies more".
 
 The residual ~6e-03 IS the bf16 -- that part of the earlier entry stands.
 
+## The self-MSA DEPTH sweep: 6 of 10 vendors emit ONE row, and we fed two (2026-09-11)
+
+protenix's depth-1 MSA turned out to be a family question, so it was swept
+across every vendor rather than guessed. AF3 concatenates a paired and an
+unpaired MSA, each beginning with the query, so a chain with NO alignments
+arrives with the query TWICE. The outer product mean over duplicates is
+unchanged; the pair-weighted averaging and the row transition are
+depth-sensitive.
+
+Read off each vendor's own code or its own batch -- not inferred:
+
+| model | native depth | where it is decided |
+|---|---|---|
+| `protenix1`, `protenix2` | **1** | dump carries `msa` (1, 76) |
+| `esmfold2` (all) | **1** | dump carries `feat.msa` (1, 1, 68) |
+| `boltz2` | **1** | `dummy_msa` holds ONE sequence; the pairing takes the first row per chain and finds nothing to add. Its data module's batch: `msa` (1, 1, 68) |
+| `intellifold2` | **1** | forks boltz's featuriser, `dummy_msa` and pairing loop included |
+| `rosettafold3` | **1** | atomworks early-returns `full_encoded_msa = expand_dims(encoded["seq"], 0)` when no polymer MSA is present |
+| `openfold3`, `openbind0` | 2 | native dump carries `msa` (1, 2, 76, 32) -- matches us |
+| `opendde` | 2 | builds a paired AND an unpaired `RawMsa`, each falling back to `[query]` ("Make sure the MSA always has at least the query") |
+| `chai1` | n/a | settled earlier: a depth-1 MSA never reaches its trunk ([[chai-msa-of-one]]) |
+| `alphafold3` | 2 | it IS the AF3 convention |
+
+So `dedupe_self_msa` now covers protenix1/2, boltz2, intellifold2 and
+rosettafold3 as well as esmfold2, each behind its own env override for A/B.
+
+**The one ACTIVATION check available says the fix is right.** boltz2's native
+trunk dump (`~/boltz2_6mrr/trunk_dump.npz`) lets our own trunk be compared on
+our own features:
+
+    pairformer input   corr 0.99913 (dedupe) vs 0.99741 (duplicate row)
+    rms ours/native    0.99867     vs 1.01137   -- the duplicate inflates z ~1.1%
+    trunk output       0.99928     vs 0.99894
+
+Folds move little, which is the expected shape for a 1% pair difference and is
+NOT the evidence: boltz2 6MRR 0.431 -> 0.477, plain 5K9P 1.714 -> 1.690, 1STP
+0.458, RNA 1.197 -> 1.199, DNA 1.534 -> 1.520; intellifold2 6MRR 1.517 ->
+1.521, plain 5K9P 1.669 -> 1.661; rf3 6MRR 0.953 -> 0.942, plain 5K9P 1.573 ->
+1.574, RNA 1.044. All inside their own per-process bands.
+
+STILL UNCHECKED, and the reason this entry names them: what an EMPTY TEMPLATE
+slot contains and what each embedder divides by. Measured for protenix (gap
+restype, divides by the padded slot count -- the 9 A bug above), for of3 (our
+trunk matches native at 0.99993 with our current behaviour, so whatever of3
+does, we reproduce), and for boltz2 (ONE slot, `template_mask` all zero, so its
+present-weighted mean contributes exactly zero -- ours too). `intellifold2`,
+`opendde` and `rosettafold3` have NOT been checked.
+
 ## CORRECTION 2026-09-11: plain 5K9P is BISTABLE, and two of my attributions were draws
 
 The fold RMSD on this target is a PER-PROCESS DRAW from two basins, for both
@@ -1058,8 +1106,12 @@ L6 before -> after (2026-09-10 driver row -> re-measured):
 | protein_6mrr | 0.691 | 0.983 | |
 | **plain_5k9p** | 7.476 | **12.684** | **6.999** |
 
-**plain_5k9p is CLOSED, and it is not a port bug: the target is
-PRECISION-DECIDED for protenix2.**
+**plain_5k9p is CLOSED, and it is not a port bug: the target is BISTABLE for
+protenix2 -- on both sides.** (Read the CORRECTION entry above first: the
+mechanism below is stated as precision and it is not. Repeating either
+configuration produces either outcome; native bf16 alone gives 6.999 / 8.952 /
+12.148 / 11.503 across processes. The numbers are measurements; "fp32 vs bf16"
+as the CAUSE is retracted.)
 
     native protenix2, bf16 autocast (its default)   6.999 A
     native protenix2, fp32                         12.342 A
@@ -1080,7 +1132,8 @@ precision band.
 
 **What this leaves as a real opportunity, not a bug.** protenix INFERS under
 torch autocast bf16, so bf16 is arguably part of the convention rather than a
-degradation of it, and on this target it is worth 5 A. Our `BF16=all` is a
+degradation of it -- worth matching on principle, though NOT worth 5 A here:
+that figure came from comparing two draws. Our `BF16=all` is a
 different thing -- it casts parameters, where autocast keeps LayerNorm, softmax
 and accumulation in fp32 -- and it does not reproduce the basin (12.028).
 Matching torch's autocast semantics is an open question for the whole family,
