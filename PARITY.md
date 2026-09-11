@@ -98,28 +98,42 @@ that input.
 
 ### Where to resume (2026-09-11)
 
-L6 is RUNNING and partially complete -- resume it WITHOUT `FORCE` so finished
-cells are skipped:
+L6 is COMPLETE (14 models x 7 cases). Re-run a model's row with:
 
     LOGDIR=$PWD/dev/oracles/parity_runs/2026-09-10-full \
       bash dev/oracles/run_all_parity.sh L6
 
-L6's first 21 cells found **openbind0 folding plain ubiquitin to 10.4 A** where
-openfold3 reaches 1.4 A on identical input through identical code. Fully
-recorded in HOLES.md: six alternatives ruled out by measurement, localised to
-the trunk (its distogram's top-L contact precision is 0.303 against openfold3's
-0.868), and the model reports its own failure (pLDDT 50.5 / PAE 11.12).
+**L6 found a real port bug, and it is fixed: openbind0's end-node pair bias.**
+It folded plain ubiquitin to 10.4 A where openfold3 reaches 1.4 A on identical
+input through identical code; it now reads **2.407 A against native
+openbind0's 2.383**. One axis swap: OF3 v0.5.0 (openbind) and main/preview-2
+permute the end-node triangle attention's bias differently over an
+already-transposed pair, so preview-2 needs our swap and v0.5.0 needs none.
 
-**NATIVE PYTORCH openbind0 HAS NOT BEEN RUN on this target**, but it is NOT
-blocked: `~/of3_deps` (symlinks to gemmi / ml_collections / absl / biotite,
-nothing installed) puts of3 on `~/boltz_gpu_venv`, where cuda is True and
-of3-ob-174k.pt loads. My earlier "needs GPU torch we do not have" was wrong --
-repeated from a comment instead of checked. The route is a
-real-input TRUNK comparison -- `trunk_in_pair` / `trunk_in_single` /
-`trunk_out_pair` taps now exist in `evoformer.py` behind AF3_ESM_TRUNK_TAPS --
-built by calling `ev.Evoformer` DIRECTLY, the way `esmfold2_localise_trunk.py`
-does. Tapping through `fold_check.fold` returns tracers, because recycling runs
-in a `fori_loop`.
+The reason it survived four days of gates is the part to remember. It was
+settled the WRONG way on 2026-09-07 (see 1c below) by an activation comparison
+against `~/openfold-3` at **main** -- and main's `PairFormerStack` loads
+openbind0's pairformer tensors without complaint, because the two releases
+differ by name only in the diffusion LayerNorms. So the oracle ran preview-2's
+convention over v0.5.0's weights and certified it at z 1.000000. **A native
+reference has to be the right RELEASE, not just the right repository.** The
+driver now routes openbind0 to `~/openfold-3-v050` (a worktree of the v0.5.0
+tag) and `trunk_parity.native_of3` asserts on `TriangleAttention`'s signature,
+so the wrong tree is an error instead of a green gate.
+
+Two capabilities came out of it, both new and both reusable:
+
+  * **native of3 inference runs here.** `~/of3_venv` (a venv layered on
+    `boltz_gpu_venv` by one .pth line) plus one honest stub (`~/of3_stub/kalign.py`,
+    not on PyPI, template-only, raises). GPU-only -- `accelerator: cpu` dies in
+    the sampler -- and 15 s for 5 samples at 76 residues. `~/venv` and
+    `~/boltz_venv` untouched.
+  * **a real-input trunk ladder**, in `dev/oracles`: `native_of3_dump.py` (a
+    real native fold, hooked at `run_trunk` and every trunk sub-module),
+    `native_of3_pf_floor.py` (native's tf32-vs-fp32 spread on a FIXED input --
+    the step without which none of the numbers mean anything),
+    `native_of3_block0_subs.py` + `block0_subs_parity.py`, `real_pf_inject.py`,
+    `real_pf_bisect.py`, `real_msa_inject.py`, `fold_with_native_trunk.py`.
 
 Also note L6's status column is blind: it reports OK whenever a number was
 produced. A 10 A fold and a 1.5 A fold both read OK, which is how this survived
@@ -560,15 +574,19 @@ currently hardcode the checkpoint as a module constant
 work is to parameterise by model name and run each. This is the highest
 coverage-per-effort item by a wide margin.
 
-**1c. DONE for openbind0 (2026-09-07), and it found a real bug.** L1 read
-s 0.999113 / z 0.471977 against `~/openfold-3`, with openfold3 itself at
-1.000000 through the same adapter as a control -- so not the harness. The cause
-was a transposed column pair bias: v0.5.0 transposes
-(`TriangularAttention(transpose_bias=True)` from `base_blocks.py:397`) and
-`TRANSPOSED_COLUMN_PAIR_BIAS` omitted openbind0. Fixed; L1 is now
-1.000000 / 1.000000. Neither setting changes a weight, so L0 could never see it,
-and 6MRR moved 1.637 -> 1.649 -- the CORRECT setting being marginally worse is
-why L5 could not see it either. This is the concrete case for L1 existing.
+**1c. DONE for openbind0 (2026-09-07) -- AND THE ANSWER WAS BACKWARDS
+(corrected 2026-09-11).** L1 read s 0.999113 / z 0.471977 against
+`~/openfold-3`, with openfold3 itself at 1.000000 through the same adapter as a
+control, and adding openbind0 to `TRANSPOSED_COLUMN_PAIR_BIAS` took it to
+1.000000 / 1.000000. Every number there is real; the reference was the wrong
+RELEASE. `~/openfold-3` is main, which loads openbind0's pairformer tensors
+happily, so the gate compared v0.5.0's weights against preview-2's convention.
+Against `~/openfold-3-v050` the correct setting is openbind0 OUT of the list,
+and the cost of the wrong one was 10.4 A on ubiquitin against native's 2.4 --
+see the top of this file and HOLES.md. The lesson stands twice over: neither
+setting changes a weight so L0 could never see it, and 6MRR moved 1.637 ->
+1.649, so L5 could not either. What it also shows is that an L1 cell is only as
+good as the vendor tree it is pointed at.
 
 **2a. L2 token transformer GATED for TEN models (2026-09-07).** `dev/oracles/diffusion_parity.py`. protenix's
 `DiffusionTransformer` is standalone-constructible exactly like
@@ -1736,7 +1754,7 @@ CA.
 | `boltz2` | **0.387** | 1.534 | 0.458 | 1.714 | **0.423** | 1.815 | 1.197 |
 | `chai1` | **0.509** | 1.863 | 0.535 | 1.526 | 1.723 | 1.804 | 1.506 |
 | `intellifold2` | 12.155 | 1.585 | **0.441** | 1.669 | 1.512 | 1.554 | 1.469 |
-| `openbind0` | 16.711 | 2.206 | **0.426** | 10.388 | 1.650 | 11.542 | 1.497 |
+| `openbind0` | 14.309 | 2.352 | **0.445** | 2.407 | 1.641 | 1.776 | 1.315 |
 | `opendde` | 17.855 | 1.987 | 0.876 | 1.794 | 0.769 | 1.811 | 1.326 |
 | `openfold3` | 12.697 | 1.916 | 0.456 | 1.388 | 1.540 | 1.499 | 1.331 |
 | `protenix1` | 10.332 | 1.695 | 0.936 | 10.983 | 1.696 | 2.085 | 1.801 |
@@ -1753,12 +1771,17 @@ Four things this says that no single-model run could:
     10-25 A, `alphafold3` itself included at 17.7. Scored in ONE frame, so a
     correct-but-misplaced chain fails -- which is the point of scoring it that
     way, and why the per-chain numbers in the older table read fine.
-  * **three models fail on ubiquitin and their families do not.** `openbind0`
-    10.388 against `openfold3`'s 1.388 on the same architecture, and
-    `protenix1` 10.983 / `protenix2` 7.458. The PTM column tracks the plain one
-    in every case, so it is the target and not the modification --
-    [[protenix2-5k9p-retraction]] already covers protenix2's; openbind0's is
-    open.
+  * **three models failed on ubiquitin and their families did not.** `openbind0`
+    read 10.388 against `openfold3`'s 1.388 on the same architecture, and
+    `protenix1` 10.983 / `protenix2` 7.458. The PTM column tracked the plain one
+    in every case, so it was the target and not the modification.
+    **openbind0's was a port bug and is FIXED** -- its end-node pair bias was
+    transposed, the row above now reads 2.407 against native openbind0's 2.383,
+    and the whole hunt is at the top of this file and in HOLES.md.
+    [[protenix2-5k9p-retraction]] covers protenix2's; `protenix1`'s is still
+    open, and openbind0's outcome raises the prior that it is ours too. The
+    openbind0 row in the table above is the re-measured one; the other rows are
+    from the driver run and predate the fix.
   * **ligands are uniformly good** -- eight of ten under 0.94, four under 0.46 --
     which is the strongest cross-model row here.
   * **RNA is uniformly good for the AF3 family** (1.05-1.80) and hopeless for

@@ -884,6 +884,81 @@ downstream immediately instead of being waved at as "its head amplifies more".
 
 The residual ~6e-03 IS the bf16 -- that part of the earlier entry stands.
 
+## SOLVED 2026-09-11: openbind0's end-node pair bias was transposed. 10.4 -> 2.4 A
+
+One axis swap, and an oracle that certified the wrong side of it.
+
+**The convention.** Both OF3 releases hand the end-node triangle attention an
+ALREADY-TRANSPOSED pair, then take the bias from a permutation of `linear_z`
+over that transposed tensor:
+
+    main / preview-2   permute(lz(zT), (2, 0, 1)) -> b[h,i,j] = lz(z)[j,i,h]
+    v0.5.0 (openbind)  permute(lz(zT), (2, 1, 0)) -> b[h,i,j] = lz(z)[i,j,h]
+
+We build the bias from the NON-transposed pair, so preview-2 needs our swap and
+v0.5.0 needs none. `openbind0` is out of `TRANSPOSED_COLUMN_PAIR_BIAS`.
+
+**The oracle bug.** This was settled the other way on 2026-09-07, and the
+activation comparison that settled it ran against the WRONG RELEASE.
+`~/openfold-3` sits at main, and main's `PairFormerStack` loads openbind0's
+pairformer tensors without complaint -- the releases differ by name only in the
+diffusion LayerNorms (4890 vs 4936 tensors) -- so `trunk_parity` ran main's
+convention over v0.5.0's weights and reported z 1.000000 for the wrong setting.
+**A native reference has to be the right RELEASE, not just the right
+repository.** The driver now routes openbind0 to `~/openfold-3-v050` and
+`native_of3` asserts on whether `TriangleAttention.forward` takes
+`transpose_bias`, so the wrong tree is an error rather than a green gate.
+
+**The ladder that found it**, in order, because no step of it was optional:
+
+  1. A native openbind0 FOLD (2.383 A) against ours (10.388), with native
+     openfold3 (1.308) and our openfold3 (1.391) as the control that proves the
+     harness. Until this existed every conclusion here was an inference.
+  2. Native's real trunk tensors, dumped from that fold at `run_trunk` and at
+     every sub-module (`native_of3_dump.py`).
+  3. Our pairformer stack on native's real `pf_in` -- corr 0.99682 for
+     openbind0, 0.99999976 for openfold3.
+  4. **Native's own floor on a FIXED input** (`native_of3_pf_floor.py`): tf32
+     vs tf32-off, max|d| 2.10 over 48 blocks and 0.09 over one. This is the step
+     that made the rest mean anything -- measured against the RECYCLED trunk's
+     floor instead, our error looked like noise, because openbind0's recycling
+     is genuinely chaotic (a tf32 flip moves its z by max|d| 200 on rms 149, and
+     still folds to 1.693 A, so that chaos is not what was wrong).
+  5. Per sub-module, each on native's own input: four of five pair modules exact
+     to 2e-5 for both releases, and `pair_attention2` corr 0.93 for openbind0 --
+     then corr 0.93 for openfold3 with the setting flipped. Exactly
+     complementary, which is what a per-release convention looks like.
+
+**Why nothing cheaper could have found it.** Neither setting changes any weight,
+so no shape gate and no coverage audit can see it (`audit_coverage` reports 0
+unaccounted for either way). The random-input trunk cell grades FLOOR. Folding
+6MRR and 1STP could not discriminate it -- two seeds disagreed about which
+setting was better. And `fold_with_native_trunk.py` showed the fold recovering
+only to 4.8 A on an injected native pair, which is a reminder that injecting a
+foreign representation costs accuracy of its own and is not a clean bound.
+
+Measured after the fix, against the numbers this entry was written about:
+
+| case | before | after | native openbind0 |
+|---|---|---|---|
+| plain 5K9P | 10.388 | **2.407** | 2.383 |
+| ptm 5K9P | 11.537 | **1.776** | |
+| 6MRR | 1.651 | 1.641 | |
+| 1EHZ RNA | 1.495 | 1.315 | |
+| 1LMB DNA | 2.209 | 2.352 | |
+| 1LMB complex | 16.895 | 14.309 | |
+| 1STP BTN | 0.426 | 0.445 | |
+| L1 trunk | FLOOR | s corr 1.000000 / z corr 1.000000 | |
+
+openfold3 is unchanged throughout (fold 1.392, trunk s/z corr 1.000000).
+
+What in the entry below still stands: every exclusion in it was correct, and the
+distogram was the right suspect (contact precision 0.303 -- the pair track WAS
+the broken one). What did not: "consistent with the checkpoint's own behaviour",
+and "the trunk cell cannot resolve this". The cell could not resolve it on
+RANDOM inputs. On native's real input, with native's own floor measured, it
+resolved it to a single sub-module.
+
 ## openbind0 fails ubiquitin at 10.4 A, and the matrix CANNOT say why
 
 L6 turned this up: openbind0 folds 5K9P (plain ubiquitin, 76 res) to 10.4-12.7 A
