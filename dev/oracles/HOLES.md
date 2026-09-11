@@ -1017,14 +1017,31 @@ RNA, and the nucleic CCD order puts the backbone atoms first so no permutation
 arises. Ubiquitin is blind for a second reason: it ends in GLY, which takes the
 single-token path and is never split at all.
 
-**NOT FIXED, and the reason is architectural rather than an oversight.** Our
-dense (token, slot) layout makes the atom axis token-major by construction; a
-token's atoms are contiguous in it. Native's axis is the structure's own atom
-order with non-contiguous gathers per token. Matching it means decoupling the
-struct atom axis from the token rows -- expressible, since AF3's AtomCrossAtt
-gathers are general, but it is surgery on the struct path for something inert on
-every real target. Recorded with a probe that says which inputs it is live for,
-rather than left to be rediscovered.
+**FIXED (2026-09-11), by decoupling the atom axis from the token rows.** The
+first read of this was that our dense (token, slot) layout makes the axis
+token-major by construction, so matching native meant surgery. It is smaller
+than that, because AF3's own machinery already does the work: every gather in
+`AtomCrossAtt.compute_features` is computed by MATCHING LAYOUTS, not by
+arithmetic on positions. So permuting ONE array -- the flat atom list, before the
+queries and keys are cut from it -- moves the whole axis and every gather follows.
+
+  * `build_structural_layout` now also returns `flat_atom_order`: for the flat
+    atoms in ROW-MAJOR order, their rank in residue-major order. It has the
+    information to do this and nothing else does -- `rows_src` records each
+    structural atom's (parent residue, dense slot).
+  * `AtomCrossAtt.compute_features` takes an optional `flat_atom_order` and
+    applies it to `flat_layout`. Residue path unaffected (it passes None, and its
+    axis is already residue-major because a token IS a residue there).
+  * `AF3_NO_STRUCT_ATOM_AXIS=1` restores the old axis for an A/B.
+
+Verified: the probe (which now reads the QUERY axis, reconstructed through
+`token_atoms_to_queries` -- the (token, slot) layout stays token-major by design
+and is not the thing that had to move) reports `moved 0` on every case including
+the five that were live, and reports them live again with the toggle set. The
+opendde gates stay exact -- L2.diffusion / conditioning / atom_encoder /
+atom_decoder all corr 1.000000, L3.denoise 0.0000 A per atom -- and 6MRR folds to
+0.809 with the fix and 0.809 without, which is what "inert on this target" is
+supposed to mean.
 
 ### 2. HALF CONFIRMED -- the MSA depth is 1280, but our shuffle is already valid-first
 

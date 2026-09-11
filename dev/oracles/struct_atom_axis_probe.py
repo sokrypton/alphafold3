@@ -52,8 +52,18 @@ def probe(seq, model='opendde', chains=None, tag=None):
   snm = np.asarray(b['struct/ref_atom_name_chars'])
   smk = np.asarray(b['struct/pred_dense_atom_mask'])
   srix, sasym = np.asarray(b['struct/residue_index']), np.asarray(b['struct/asym_id'])
-  ours = [(int(sasym[t]), int(srix[t]), _dec(snm[t, a]))
-          for t in range(smk.shape[0]) for a in range(smk.shape[1]) if smk[t, a]]
+  # The axis that matters is the QUERY axis -- the flat atom list the windows are
+  # cut on -- NOT the (token, slot) layout, which is token-major by construction
+  # and stays that way. Reconstruct it through the gather the model uses.
+  # `token_atoms_to_queries` has the QUERIES shape (num_subsets, 32) and indexes
+  # into the FULL flattening of the (num_tokens, max_atoms) layout -- empty slots
+  # included -- so the lookup table has to be built over every slot.
+  tok_flat = [(int(sasym[t]), int(srix[t]), _dec(snm[t, a])) if smk[t, a] else None
+              for t in range(smk.shape[0]) for a in range(smk.shape[1])]
+  g = np.asarray(b['struct/token_atoms_to_queries:gather_idxs']).reshape(-1)
+  gm = np.asarray(b['struct/token_atoms_to_queries:gather_mask']).reshape(-1)
+  ours = [tok_flat[int(i)] for i, m in zip(g, gm)
+          if m and int(i) < len(tok_flat) and tok_flat[int(i)] is not None]
   dnm, dmk = np.asarray(b['ref_atom_name_chars']), np.asarray(b['pred_dense_atom_mask'])
   drix, dasym = np.asarray(b['residue_index']), np.asarray(b['asym_id'])
   canon = [(int(dasym[t]), int(drix[t]), _dec(dnm[t, a]))

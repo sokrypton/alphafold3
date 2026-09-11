@@ -2099,14 +2099,31 @@ class AtomCrossAtt:
       queries_subset_size: int,
       keys_subset_size: int,
       padding_shapes: PaddingShapes,
+      flat_atom_order: np.ndarray | None = None,
   ) -> Self:
-    """Computes gather indices and meta data to work with a flat atom list."""
+    """Computes gather indices and meta data to work with a flat atom list.
+
+    `flat_atom_order` permutes the FLAT ATOM AXIS -- the list the attention
+    windows are cut on -- without touching the (token, slot) layout. AF3 flattens
+    row-major, so a token's atoms are contiguous on the axis; opendde's
+    structural tokens instead index into the structure's own atom order, and the
+    two differ at a non-glycine chain terminus (OXT is in the backbone set, so
+    the backbone token is not contiguous in residue order). The permutation is
+    applied here and nowhere else: every gather below is computed by matching
+    LAYOUTS, so they all follow it.
+    """
 
     token_atoms_layout = all_token_atoms_layout.copy_and_pad_to(
         (padding_shapes.num_tokens, all_token_atoms_layout.shape[1])
     )
     token_atoms_mask = token_atoms_layout.atom_name.astype(bool)
     flat_layout = token_atoms_layout[token_atoms_mask]
+    if flat_atom_order is not None:
+      if flat_atom_order.shape[0] != flat_layout.shape[0]:
+        raise ValueError(
+            'flat_atom_order has %d entries for %d atoms'
+            % (flat_atom_order.shape[0], flat_layout.shape[0]))
+      flat_layout = flat_layout[flat_atom_order]
     num_atoms = flat_layout.shape[0]
 
     padded_flat_layout = flat_layout.copy_and_pad_to((

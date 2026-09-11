@@ -14,6 +14,8 @@ features.*.compute_features builders, so the whole structural Batch is built wit
 the existing machinery.
 """
 
+import os
+
 import numpy as np
 
 from alphafold3.model.atom_layout import atom_layout
@@ -239,9 +241,38 @@ def build_structural_layout(all_tokens, all_token_atoms_layout):
       residue_rep_token[r] = t
       seen[r] = True
 
+  # THE ATOM AXIS. AF3 flattens the (token, slot) layout ROW-MAJOR to get the
+  # flat atom list the attention windows are cut on, which makes our axis
+  # token-major. opendde's is the structure's own atom order: it keeps every atom
+  # in the original array and has each token carry `atom_indices` INTO it
+  # (`_get_atom_to_token_idx` fills an array indexed by atom i over
+  # range(n_atoms), data/core/featurizer.py). The two differ whenever a token's
+  # atoms are not contiguous in residue order -- which is exactly a non-glycine
+  # chain terminus, because OXT is in the BACKBONE set and the sidechain atoms
+  # sit between O and OXT in the residue:
+  #
+  #     residue-major (theirs)  N CA C O CB SG OXT
+  #     token-major (ours)      N CA C O OXT | CB SG
+  #
+  # No ordering of the two tokens fixes that -- the backbone set interleaves --
+  # so the axis has to be permuted explicitly, which is what this is: for the
+  # flat atoms in ROW-MAJOR order, their rank in residue-major order.
+  # `AtomCrossAtt.compute_features` applies it before building the windows, and
+  # every gather downstream is computed by LAYOUT MATCHING, so they follow.
+  #
+  # Reported by chlee19990109-cloud, who hit it in their own port; scope and
+  # probe in dev/oracles/struct_atom_axis_probe.py.
+  flat_src = [(r, k) for r, idxs in rows_src for k in idxs]
+  flat_order = np.argsort(np.array(
+      [r * (all_token_atoms_layout.shape[1] + 1) + k for r, k in flat_src],
+      dtype=np.int64), kind='stable')
+  if os.environ.get('AF3_NO_STRUCT_ATOM_AXIS'):
+    flat_order = np.arange(len(flat_src), dtype=np.int64)   # the old token-major axis
+
   return {
       'all_tokens': struct_tokens,
       'all_token_atoms_layout': struct_atoms,
+      'flat_atom_order': flat_order,
       'parent_residue_idx': parent,
       'subtoken_role_id': role,
       'twin_token_idx': twin,
@@ -280,7 +311,8 @@ def build_structural_batch(all_tokens, all_token_atoms_layout, *, ccd,
   pad = dataclasses.replace(padding_shapes, num_tokens=struct_num_tokens)
 
   atom_cross_att = MF.AtomCrossAtt.compute_features(
-      all_token_atoms_layout=satl, queries_subset_size=queries_subset_size,
+      all_token_atoms_layout=satl, flat_atom_order=info['flat_atom_order'],
+      queries_subset_size=queries_subset_size,
       keys_subset_size=keys_subset_size, padding_shapes=pad)
   token_features = MF.TokenFeatures.compute_features(
       all_tokens=sat, padding_shapes=pad)
