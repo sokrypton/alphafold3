@@ -107,6 +107,12 @@ OPENDDE_SETTINGS = (
     ('evoformer.template.template_stack.pair_attention.num_head', 2),  # template tri-att, 64/32
     ('heads.confidence.pairformer.pair_attention.num_head', 12),  # confidence pairformer (c_z=384)
     ('heads.distogram.num_bins', 96),                             # OpenDDE no_bins=96 (vs AF3 64)
+    # OpenDDE's MSA module subsamples to `msa_depth` (config/data.py: 1280),
+    # not AF3's num_msa=1024 -- `MSAModule.forward` passes num_msa=self.msa_depth
+    # to subsample_msa_feature_dict_valid_first (model/modules/pairformer.py).
+    # Only bites on an MSA deeper than 1024, which every gate here so far has
+    # been (self-MSAs of depth 1-2), so nothing could see it.
+    ('evoformer.num_msa', int(__import__('os').environ.get('AF3_DDE_NUM_MSA', 1280))),
 )
 
 

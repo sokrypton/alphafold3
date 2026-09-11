@@ -970,6 +970,89 @@ does, we reproduce), and for boltz2 (ONE slot, `template_mask` all zero, so its
 present-weighted mean contributes exactly zero -- ours too). `intellifold2`,
 `opendde` and `rosettafold3` have NOT been checked.
 
+## An external report on our opendde path: 2 of 3 confirmed (2026-09-11)
+
+From chlee19990109-cloud, whose own Protenix port ([[teammate-protenix-port]])
+hit the first of these in their tree. Verified against ours rather than taken on
+trust; one half of one claim does not survive.
+
+### 1. CONFIRMED -- the structural-token atom axis is permuted at a non-glycine terminus
+
+Their probe reproduces here exactly:
+
+    dense, residue-major   N CA C O CB SG OXT
+    our struct flat order  N CA C O OXT | CB SG
+
+`PROTEIN_BACKBONE_ATOMS` includes OXT (structural_features.py:22, copied from
+opendde's tokenizer.py:21), rows are emitted backbone-token-then-sidechain-token,
+and the atom axis is the row-major flattening of those rows. There is no
+reordering step.
+
+**The mechanism, which their report states and I confirmed at the source:**
+native opendde keeps every atom in the ORIGINAL atom array and has each token
+carry `atom_indices` into it -- `_get_atom_to_token_idx` fills an array indexed
+by atom i over `range(n_atoms)` (data/core/featurizer.py:414). Its atom axis is
+therefore residue-major, and the tokens are gathers. Ours re-packs atoms into
+(token, slot) rows, so our axis is token-major. At a non-glycine terminus the
+backbone set is not contiguous in the residue's atom order and the two axes
+differ by a 3-cycle.
+
+**Scope, measured here (`dev/oracles/struct_atom_axis_probe.py`).** What matters
+is not that atoms move but whether a 32-atom QUERY BLOCK straddles the terminal
+residue: inside one block a permutation is invisible, because every per-atom
+feature travels with its atom.
+
+| input | atoms | moved | query blocks whose SET differs |
+|---|---|---|---|
+| ubiquitin (ends GLY) | 602 | **0** | 0/19 |
+| 6MRR | 574 | 6 | 0/18 |
+| 1STP (121 res) | 902 | 4 | 0/29 |
+| two chains, TRP and CYS termini | 212 | 14 | 0/7 |
+| poly-A(12, 18, 19, 24, 25) ending TRP | 70-135 | 11 | **2** each |
+
+So: real, and INERT on every target we currently fold, LIVE for roughly a third
+of chain lengths. Their note about the blind spot is right and worth repeating --
+our padded-window work was verified against native `pad_info` on 1EHZ, which is
+RNA, and the nucleic CCD order puts the backbone atoms first so no permutation
+arises. Ubiquitin is blind for a second reason: it ends in GLY, which takes the
+single-token path and is never split at all.
+
+**NOT FIXED, and the reason is architectural rather than an oversight.** Our
+dense (token, slot) layout makes the atom axis token-major by construction; a
+token's atoms are contiguous in it. Native's axis is the structure's own atom
+order with non-contiguous gathers per token. Matching it means decoupling the
+struct atom axis from the token rows -- expressible, since AF3's AtomCrossAtt
+gathers are general, but it is surgery on the struct path for something inert on
+every real target. Recorded with a probe that says which inputs it is live for,
+rather than left to be rediscovered.
+
+### 2. HALF CONFIRMED -- the MSA depth is 1280, but our shuffle is already valid-first
+
+**Depth: right, and fixed.** opendde's `MSAModule.forward` subsamples to
+`num_msa=self.msa_depth`, and `msa_depth` is 1280 (config/data.py:31). We ran
+AF3's `num_msa=1024` with no per-model override. Now set in OPENDDE_SETTINGS
+(`AF3_DDE_NUM_MSA` overrides it for an A/B). It can only bite on an MSA deeper
+than 1024 -- every gate here has run self-MSAs of depth 1-2 -- and on the one
+deep-MSA target we have it changes nothing: 1STP (2144 rows) reads CA 0.306 at
+1024 against 0.301 at 1280, BTN 0.886 both.
+
+**"A uniform shuffle where opendde takes valid-first": NO.** Our `shuffle_msa`
+sorts by `logits = (clip(sum(msa.mask, -1), 0, 1) - 1) * 1e6`, i.e. 0 for any row
+with an unmasked position and -1e6 for a padded one, then gumbel-argsorts. Rows
+with content sort ahead of padding by construction -- that IS valid-first, and
+the function's own comment says "Sample uniformly among sequences with at least
+one non-masked position". Same semantics as their
+`subsample_msa_feature_dict_valid_first`, different implementation.
+
+### 3. CONFIRMED and inert, for the reason they give
+
+`offsets_valid` takes the `keys_mask` term only for `OPENFOLD3_LINEAGE`
+(atom_cross_attention.py:571-574), so on the protenix/opendde path a padded key
+(ref_space_uid 0) collides with token 0 in term 1 of the atom-pair conditioning.
+Inert because `opendde` and `PROTENIX_FAMILY` are both in
+`KEY_MASKED_ATOM_ATTENTION`, which zeroes those slots at the attention. Left as
+is, now written down.
+
 ## YES, an MSA stabilises it -- and with one we MATCH native (2026-09-11)
 
 The bistability above is a single-sequence effect on this target. Given a real
