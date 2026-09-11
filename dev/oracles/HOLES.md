@@ -884,6 +884,145 @@ downstream immediately instead of being waved at as "its head amplifies more".
 
 The residual ~6e-03 IS the bf16 -- that part of the earlier entry stands.
 
+## SOLVED 2026-09-11: protenix's empty template and its depth-1 self MSA
+
+Two INPUT conventions, worth 9.4 A on plain ubiquitin, and neither moved a
+single module gate: every protenix1 cell from L0 to L4 reads corr 1.000000,
+because each one is fed NATIVE's own features. L1-L4 gate module MATH; they
+cannot see what we hand the modules in a real fold.
+
+Native protenix1 folds plain 5K9P to 1.855 A. Ours read 10.983.
+
+**1. THE EMPTY TEMPLATE IS NOT A ZERO TEMPLATE.** Both pipelines pad the
+template axis to 4 slots and mask every atom, so the distogram, the unit vector
+and both masks come out zero either way. The RESTYPE one-hot does not:
+protenix's featuriser fills its one empty template with the GAP class and
+zero-pads the other three -- measured, `template_aatype` slot 0 all 31, slots
+1-3 all 0 -- and `TemplateEmbedder.forward` divides by `num_templates`, the
+PADDED slot count, not by the templates present. So its term is never zero:
+
+    v = z_proj(z_norm(z)) + a_proj(a_tij)
+
+keeps a Z-dependent half even with every template feature masked out, and that
+half reaches the trunk on every recycle. We had Boltz's convention (mean over
+PRESENT templates, hence exactly zero with none) for the whole family.
+
+THE CONFIRMATION, which leaves no room: disabling the same term in NATIVE
+(`TemplateEmbedder.forward = lambda *a, **kw: 0`) takes native to 8.40 A, onto
+our number. Changing the reference and nothing else is the strongest form this
+kind of claim can take.
+
+**2. PROTENIX'S SELF-MSA IS ONE ROW, NOT TWO.** Its dump carries `msa` at
+(1, 76). AF3 concatenates a paired and an unpaired MSA, so a chain with no
+alignments arrives with the query TWICE. The outer product mean over duplicates
+is unchanged, but the pair-weighted averaging and the row transition are
+depth-sensitive -- the fault esmfold2 already had, so the same knob
+(`dedupe_self_msa`). This was the SEED of the compounding divergence: at cycle 1
+it showed up as rms ours/native 0.991 at the MSA stage and nowhere else.
+
+Trunk against native per cycle, on the real input:
+
+| cycle | before | after the template fix | after both |
+|---|---|---|---|
+| 1 | 0.99973 | 0.99973 | **0.99999891** |
+| 2 | 0.98542 | — | — |
+| 3 | 0.93123 | — | **0.99999545** |
+
+**THE REFERENCE HAS TO BE fp32.** protenix autocasts to BF16 by default
+(`configs_base` "dtype": "bf16", `runner/inference.py:214`), and its own
+bf16-vs-fp32 trunk differs at corr 0.789 on this target with max|d| 676 -- 20x
+the disagreement we were trying to explain. Against the bf16 dump our
+pairformer read 0.9996 on native's real input; against fp32 it reads 0.99999982
+and is exact. `native_dump.py` therefore passes `--dtype fp32` by default.
+([[oracle-parity-confounds]] says the same thing about protenix2; it cost six
+false leads then and would have cost more here.)
+
+Folds after the fix, native in brackets:
+
+| case | before | after | native protenix1 |
+|---|---|---|---|
+| plain 5K9P | 10.983 | **1.532** | 1.855 |
+| 1STP BTN | 0.917 | **0.465** | |
+| 1LMB DNA | 1.692 | 1.543 | |
+| 6MRR | 1.684 | 1.565 | |
+| 1EHZ RNA | 1.707 | 2.290 | **2.440** |
+| ptm 5K9P | 2.697 | 11.326 | **11.771** |
+
+**The last two rows are not regressions, and both had to be measured to say so.**
+
+  * 1EHZ: we were accidentally BETTER than native while wrong, and are now
+    faithful (2.29 against native's 2.44). Same shape as esmfold2's 1QYS.
+  * ptm 5K9P: native protenix1 fails phospho-ubiquitin too, at 11.771 against
+    our 11.326. The old "2.697" was one luckier sample set of five -- exactly
+    the trap [[protenix2-5k9p-retraction]] records. Ruled out as ours twice:
+    once by the A/B (AF3_NO_PX_TEMPLATE_GAP / AF3_NO_PX_DEDUPE_MSA move it by
+    0.3 A in either direction) and once by native.
+
+WHAT FOUND IT, since the module gates could not: native's real trunk dumped
+per cycle (`px1/native_dump.py`, hooked at `get_pairformer_output` plus taps on
+the template embedder, the MSA module and the pairformer stack), our stack fed
+native's real input (exact -> the fault is upstream), and then NEW GENERIC-PATH
+TAPS in `evoformer.py` (`z_init_generic`, `z_after_template`, `z_after_msa`,
+`z_before_prev`, `z_after_prev`). The old taps only covered the pair-only
+ESMFold2 branch. With them, one run says: z_init exact (0.99999681), z after
+template corr 0.876 -- the stage named in a single reading.
+
+TWO HARNESS FAULTS OF MINE ON THE WAY, both of which briefly read as findings:
+
+  * comparing our FIRST pass against native's LAST cycle (`taps[name][0]`
+    instead of `[-1]`), which made the cycle-2 recycle term look 37% too small.
+  * carrying `pair_pre_coda` in the harness's `prev` dict for a STOCK model.
+    `Evoformer` reads `prev.get('pair_pre_coda', prev['pair'])`, so the recycle
+    read a tensor nothing ever updated -- zeros -- and the pair rms was
+    identical to 8 digits across passes. That one read as "our recycling is
+    inert", which would have been a serious bug had it been true.
+
+## protenix2 under the same two fixes: five cases better, ubiquitin worse (OPEN)
+
+Both conventions are CONFIRMED for protenix2 by its own native dump -- 4
+template slots with slot 0 all gap (31) and slots 1-3 all 0, `msa` at (1, 76),
+identical to protenix1 -- and with both knobs on, its trunk against native is
+the most exact it has ever been:
+
+    z_init      corr 0.99999993      (one cycle, real input, fp32 reference)
+    template    corr 0.99999998
+    msa         corr 0.99999997
+    trunk out   corr 0.99999953   max|d| 0.93 on rms 27.5
+
+Turning EITHER knob off makes every row worse, which is the check that the
+conventions are protenix2's too and not protenix1's alone.
+
+L6 before -> after (2026-09-10 driver row -> re-measured):
+
+| case | before | after | native protenix2 |
+|---|---|---|---|
+| ligand_1stp BTN | 1.190 | **0.471** | |
+| dna_1lmb | 2.068 | **1.815** | |
+| rna_1ehz | 1.758 | **1.374** | |
+| complex_1lmb | 17.572 | **15.700** | |
+| ptm_5k9p | 7.933 | **2.312** | |
+| protein_6mrr | 0.691 | 0.983 | |
+| **plain_5k9p** | 7.476 | **12.684** | **6.999** |
+
+**plain_5k9p is OPEN and it is the one row that went the wrong way.** What is
+already established about it:
+
+  * it is not the conventions -- the trunk is exact to 1e-7 at one cycle WITH
+    them, and worse without either.
+  * native protenix2 is itself bad here (6.999 A), so this is a target the
+    checkpoint does not solve, not a fold we are failing to reproduce well. Our
+    7.476 before the fix was not a better port, it was a different wrong answer
+    on a weak-signal target -- the precise trap [[protenix2-5k9p-retraction]]
+    records, where one lucky seed passed for a finding.
+  * protenix1, same conventions, same code, lands at 1.532 against its native's
+    1.855. So nothing family-wide is left broken.
+
+The next measurement, in order: our trunk against a 10-CYCLE native dump (one
+cycle is exact, and protenix's recycling is where a small difference compounds
+-- it is what took protenix1 from 0.99973 to 0.93123 over three cycles), then
+`fold_with_native_trunk.py` to split trunk from diffusion. Both are one command
+each now.
+
 ## SOLVED 2026-09-11: openbind0's end-node pair bias was transposed. 10.4 -> 2.4 A
 
 One axis swap, and an oracle that certified the wrong side of it.

@@ -1,0 +1,16 @@
+[
+ {
+  "sequences": [
+   {
+    "rnaSequence": {
+     "sequence": "GCGGAUUUAGCUCAGUUGGGAGAGCGCCAGACUGAAGAUCUGGAGGUCCUGUGUUCGAUCCACAGAAUUCGCACCA",
+     "count": 1,
+     "id": [
+      "A"
+     ]
+    }
+   }
+  ],
+  "name": "rna_1ehz"
+ }
+]
