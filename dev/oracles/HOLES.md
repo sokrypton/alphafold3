@@ -622,3 +622,36 @@ own reproducibility, and now rel_pos. NEXT: build native's `z_base` from the
 dump's inputs and the checkpoint's confidence weights and compare it against our
 `_boltz2_reembed` output -- the term-by-term diff that found boltz2's bug in one
 step. The dump has every input, so nothing needs to be re-run in ~/venv_esm.
+
+### esmfold2 confidence after the swap fix: rel_pos is the last term
+
+The s->z swap took L4 from 8 BAD rows to 2. What is left is ONE term, and the
+same one for both models -- each model's remaining `z_base` error matches its
+rel_pos residual almost exactly:
+
+              rel_pos residual      z_base residual     L4 pae
+    esmfold2      1.74e-02             1.69e-02         2.59e-02
+    esmfold2_fast 2.09e-02             2.67e-02         1.06e-01
+
+(esmfold2_fast reads worse downstream from a comparable z_base error; its head
+amplifies more. Both residuals are partially ANTISYMMETRIC -- 1.20 and 0.88 on
+||d - d.T||/||d||, against 2.00 for the pure transpose the swap produced -- so
+this is not another swap, it is a few buckets.)
+
+CHECKED BY READING and agreeing, so the next step must be numerical:
+
+  * the concat ORDER is the same on both sides --
+    `[rel_pos 66, rel_token 66, same_entity 1, rel_chain 6]` = 139
+    (modeling_esmfold2_common.py ResIdxAsymIdSymIdEntityIdEncoding vs AF3's
+    `create_relative_encoding`, whose docstring lists that order).
+  * `dij_residue[i,j] = residue_index[i] - residue_index[j]`, clipped to
+    [0, 2r] and sentinelled to 2r+1 off-chain -- AF3's convention.
+  * the chain block's predicate is the one fixed today (same-CHAIN -> sentinel).
+  * `dij_token` gates on `bij_same_chain & bij_same_residue`, where AF3 gates on
+    same-residue alone. INERT on a monomer, where same-residue implies
+    same-chain -- but a real difference on a complex, and nothing covers it.
+
+NEXT: an element-wise diff of the 139-wide FEATURE vectors, not their
+projections. Both sides project the same `embed.weight` -- the converter maps
+`rel_pos.embed.weight` straight into `rel_pos_project` -- so the disagreement is
+in the features and a per-bucket diff will name it in one measurement.
