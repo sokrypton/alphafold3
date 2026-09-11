@@ -797,3 +797,52 @@ and this one is native's own tensors testifying to their dtype.
 Closing it properly would need our tri_mul to run in bf16 for this family
 alone -- a per-module precision knob the graph does not have. Worth it only if
 these two rows are worth a new global_config axis.
+
+## L5 validates the day's work, and the driver was recompiling everything
+
+### The folds
+6MRR, 5 samples, one seed, against the recorded baselines. The UNTOUCHED models
+are the control and they all land within +-0.01:
+
+    openfold3   1.544 / 1.541     openbind0  1.650 / 1.649
+    protenix1   1.684 / 1.694     protenix2  0.697 / 0.702
+    chai1       1.723 / 1.719
+
+and of the eight changed today:
+
+    opendde        0.737 / 0.767   better (the 833-wide single_cond LayerNorm)
+    boltz2         0.421 / 0.434   better (the entity chain bucket)
+    esmfold2       1.339 / 1.352   better (the duplicated MSA query row)
+    intellifold2   1.515 / 1.514   neutral, as the fp32 template blob was
+    esmfold2_fast  1.181 / 1.181   esmfold2_lm300m 1.687 / 1.687  neutral
+    esmfold2_lm600m 1.522 / 1.506
+    rosettafold3   1.026 / 0.986   flagged, and NOT a regression:
+
+rosettafold3's fold is NONDETERMINISTIC run to run on the SAME seed. Three runs
+of seed 0 give best 0.968, 0.949 and 1.026 -- the fourth sample sits near a
+boundary and moves ~0.08 while the others move ~0.02. So +0.040 is inside its
+own band, and the recorded 0.986 is one draw. Single-number fold comparisons at
+this precision do not mean anything for this model.
+
+### The driver was recompiling the graph in every cell
+Every gate runs in a FRESH PROCESS. Measured on the A10 for a 6MRR fold:
+
+    import                0.5 s
+    featurise + setup     8.0 s
+    fold, cold          140.9 s
+    fold, warm PROCESS   67.5 s    <- no recompile
+
+so ~73 s of each cell was XLA and ~67 s was the five samples. `run_alphafold.py`
+has enabled JAX's persistent compilation cache from the start via
+`platform.enable_compilation_cache`; the gates never did and no cache existed on
+disk. Wired into `gate` now:
+
+    one L5 cell, cold cache   2m26s
+    one L5 cell, warm cache   0m43s      3.4x, cache 4.0 MB
+
+The min_compile_time / min_entry_size settings are load-bearing: JAX's defaults
+skip entries that are small or quick to build, which is most of what the module
+gates compile.
+
+NOT for timing work -- [[jax-cache-override]] records benchmarks silently
+measuring cache hits. The parity matrix compares NUMBERS, so a hit is free.

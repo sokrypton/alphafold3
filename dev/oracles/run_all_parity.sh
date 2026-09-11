@@ -115,6 +115,24 @@ gate () {
     local lmset=
     case "$lm" in *=*) [ "${lm#__LM_MISSING}" = "$lm" ] && lmset=$lm ;; esac
     ( echo "__LM ${lm:-none}"
+      # PERSISTENT COMPILATION CACHE. Every cell is a FRESH PROCESS, so without
+      # this each one recompiles the whole graph: measured on the A10, a 6MRR
+      # fold cell is ~145 s of which ~73 s is XLA and ~67 s is the actual five
+      # samples (a second fold in the SAME process costs 67 s). With the cache
+      # warm a fresh process costs 40 s -- 3.6x, and the cache is 3.9 MB.
+      #
+      # `run_alphafold.py` has enabled this from the start via
+      # `platform.enable_compilation_cache`; the gates never did, and no cache
+      # existed on disk. The min_* settings matter: JAX's defaults skip small or
+      # fast-to-compile entries, which is most of what the module gates build.
+      #
+      # NOT for timing work. [[jax-cache-override]] records a case where a
+      # hijacked cache dir made benchmarks silently measure hits; the parity
+      # matrix compares NUMBERS, so a hit is free, but any runtime benchmark has
+      # to control for this.
+      JAX_COMPILATION_CACHE_DIR=${JAX_CACHE:-$HOME/.cache/alphafold3/jax} \
+      JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS=1 \
+      JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES=0 \
       JAX_DEFAULT_MATMUL_PRECISION=highest PYTHONPATH=$pp \
         env ${lmset:+"$lmset"} \
         timeout "${GATE_TIMEOUT:-3600}" $PY "$@" 2>&1
