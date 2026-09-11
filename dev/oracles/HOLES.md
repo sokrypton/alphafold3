@@ -883,3 +883,52 @@ cannot produce a 4x different whole, and that asymmetry should have sent me
 downstream immediately instead of being waved at as "its head amplifies more".
 
 The residual ~6e-03 IS the bf16 -- that part of the earlier entry stands.
+
+## openbind0 fails ubiquitin at 10.4 A, and the matrix CANNOT say why
+
+L6 turned this up: openbind0 folds 5K9P (plain ubiquitin, 76 res) to 10.4-12.7 A
+across all five samples, where openfold3 on the identical input reaches 1.4 A.
+The two share every line of our code and differ only by checkpoint
+(of3-ob-174k vs of3-p2-155k).
+
+RULED OUT, each by measurement:
+
+  * not the MSA -- with NO MSA at all it reads 10.387, against 10.388 with the
+    self-MSA the L6 cell uses.
+  * not systematic -- openbind0 folds 1QYS 1.230, 6MRR 1.651 and 1STP 0.498
+    (ligand BTN 0.426), all comparable to openfold3.
+  * not a mirror -- allowing reflection in the superposition changes nothing
+    (10.382 against 10.392), so it is not a handedness or chirality sign bug.
+  * not collapsed or exploded -- Rg 11.91 A against the reference's 11.18 A, so
+    the structure is compact and correctly sized. It is simply a different fold.
+  * not the DIFFUSION SAMPLER -- the trunk's own distogram is already wrong:
+    top-L contact precision 0.303 and P(contact | true contact) 0.169, against
+    openfold3's 0.868 and 0.839 on the same sequence.
+  * not numerically degenerate -- its contact_probs are statistically ordinary
+    (max 1.000, mean 0.112, 8.9% above 0.5); they just point elsewhere.
+
+AND THE MODEL KNOWS. Mean pLDDT 50.5 with mean PAE 11.12, against 74.0 / 5.08
+for the same model on 6MRR and 71.6 / 5.08 for openfold3 here. A broken input
+path usually yields a CONFIDENTLY wrong structure
+([[postcutoff-generalisation]]); this one reports its own failure.
+
+**WHAT IS ACTUALLY BROKEN IS THE GATE.** openbind0's trunk is the one module the
+failure points at, and it is exactly the module the matrix cannot verify: both
+its trunk cells grade FLOOR. Worse than previously recorded -- the cell cannot
+be rescued by scaling the input, because the OF3 block's output magnitude is
+INPUT-INDEPENDENT: rms 447 at INPUT_SCALE 0.5, 445 at 0.05, 447 at 0.005. The
+block is bias-dominated, so no synthetic input reaches a regime where the cell
+resolves. `INPUT_SCALE` was added to test this and the answer is that it does
+not help.
+
+So the honest state: the failure is real, reproducible, localised to the trunk,
+and CONSISTENT WITH being the checkpoint's own behaviour -- but our openbind0
+trunk has never been verified against native's on a real input, and cannot be by
+any cell that exists.
+
+NEXT, and it is the same unrun gate as before: `real_trunk_parity.py` compares
+the trunk on a REAL input, which is the only regime where the OF3 family's cell
+has resolution. It needs an of3 equivalent of `native_trunk_dump.sh` (that one
+dumps protenix). Both checkpoints are on disk and `openfold3/run_openfold.py`
+has a CLI, but a native of3 fold needs GPU torch, which ~/venv does not have and
+must not get.

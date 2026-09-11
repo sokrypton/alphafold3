@@ -40,6 +40,19 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # numbering differs between models, and guessing it silently leaves parameters
 # at random init, which reads as a port bug. Borrowed from
 # tools/oracles/openfold3/cmp_trunk_parity.py, where the reasoning is recorded.
+# INPUT_SCALE -- the synthetic input's magnitude, shared by every adapter.
+#
+# The default 0.5 drives the OF3 family far outside its trained distribution:
+# after ONE block openfold3's single track reaches rms 16750, and at that
+# magnitude a 1e-6 input perturbation moves the output further than our port
+# does, so the cell grades FLOOR and verifies nothing. Scaling the input down
+# brings the stack back into range and gives the cell resolution.
+#
+# Added 2026-09-11 while asking whether openbind0's trunk is actually correct:
+# it folds ubiquitin to 10.4 A where openfold3 reaches 1.4 A, and BOTH of its
+# trunk cells were FLOOR -- the matrix could not answer the question.
+_SCALE = float(os.environ.get('INPUT_SCALE', 0.5))
+
 _SUFFIX = 'trunk_pairformer/pair_attention1/act_norm'
 
 _PROTENIX_CKPT = {
@@ -119,8 +132,8 @@ def native_protenix(model, n, mask, blocks=None):
   print('  checkpoint: %d blocks, c_z %d, %d heads' % (n_blocks, c_z, heads))
 
   rng = np.random.default_rng(0)
-  s = (rng.normal(size=(n, c_s)) * 0.5).astype(np.float32)
-  z = (rng.normal(size=(n, n, c_z)) * 0.5).astype(np.float32)
+  s = (rng.normal(size=(n, c_s)) * _SCALE).astype(np.float32)
+  z = (rng.normal(size=(n, n, c_z)) * _SCALE).astype(np.float32)
 
   net = PairformerStack(n_blocks=n_blocks, n_heads=heads, c_z=c_z, c_s=c_s,
                         hidden_scale_up=True)
@@ -190,8 +203,8 @@ def native_if2(model, n, mask, blocks=None):
         % (n_blocks, c_s, c_z, nh_single, nh_pair, c_pair_att, c_mul, trans_n))
 
   rng = np.random.default_rng(0)
-  s = (rng.normal(size=(n, c_s)) * 0.5).astype(np.float32)
-  z = (rng.normal(size=(n, n, c_z)) * 0.5).astype(np.float32)
+  s = (rng.normal(size=(n, c_s)) * _SCALE).astype(np.float32)
+  z = (rng.normal(size=(n, n, c_z)) * _SCALE).astype(np.float32)
 
   net = PairformerStack(c_s=c_s, c_z=c_z, c_hidden_mul=c_mul,
                         c_hidden_pair_att=c_pair_att, no_heads_pair=nh_pair,
@@ -342,8 +355,8 @@ def native_opendde(model, n, mask, blocks=None):
         '(hidden_scale_up %s)' % (n_blocks, c_z, c_s, heads, tri_hidden, hsu))
 
   rng = np.random.default_rng(0)
-  s = (rng.normal(size=(n, c_s)) * 0.5).astype(np.float32)
-  z = (rng.normal(size=(n, n, c_z)) * 0.5).astype(np.float32)
+  s = (rng.normal(size=(n, c_s)) * _SCALE).astype(np.float32)
+  z = (rng.normal(size=(n, n, c_z)) * _SCALE).astype(np.float32)
 
   net = PairformerStack(n_blocks=n_blocks, n_heads=heads, c_z=c_z, c_s=c_s,
                         hidden_scale_up=hsu)
@@ -400,8 +413,8 @@ def native_of3(model, n, mask, blocks=None):
         % (n_blocks, c_z, c_s, heads_bias))
 
   rng = np.random.default_rng(0)
-  s = (rng.normal(size=(n, c_s)) * 0.5).astype(np.float32)
-  z = (rng.normal(size=(n, n, c_z)) * 0.5).astype(np.float32)
+  s = (rng.normal(size=(n, c_s)) * _SCALE).astype(np.float32)
+  z = (rng.normal(size=(n, n, c_z)) * _SCALE).astype(np.float32)
 
   net = PairFormerStack(c_s=c_s, c_z=c_z, c_hidden_pair_bias=24,
                         no_heads_pair_bias=heads_bias, c_hidden_mul=c_z,
@@ -514,8 +527,8 @@ def native_rf3(model, n, mask, blocks=None):
   net.eval()
 
   rng = _np.random.default_rng(0)
-  s = (rng.normal(size=(n, c_s)) * 0.5).astype(_np.float32)
-  z = (rng.normal(size=(n, n, c_z)) * 0.5).astype(_np.float32)
+  s = (rng.normal(size=(n, c_s)) * _SCALE).astype(_np.float32)
+  z = (rng.normal(size=(n, n, c_z)) * _SCALE).astype(_np.float32)
 
   def run(dtype):
     with torch.no_grad():
