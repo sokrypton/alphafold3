@@ -139,6 +139,30 @@ Also note L6's status column is blind: it reports OK whenever a number was
 produced. A 10 A fold and a 1.5 A fold both read OK, which is how this survived
 until the numbers were read by hand.
 
+### The two protenix conventions are a SWEEP nobody has run (2026-09-11)
+
+Both faults behind protenix1's 9 A were INPUT conventions with all-green module
+gates, and both are the kind every family answers for itself:
+
+  * **self-MSA depth with no alignments.** AF3 hands a chain with no alignments
+    the query TWICE (a paired and an unpaired MSA, each beginning with it).
+    Measured so far: protenix emits **1** row (fixed), esmfold2 emits **1**
+    (fixed earlier), openfold3/openbind0 natively carry **2** and so match us.
+    UNCHECKED: `boltz2`, `intellifold2`, `opendde`, `rosettafold3`,
+    `alphafold3` itself. chai-1 is already settled ([[chai-msa-of-one]]).
+  * **what an EMPTY template slot contains, and what the embedder divides by.**
+    protenix fills its one empty template with the GAP restype and divides by
+    the padded slot count, so its term is never zero; Boltz averages over
+    PRESENT templates and contributes exactly zero. UNCHECKED for
+    `intellifold2`, `opendde`, `rosettafold3`, and for `boltz2` itself against
+    its own featuriser.
+
+Neither is visible to L0-L4 (the gates feed native's features), neither changes
+a weight, and each was worth 9 A on one target while leaving 6MRR flat -- so L5
+cannot see them either. The check is cheap per model now that the ladder exists:
+dump the native featuriser's `msa` and `template_aatype` for a no-alignment
+no-template input and compare shapes and uniques against ours. One command each.
+
 ### What is still open
 
   * **esmfold2's 2 BAD rows** are native's per-module bf16 in the confidence
@@ -1757,12 +1781,37 @@ CA.
 | `openbind0` | 14.309 | 2.352 | **0.445** | 2.407 | 1.641 | 1.776 | 1.315 |
 | `opendde` | 17.855 | 1.987 | 0.876 | 1.794 | 0.769 | 1.811 | 1.326 |
 | `openfold3` | 12.697 | 1.916 | 0.456 | 1.388 | 1.540 | 1.499 | 1.331 |
-| `protenix1` | 10.332 | 1.695 | 0.936 | 10.983 | 1.696 | 2.085 | 1.801 |
-| `protenix2` | 17.446 | 2.080 | 1.199 | 7.458 | 0.685 | 7.921 | 1.759 |
+| `protenix1` | 10.332 | 1.543 | **0.465** | **1.532** | 1.565 | 11.326 | 2.290 |
+| `protenix2` | 15.700 | 1.815 | **0.471** | 12.684 | 0.983 | **2.312** | 1.374 |
 | `rosettafold3` | 1.410 | 2.443 | 0.451 | 1.574 | 0.942 | 1.805 | **1.047** |
 
 (the eight esmfold2 rows are being re-measured after the atom-decoder fix; the
 pre-fix set is in the driver's own summary.tsv)
+
+**Three rows re-measured 2026-09-11 after the port fixes** (`openbind0`,
+`protenix1`, `protenix2`); the rest predate them. What the fixes did, with
+native in brackets where it was run:
+
+  * `openbind0` plain 5K9P 10.388 -> **2.407** [2.383] -- its end-node pair
+    bias was transposed (OF3 v0.5.0 against main's convention).
+  * `protenix1` plain 5K9P 10.983 -> **1.532** [1.855], 1STP BTN 0.917 ->
+    0.465 -- protenix's empty template carries the GAP restype and its
+    embedder divides by the padded slot count, and its self-MSA is one row.
+  * `protenix2`, same two fixes: 1STP 1.190 -> 0.471, ptm 5K9P 7.933 -> 2.312,
+    RNA 1.758 -> 1.374, DNA 2.068 -> 1.815, complex 17.572 -> 15.700 -- and
+    plain 5K9P 7.476 -> 12.684, which is OPEN. Its trunk is exact to 1e-7 at one
+    cycle with the fixes and worse without either, and native protenix2 scores
+    6.999 there itself, so the old 7.476 was a different wrong answer on a
+    weak-signal target rather than a better port.
+  * `protenix1` ptm 5K9P reads 11.326 and native protenix1 reads **11.771** --
+    the checkpoint fails phospho-ubiquitin; not ours. `protenix1` RNA 1.707 ->
+    2.290 against native's **2.440**: we were accidentally better while wrong.
+
+**The lesson this table now carries twice: every module gate for both models was
+corr 1.000000 the whole time.** L1-L4 feed each module NATIVE's features, so
+they cannot see a wrong INPUT convention. Only a native FOLD plus a real-input
+trunk ladder can -- see HOLES.md and [[real-input-parity-ladder]].
+
 
 Four things this says that no single-model run could:
 
