@@ -527,3 +527,46 @@ so this is a featurisation job and not a one-line branch. Two things follow:
   * [[multimer-parity-status]] records boltz2 templates on a complex as
     "partial" -- this is a candidate explanation, and it is testable by giving
     the gate a two-chain template.
+
+## esmfold2's confidence: the third rel_pos call site, and what is left
+
+`create_relative_encoding`'s chain-bucket gate has THREE call sites -- trunk,
+diffusion conditioning, confidence. The trunk's was fixed first (worth
+1.522 -> 0.719 A on esmfold2_lm600m), the diffusion's after it, and the
+confidence one was never wired: `confidence_head.py:117` called it without the
+flag, so ESMFold2's confidence head built its relative-position block with AF3's
+ENTITY convention while ESMFold2 keys it on same-CHAIN. Fixed 2026-09-11.
+
+    esmfold2       pae 5.68e-01 -> 4.31e-01   pde 2.75e-01 -> 2.67e-01
+    esmfold2_fast  pae 5.23e-01 -> 3.50e-01   pde 3.71e-01 -> 2.26e-01
+
+Right on principle and a real improvement, but NOT the whole gap. boltz2 shares
+the method and must not take the branch -- its checkpoint puts it on the entity
+convention -- so the branch reads CHAIN_BUCKET_ON_SAME_CHAIN rather than being
+keyed to the family.
+
+ELIMINATED for the remaining ~4e-01, all by measurement:
+
+  * the BIN CONVENTION. The dump carries native's OWN reduced `out.pae`
+    alongside `out.pae_logits`, so our bin centres can be checked against
+    native's rather than assumed: they agree to 4.62e-07 (pae) and 3.16e-07
+    (pde). The gate's usual "both sides use OUR bin centers so it cancels" is
+    for once verifiable, and it holds.
+  * the spurious boltz-only terms. Our shared `_boltz2_reembed` adds
+    `token_bonds_type_embed`, `contact_encoder`/`contact_fourier` and
+    `s_input_to_s`, which ESMFold2's head does not have -- and all four are
+    ZERO in its blob, so they contribute nothing.
+  * the learned distogram. `distogram_boundaries` IS converted (38 edges, rms
+    30.4, at the `confidence_head` scope) and `reembed_dist_bins` is 39, so the
+    binning is ESMFold2's own and not boltz2's.
+  * a BLOCKS sweep says nothing here and must not be read: this cell is
+    DUMP-DRIVEN, so native is fixed at full depth and BLOCKS truncates only our
+    side -- which is why the error grows as blocks are removed (3.68e+00 at
+    BLOCKS=0). The one-sided-truncation trap, in a gate where it cannot be
+    avoided.
+
+STILL OPEN, and still not "native's bf16 floor" -- that attribution was retracted
+on 2026-09-10 after BF16=all moved only the third digit. The untested
+possibility remains that native's own output is that noisy; it needs two dumps
+from ~/venv_esm and the spread between them, which is the same method
+[[esm-tower-numerical-modes]] used for the tower.

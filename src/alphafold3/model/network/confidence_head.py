@@ -114,8 +114,21 @@ class ConfidenceHead(hk.Module):
     explicitly did not wrap: a cyclic peptide's termini now read as adjacent
     here as they already did in the trunk.
     """
+    # THE THIRD CALL SITE OF THE SAME GATE, and the one that was still missing.
+    # The trunk's was fixed first (fbac0fc, worth 1.522 -> 0.719 A on
+    # esmfold2_lm600m) and the diffusion conditioning's after it; this one was
+    # never wired, so ESMFold2's confidence head built its relative-position
+    # block with AF3's ENTITY convention while ESMFold2 keys it on same-CHAIN.
+    # On a monomer that is not subtle -- every pair takes a different bucket.
+    #
+    # boltz2 shares this method and must NOT take the branch: its checkpoint's
+    # `fix_sym_check: True` puts it on the entity convention, which is why it
+    # left CHAIN_BUCKET_ON_SAME_CHAIN on 2026-09-10. Reading the list here keeps
+    # the two models' answers where the evidence for each of them lives.
     feat = featurization.create_relative_encoding(
-        seq_features=tf, max_relative_idx=32, max_relative_chain=2)
+        seq_features=tf, max_relative_idx=32, max_relative_chain=2,
+        chain_bucket_on_same_chain=(
+            self.global_config.model in model_config.CHAIN_BUCKET_ON_SAME_CHAIN))
     return hm.Linear(num_channels, name='rel_pos_project')(feat.astype(dtype))
 
   @hk.transparent
