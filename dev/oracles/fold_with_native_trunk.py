@@ -63,7 +63,14 @@ rmsds = []
 for si in range(pos.shape[0]):
   a, b = [], []
   for t in range(pos.shape[1]):
-    ri = int(res[t]) + 1
+    # NO +1. Our `residue_index` is already the reference's numbering for a
+    # plain protein chain, and the +1 that stood here shifted every residue by
+    # one: on a compact 76-mer that costs ~2-3 A after superposition, which is
+    # indistinguishable from a bad fold. The tell was matching 75 CA where the
+    # native scorer matched 76. It made protenix1's with-MSA fold read 4.02
+    # against native's 1.87 when the truth is 1.82, and sent me through the
+    # whole trunk-and-denoiser ladder looking for a gap that was not there.
+    ri = int(res[t])
     if ri in ref and mask[t][1]:
       a.append(pos[si, t, 1]); b.append(ref[ri])
   rmsds.append(mc.kabsch(np.array(a), np.array(b))[0])

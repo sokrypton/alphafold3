@@ -970,6 +970,73 @@ does, we reproduce), and for boltz2 (ONE slot, `template_mask` all zero, so its
 present-weighted mean contributes exactly zero -- ours too). `intellifold2`,
 `opendde` and `rosettafold3` have NOT been checked.
 
+## YES, an MSA stabilises it -- and with one we MATCH native (2026-09-11)
+
+The bistability above is a single-sequence effect on this target. Given a real
+MSA it disappears, on both sides, and the port agrees with native:
+
+| protenix1, plain 5K9P | ours | native |
+|---|---|---|
+| single sequence | 1.53 **or** 11.4 (flips per process) | 1.85 **or** 10.1 (flips per process) |
+| + a 4-row MSA | **1.83** (1.83-2.35; stable over 3 seeds and 4 processes) | **1.87** (1.87-2.19; stable) |
+
+The MSA is REAL, not synthesised: three distinct ubiquitin sequences pulled out
+of the bundled mini-databases (`uniref90__subsampled_1000.fasta`'s polyubiquitin
+repeats and `pdb_seqres`'s 1otr_B), 1-3 differences from the query each. Shallow
+and low-diversity, so it adds little evolutionary signal -- and it still removes
+the flip, which says the flip is about how weak the conditioning is, not about
+MSA information as such.
+
+Bistability is also NOT a property of single-sequence input in general: 1STP
+folded from its sequence alone is stable to seven digits across processes, and
+6MRR is stable for everyone. It is this target, for this lineage.
+
+The trunk and the denoiser agree with native throughout, on the SAME MSA:
+
+    trunk, 1 cycle     corr 0.99999906      trunk, 10 cycles  corr 0.99999968
+    denoise step 1     0.0201 A/atom (sigma 4608)
+    denoise step 100   0.0079 A/atom (sigma 106)
+    denoise step 190   0.0007 A/atom (sigma ~0)
+
+and every per-atom feature is identical except `ref_pos`, whose conformer
+difference -- the one PARITY.md's featurisation diff has carried as an open
+"real input difference" since 2026-09-08 -- prices at **0.01 A** on this fold
+(substituting native's own ref_pos moves the result from 4.026 to 4.036).
+
+### The 2.3 A "gap" I chased for an hour was MY SCORER
+
+Before the numbers above, the with-MSA case read 4.02 for us against native's
+1.87, stable on both sides, and I went down the whole ladder looking for it:
+MSA features (identical), trunk (1e-6), atom features (identical), sampler
+constants (identical), the denoise step at three sigmas (0.0007-0.02 A/atom),
+protenix's per-forward random MSA subsampling (real -- `sample_indices` draws
+randint(1, n) rows at INFERENCE, so its trunk is stochastic per pass; patched
+off for the comparison), three seeds, four processes.
+
+All of that evidence said there was no gap. The fold number was the outlier, and
+it was wrong: my scoring script mapped our `residue_index` to the reference with
+a **+1**. Our residue_index is already the reference's numbering, so every
+residue was compared against its neighbour -- on a compact 76-mer that is ~2 A
+after superposition, and it reads exactly like a bad fold (median per-residue
+deviation 3.8 A, and a confident pLDDT of 90 next to it). With the offset
+removed: 1.83.
+
+**The tell was in the output from the first run: 75 CA matched where the native
+scorer matched 76.** A count that does not match the reference is a mapping
+error until proven otherwise -- this is the second time this project has been
+bitten by exactly this class (PARITY.md records matching by POSITION scoring
+ubiquitin at 12.4 A on every model), and the first time it cost an hour of
+ladder-climbing instead of being caught by the count.
+
+`dev/oracles/fold_from_json.py` now prints an OFFSET SWEEP (-1, 0, +1, +2) with
+every score, so the mapping has to declare itself. The same +1 was in
+`fold_with_native_trunk.py` and is fixed there too; its injection numbers from
+earlier today were inflated by it (openbind0 INJECT=pair read 4.83 and is really
+2.47, with INJECT=none at 2.409). Those were only ever used as a hedge ("a
+foreign representation costs accuracy of its own"), and the conclusion they
+supported was carried by the sub-module measurement instead -- but the numbers
+were wrong and are corrected here.
+
 ## CORRECTION 2026-09-11: plain 5K9P is BISTABLE, and two of my attributions were draws
 
 The fold RMSD on this target is a PER-PROCESS DRAW from two basins, for both

@@ -33,10 +33,19 @@ from alphafold3.model.network import evoformer as ev
 from alphafold3.model.components import utils
 
 model, npz = sys.argv[1], sys.argv[2]
-seq = sys.argv[3] if len(sys.argv) > 3 else (
+# Third argument: a SEQUENCE, or a fold-input JSON (so an MSA can be supplied --
+# with one, the MSA module does real work and a featurisation difference in it
+# actually shows).
+_arg3 = sys.argv[3] if len(sys.argv) > 3 else None
+_chains = None
+if _arg3 and _arg3.endswith('.json'):
+  from alphafold3.common import folding_input
+  _chains = list(folding_input.Input.from_json(open(_arg3).read()).chains)
+  _arg3 = _chains[0].sequence
+seq = _arg3 if _arg3 else (
     'MQIFVKTLTGKTITLEVEPSDTIENVKAKIQDKEGIPPDQQRLIFAGKQLEDGRTLSDYNIQKESTLHLVLRLRGG')
 N_PASSES = int(os.environ.get('PASSES', 1))
-batch, cfg, model_dir = fold_check._fold_setup(model, seq, None)
+batch, cfg, model_dir = fold_check._fold_setup(model, seq, None, chains=_chains)
 # BF16 mirrors fold_check's knob, because the FOLD path runs the trunk in
 # bfloat16 by default while this gate wants fp32 -- and for protenix1 that
 # difference decides the basin (see HOLES.md).

@@ -113,6 +113,23 @@ def hooked(self, *a, **kw):
   caught['z_trunk'] = _np(z)
   batch = kw.get('input_feature_dict') or (a[0] if a else None)
   if isinstance(batch, dict):
+    # every MSA-side feature too: with a real MSA the MSA module does real work,
+    # and its inputs are where a featurisation difference shows
+    # the ATOM-level features too: with the trunk matching to 1e-6, what the
+    # DIFFUSION is fed is the only thing left, and `ref_pos` is known to differ
+    # (our conformers are a different torsion draw -- see PARITY.md's
+    # featurisation diff)
+    for k in list(batch):
+      if any(t in k for t in ('ref_', 'atom_', 'is_', 'residue_index',
+                              'asym_id', 'token_index', 'restype')):
+        v = batch[k]
+        if torch.is_tensor(v):
+          caught['batch_' + k] = _np(v)
+    for k in list(batch):
+      if any(t in k for t in ('msa', 'profile', 'deletion', 'paired')):
+        v = batch[k]
+        if torch.is_tensor(v):
+          caught['batch_' + k] = _np(v)
     for k in ('template_aatype', 'template_distogram', 'template_unit_vector',
               'template_pseudo_beta_mask', 'template_backbone_frame_mask',
               'token_index', 'residue_index', 'asym_id', 'entity_id', 'sym_id',
@@ -122,10 +139,60 @@ def hooked(self, *a, **kw):
   np.savez(DUMP, **caught)
   print('TRUNK DUMPED', {k: getattr(v, 'shape', v) for k, v in caught.items()},
         flush=True)
+  if os.environ.get('DENOISE_STEP'):
+    _hook_denoise(self)          # let the job run on into the sampler
+    return s_inputs, s, z
   raise SystemExit(0)
 
 
+# DENOISE_STEP=1: capture the FIRST denoise call of the real sampler -- the
+# noisy coordinates it is given, the noise level, and what it returns -- so OUR
+# diffusion head can be run on the SAME input from OUR OWN features. The L3 gate
+# feeds our denoiser NATIVE's conditioning, so it cannot see a difference in the
+# conditioning we build ourselves.
+if os.environ.get('DENOISE_STEP'):
+  _dm_calls = {'n': 0}
+
+  def _hook_denoise(self):
+    mod = self.diffusion_module
+    orig = mod.forward
+
+    want = int(os.environ.get('DENOISE_STEP', '1')) - 1   # 1-based, as read
+
+    def f(*a, **kw):
+      out = orig(*a, **kw)
+      if _dm_calls['n'] == want:
+        for k, v in list(kw.items()):
+          if torch.is_tensor(v) and v.numel() < 4_000_000:
+            caught['denoise_in_' + k] = _np(v)
+        for i, v in enumerate(a):
+          if torch.is_tensor(v) and v.numel() < 4_000_000:
+            caught['denoise_in_arg%d' % i] = _np(v)
+        caught['denoise_out'] = _np(out if torch.is_tensor(out) else out[0])
+        np.savez(DUMP, **caught)
+        print('DENOISE STEP DUMPED', sorted(k for k in caught if 'denoise' in k),
+              flush=True)
+        raise SystemExit(0)
+      _dm_calls['n'] += 1
+      return out
+    mod.forward = f
+
 _P.Protenix.get_pairformer_output = hooked
+
+# MSA_DETERMINISTIC=1: protenix's MSAModule RANDOMLY SUBSAMPLES its rows on every
+# forward pass, at INFERENCE too -- `sample_indices` draws
+# sample_size ~ randint(1, n) and then randperm(n)[:sample_size] (model/utils.py,
+# strategy "random"). So with a real MSA its trunk is stochastic per pass and per
+# recycle, and no deterministic port can match one of its passes. This patch
+# makes it take every row in order, which is the only way to compare like with
+# like.
+if os.environ.get('MSA_DETERMINISTIC'):
+  import torch as _t
+
+  from protenix.model import utils as _pxu
+  _pxu.sample_indices = lambda n, device=None, lower_bound=1, strategy='random': (
+      _t.arange(n, device=device))
+  print('NATIVE MSA SUBSAMPLING DISABLED: every row, in order')
 
 sys.argv = ['inference',
             '--input_json_path', '%s/%s.json' % (JSONDIR, CASE),
@@ -133,7 +200,11 @@ sys.argv = ['inference',
             '--load_checkpoint_path', CKPT,
             '--model_name', MODEL,
             '--seeds', SEED,
-            '--use_msa', 'false',
+            # USE_MSA: protenix reads unpairedMsa from the json ONLY with this
+            # true. Left false while an MSA was supplied in the json, native
+            # silently folded from the single sequence -- and its batch said so
+            # (`msa` at (1, 76)), which is the only reason it was caught.
+            '--use_msa', os.environ.get('USE_MSA', 'false'),
             '--triangle_multiplicative', 'torch',
             '--triangle_attention', 'torch',
             '--sample_diffusion.N_step', '200',

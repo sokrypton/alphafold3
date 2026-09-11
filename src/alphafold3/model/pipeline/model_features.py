@@ -339,9 +339,18 @@ def _dedupe_self_msa(batch):
   difference. The pair-weighted averaging and the row transition are what make
   it depth-sensitive.
 
-  Only the leading duplicate is dropped, and only when the rows are actually
-  equal, so a real alignment whose first row happens to be the query is left
-  alone.
+  IT FIRES ONLY ON A SELF-MSA -- one where EVERY live row is the query. With a
+  real alignment the duplicate is NOT ours to drop: protenix builds a paired and
+  an unpaired MSA exactly as AF3 does, so its own batch for a 4-row a3m carries
+  FIVE rows (paired query, unpaired query, three homologs). The depth-1
+  behaviour these vendors show is the NO-ALIGNMENT case, where their pipelines
+  skip the MSA path and synthesise a single dummy row.
+
+  Getting that wrong is expensive and quiet: dropping the duplicate alongside a
+  real MSA cost 2.3 A on ubiquitin (ours 4.024 against native's 1.704, both
+  stable across processes), and the earlier version of this docstring asserted
+  the opposite -- "a real alignment whose first row happens to be the query is
+  left alone" -- while the code dropped it anyway.
   """
   msa = np.asarray(batch['msa'])
   mask = np.asarray(batch['msa_mask'])
@@ -351,6 +360,8 @@ def _dedupe_self_msa(batch):
   a, b = live[0], live[1]
   if not np.array_equal(msa[a], msa[b]):
     return batch
+  if not all(np.array_equal(msa[a], msa[i]) for i in live[1:]):
+    return batch                      # a real alignment: not a self-MSA
   m = mask.copy()
   m[b] = False
   batch['msa_mask'] = m

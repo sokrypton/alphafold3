@@ -58,13 +58,32 @@ _esm.FastaBatchedDataset = object
 _esm.pretrained = object
 sys.modules.setdefault('esm', _esm)
 
+# MSA_DETERMINISTIC=1: protenix's MSAModule RANDOMLY SUBSAMPLES its rows on every
+# forward pass, at INFERENCE too -- `sample_indices` draws
+# sample_size ~ randint(1, n) and then randperm(n)[:sample_size] (model/utils.py,
+# strategy "random"). So with a real MSA its trunk is stochastic per pass and per
+# recycle, and no deterministic port can match one of its passes. This patch
+# makes it take every row in order, which is the only way to compare like with
+# like.
+if os.environ.get('MSA_DETERMINISTIC'):
+  import torch as _t
+
+  from protenix.model import utils as _pxu
+  _pxu.sample_indices = lambda n, device=None, lower_bound=1, strategy='random': (
+      _t.arange(n, device=device))
+  print('NATIVE MSA SUBSAMPLING DISABLED: every row, in order')
+
 sys.argv = ['inference',
             '--input_json_path', '%s/%s.json' % (JSONDIR, CASE),
             '--dump_dir', DUMP,
             '--load_checkpoint_path', CKPT,
             '--model_name', MODEL,
             '--seeds', SEED,
-            '--use_msa', 'false',
+            # USE_MSA: protenix reads unpairedMsa from the json ONLY with this
+            # true. Left false while an MSA was supplied in the json, native
+            # silently folded from the single sequence -- and its batch said so
+            # (`msa` at (1, 76)), which is the only reason it was caught.
+            '--use_msa', os.environ.get('USE_MSA', 'false'),
             '--triangle_multiplicative', 'torch',
             '--triangle_attention', 'torch',
             '--sample_diffusion.N_sample', NSAMPLE,
