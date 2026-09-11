@@ -1,101 +1,91 @@
 # STATE OF PLAY -- 2026-09-10
 
-## L0 THROUGH L1d ARE AT PARITY (2026-09-10)
+## L0 THROUGH L4, ALL SEVEN LEVELS RUN (2026-09-10/11)
 
-Six levels closed, one cell at a time. The run was launched as a full matrix and
-then stopped after L1 on purpose, to debug rather than accumulate. Its
-`MODULESDONE`/`FULLDONE` markers in the driver log are FALSE -- they printed
-because killing the driver let the enclosing shell chain finish. Trust the
-per-cell logs and the audit.
-
-    dev/oracles/parity_runs/2026-09-10-full/     L0, L1, L1i, L1b, L1t, L1d
+    dev/oracles/parity_runs/2026-09-10-full/
 
     ~/venv/bin/python dev/oracles/parity_audit.py dev/oracles/parity_runs/2026-09-10-full
-    -> 96 comparisons in 64 logs;  PARITY=86  FLOOR=10   no CLOSE, no LOOSE, no BAD
+    -> 274 comparisons in 131 logs
+       PARITY=237  CLOSE=6  FLOOR=17  LOOSE=6  BAD=8
     ~/venv/bin/python dev/oracles/gate_applies.py <gate> <model>     # hole or n/a
 
-No SKIP, FAIL or WARN anywhere in the summary either: every cell that applies,
-ran. To carry on:
+Every module level has now been driven to completion at least once. L5/L6 (the
+fold levels) have NOT been run in this matrix.
 
     FORCE=1 LOGDIR=$PWD/dev/oracles/parity_runs/2026-09-10-full \
-      bash dev/oracles/run_all_parity.sh L2 L3 L4
-    FORCE=1 LOGDIR=... bash dev/oracles/run_all_parity.sh L5 L6
+      bash dev/oracles/run_all_parity.sh L5 L6
 
-### The findings, and what kind each was
+### Six port bugs, four oracle bugs, one artifact change
 
-Two port bugs, three oracle bugs, one shipped-artifact change -- and the two
-harness fixes mattered more than any single cell.
+  PORT  rosettafold3  tri-mul divides by float(L) before the centre LayerNorm;
+        observable only through the norm's epsilon.  L1.trunk 1.24e-01 ->
+        5.25e-03.  Fold-neutral.
+  PORT  rosettafold3  OPM applies its output bias BEFORE the divide; ours
+        divided the bias too.  L1b.msa 1.84e-01 -> 2.52e-05.
+  PORT  esmfold2      our featurisation fed the MSA encoder the query TWICE.
+        L1.trunk_ref 5.59e-03 -> 3.00e-06.  6MRR neutral, 1QYS 0.085 A worse.
+  PORT  opendde       the last model on the narrow 831-wide single_cond
+        LayerNorm.  L2.conditioning 1.05e-02 -> 4.86e-06.
+  PORT  boltz2        the relative-CHAIN bucket -- see below.  THE BIG ONE.
+  PORT  esmfold2      the confidence head was the THIRD rel_pos call site and
+        was never wired.  pae 5.68e-01 -> 4.31e-01 (partial).
+  ORACLE  intellifold2  bf16 blob vs fp32 native, in the trunk AND msa gates.
+  ORACLE  boltz2      three gates built native's encoder with CLASS DEFAULTS.
+  ORACLE  all eight   `p_atom_pair` compared PADDED window slots; the gate
+        already printed the valid-slot answer and nothing read it.
+  ARTIFACT  intellifold2  template embedder leaves the bf16 region (7.9 MB).
 
-  PORT    rosettafold3  triangle multiplication divides by float(L) before the
-          centre LayerNorm, observable only through the norm's epsilon.
-          L1.trunk z 1.24e-01 -> 5.25e-03. Fold-neutral on real input.
-  PORT    rosettafold3  outer product applies its output bias BEFORE the divide;
-          ours divided the bias too, contributing bias/8 at depth 8. The error
-          was a per-channel constant matching -0.88 * proj_out.bias.
-          L1b.msa 1.84e-01 -> 2.52e-05.
-  PORT    esmfold2      our featurisation fed the MSA encoder the query TWICE
-          (AF3 concatenates a paired and an unpaired MSA, each starting with the
-          query); native emits depth 1. L1.trunk_ref 5.59e-03 -> 3.00e-06.
-          6MRR neutral, 1QYS 0.085 A WORSE -- kept because native's input is the
-          standard, and the number is recorded rather than hidden.
-  ORACLE  intellifold2  the trunk gate compared if2's deliberately-bf16 blob
-          against native's fp32 checkpoint. L1.trunk 9.60e+00 -> 8.96e-04.
-  ORACLE  intellifold2  the same exposure in the msa gate, 1.05e-01 -> 3.39e-05.
-  ARTIFACT intellifold2 the template embedder LEAVES the bf16 region (7.9 MB of
-          the 1284 MB the policy saves). It could not be fixed gate-side:
-          rounding native made it worse, because the converter rounds AFTER a
-          transform that does not commute. L1t.template 1.57e-01 -> 7.19e-05.
-          The published HF copy is behind by those 7.9 MB -- not republished.
+### The one that matters most: boltz2's chain bucket
 
-### The two harness fixes
+A port bug and an oracle bug CANCELLING. boltz's encoder sentinels the
+chain-offset bucket on `~b_same_entity` when `fix_sym_check` is set and on
+`b_same_chain` when it is not -- that flag IS the convention -- and it defaults
+to False in the class while this checkpoint carries True. Our port had boltz2 on
+the chain bucket; three gates built native at the default. The two agreed
+wherever our code was wrong and disagreed where it was right, so L1i read
+2.77e-06 while L4 read pae 1.88e+00 and neither meant what it looked like.
 
-  * **parity_audit could not read 36 of its own 80 comparisons.** The regex
-    required `max|d|` and excluded '>' from the name, so `msa -> pair`,
-    `relerr`-only rows and nameless rows all silently vanished -- every L1b cell
-    plus L1.trunk_ref, esmfold2's ONLY trunk gate. Four BAD cells were hiding
-    there. Unparsed `corr` lines are now reported and make the tool exit
-    non-zero.
-  * **FLOOR: a cell can have no resolution left.** `trunk_parity FLOOR=<eps>`
-    perturbs the gate's input and reports how far its own output moves; a row at
-    or below that grades FLOOR, not BAD. It is not a pass -- it says the cell
-    cannot answer. The exemption must be EARNED by measuring, so a cell with no
-    floor row is still graded on its number. This is what separated rf3's real
-    /L bug from three genuine noise cells with an identical symptom.
-    `NATIVE_F64=1` is the companion: it bounds the REFERENCE's own arithmetic
-    noise, and is what ruled out ill-conditioning for rf3 (flat at 3e-06 across
-    all 48 blocks while ours climbed to 3e-02).
+    L1i z_init   6.50e-01 -> 2.77e-06      L2 pair_cond  1.71e+00 -> 2.08e-06
+    L4 full_pae  1.88e+00 -> 2.50e-06      L3 denoise    0.3248 -> 0.2072 A/atom
+    6MRR fold    mean 0.780 -> 0.542, the 1.4-1.5 A collapsed samples GONE
 
-All ten FLOOR rows are the trunk pairformer on synthetic input -- eight at 48
-blocks and, for the OF3 family, two at ONE block, where openfold3's single track
-already reaches rms 16750 from an N(0, 0.5) input.
+That fold number is the anomaly this file carried as open -- "a downstream fold
+anomaly with a provably exact trunk". The trunk was provably exact against an
+oracle built with the same wrong flag. **Read vendor behaviour flags from the
+CHECKPOINT, never from class defaults** ([[boltz2-relpos-entity-bucket]]).
 
-### Two things NOT closed, recorded in HOLES.md
+### Three harness capabilities that outlast the findings
 
-  * `L1b.msa_nonuniform` is a silent duplicate of the uniform cell for 13 of 14
-    models: `NONUNIFORM=1` is read only inside boltz2's adapter. It reports OK
-    while testing nothing, so `gate_applies` cannot see it. rf3's OPM is
-    therefore verified only for a uniform mask -- and it takes NO mask argument
-    and divides by the raw padded row count, so this is a live question.
-  * `real_trunk_parity.py` exists, is documented, has two native dumps beside
-    it, and the driver never runs it. It covers the input embedder, the trunk on
-    a REAL input, and the recycling loop -- the three things nothing else does,
-    and exactly what would verify the two OF3 cells the synthetic gate cannot.
+  * **parity_audit could not read 36 of its own 80 comparisons** -- every L1b
+    cell plus L1.trunk_ref, esmfold2's ONLY trunk gate. Unparsed `corr` lines
+    are now reported and exit non-zero.
+  * **FLOOR** -- a cell can have no resolution left. `trunk_parity`,
+    `diffusion_parity`, `confidence_parity` and the boltz2 denoise gate all
+    take `FLOOR=<eps>`; a row at or below its own measured floor grades FLOOR,
+    not BAD. It is NOT a pass, and it must be EARNED by measuring.
+    `NATIVE_F64=1` is the companion that bounds the REFERENCE's own noise.
+  * **`[superseded by X]`** -- a gate can tag a comparison it makes for
+    diagnosis, and the audit skips it only when X is present and graded.
 
-### The localisation ladder that found all three port bugs
+### What is still open
 
-Each rung kills one explanation. Reach for it before reading source:
-
-    per block / per sub-module, on NATIVE's own input   nothing compounds
-    -> FLOOR: perturb the input, move our own output    is the cell resolvable?
-    -> NATIVE_F64: the reference against itself         is it ill-conditioned?
-    -> our block k-1 / k / k+1                          is it an index shift?
-    -> sub-module by sub-module                          which module?
-    -> feed the reference OUR input                      is it an input diff?
-    -> the line
-
-The last rung matters: two of today's five findings were the harness feeding the
-two sides different things, and one of those looked exactly like a port bug
-until the reference was handed our own input.
+  * **esmfold2 confidence, 8 BAD rows** (pae 4.31e-01). The "native's bf16
+    floor" attribution is RETRACTED -- BF16=all moves the third digit. Bin
+    convention, the boltz-only terms and the learned distogram are all
+    eliminated by measurement. The untested possibility is that NATIVE's own
+    output is that noisy: two dumps from ~/venv_esm and the spread between them.
+  * **boltz2 denoise 0.2072 A/atom** (was 0.3248), floor 4.22e-06, so real. Its
+    gate's dump holds a SINGLE sampler step at sigma 4608.
+  * **protenix lineage, 6 CLOSE + 3 LOOSE.** Probably native's own float32: the
+    confidence stack is exact and amplifies 7x, and native's own fp32-vs-fp64
+    noise through the embedding is the same order as the whole gap. Not
+    established -- the apples-to-apples fp64 test dies on a dtype in protenix's
+    LinearNoBias.
+  * **chai1 confidence inject, 2 LOOSE** -- untouched this session.
+  * Three things no cell covers, all recorded in HOLES.md: `L1b.msa_nonuniform`
+    is a silent duplicate for 13 of 14 models; `real_trunk_parity.py` exists and
+    the driver never runs it; boltz2's template module is V2 and we implement V1
+    (inert on one chain, live on a complex).
 
 ## HOLES: 66 -> 0
 
