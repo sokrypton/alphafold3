@@ -754,3 +754,46 @@ audit grades. Three explanations tested and rejected:
 NEXT: the sub-module diff inside one confidence pairformer block -- the two
 triangle multiplications and the transition -- which is the ladder that found
 rf3's `/L`. Native's head replays bit-exactly, so each can be hooked.
+
+### ...and the last of it is native's PER-MODULE bf16, measured not asserted
+
+The sub-module subtraction inside confidence block 0, on native's own captured
+inputs (the block runs them SEQUENTIALLY, so each input is rebuilt from native's
+preceding output):
+
+    tri_mul_out       rms(d)/rms 4.99e-03   ratio 1.0003
+    tri_mul_in        rms(d)/rms 4.87e-03   ratio 0.9999
+    pair_transition   rms(d)/rms 2.90e-03   ratio 1.0001
+
+No outlier: a uniform ~0.5% across three different modules whose weights are
+BIT-IDENTICAL to native's (LayerNorm scale and offset, `transition1 == w12.T`,
+`transition2 == w3.T`, and the SwiGLU halves are not swapped -- the swapped
+comparison reads 3.6). Exact weights, exact input, 0.5% out: arithmetic.
+
+And the arithmetic is native's PRECISION, by a test that does not depend on
+reading anything:
+
+    b0.in               bf16 round-trip 2.30e-02   -> fp32
+    b0.tri_mul_out      bf16 round-trip 0.00e+00   -> BF16
+    b0.tri_mul_in       bf16 round-trip 0.00e+00   -> BF16
+    b0.pair_transition  bf16 round-trip 5.96e-02   -> fp32
+
+Native's two triangle multiplications emit exactly-bf16 tensors while the block
+input and the transition do not, so autocast covers those modules and not the
+rest. We run all of it fp32.
+
+TWO THINGS THIS IS NOT. It is not fixed by rounding our output to bf16
+(4.99e-03 -> 5.25e-03): bf16 ACCUMULATION is not bf16 rounding of an fp32
+result. And it is not fixed by the gate's global `BF16=all` (full_pae
+2.62e-02 -> 2.63e-02), because that casts everything while native casts two
+modules -- a global knob cannot express a per-module autocast.
+
+So esmfold2's remaining L4 residual is a precision difference in the confidence
+pairformer, compounding over four blocks to ~2.6e-02 on the pae expectation.
+This is a much better-founded claim than the "native's bf16 floor" retracted on
+2026-09-10: that one asserted a precision limit on OUR side without measuring,
+and this one is native's own tensors testifying to their dtype.
+
+Closing it properly would need our tri_mul to run in bf16 for this family
+alone -- a per-module precision knob the graph does not have. Worth it only if
+these two rows are worth a new global_config axis.
