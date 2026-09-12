@@ -758,10 +758,6 @@ def main(argv=None):
   # native's asym_id describe the SAME two chains.
   asym = np.asarray(fb.token_features.asym_id).astype(np.int64)
   multichain = (asym[:, None] == asym[None, :]).astype(np.float32)
-  if os.environ.get('TMPL_MC') == 'ones':
-    # OUR side stops masking cross-chain template pairs. If the gap closes, the
-    # two sides disagree about whether a template attends ACROSS chains.
-    multichain = np.ones_like(multichain)
 
   # ONE template on BOTH sides. The batch pads to 4 template slots; our module
   # aggregates over all of them while native loops over exactly the ones it is

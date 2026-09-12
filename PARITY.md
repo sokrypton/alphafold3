@@ -1,3 +1,21 @@
+# STATE OF PLAY -- 2026-09-13
+
+    dev/oracles/parity_runs/2026-09-13-full/     L0-L6 including the new L1x
+
+    ~/venv/bin/python dev/oracles/parity_audit.py dev/oracles/parity_runs/2026-09-13-full
+    -> PARITY=262  CLOSE=10  FLOOR=17  LOOSE=5  BAD=0
+
+    277 OK   2 SKIP   73 N/A   0 FAIL
+
+Every level runs, including L6 (the modality screens) and the new L1x
+(cross-chain). The terminal-drop regression below is fixed and the cells that
+read 1.21 A per-atom now read 0.0002 (openfold3) and 0.0010 (openbind0).
+
+**This is the state to keep, not to extend.** The gates found their bugs; the
+remaining risk is the ones we have quietly breaking, which is what comparing
+audit classifications BETWEEN runs catches -- and it is how the regression below
+was found, since every one of those 14 cells was recorded OK by its own gate.
+
 # STATE OF PLAY -- 2026-09-12
 
     dev/oracles/parity_runs/2026-09-12/           full L0-L6 (256 OK, 0 FAIL)
