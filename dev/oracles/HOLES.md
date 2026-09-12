@@ -970,6 +970,47 @@ does, we reproduce), and for boltz2 (ONE slot, `template_mask` all zero, so its
 present-weighted mean contributes exactly zero -- ours too). `intellifold2`,
 `opendde` and `rosettafold3` have NOT been checked.
 
+## The empty-template convention, now GATED for all five (2026-09-12)
+
+The template half of the sweep was settled by reading each vendor's code. That
+was the weakest evidence in the whole protenix episode -- opendde's fix rested on
+it -- so `template_parity.py` grew an `EMPTY=1` mode and it is now measured. The
+mode builds the batch with NO template at all (so each slot carries whatever the
+vendor's convention puts there) instead of zeroing a self-template's coordinates,
+which would leave the QUERY's restypes in slot 0 and test nothing.
+
+| model | empty slot | native vs ours, no template supplied |
+|---|---|---|
+| `protenix1` | slot 0 GAP, 1-3 zero | **corr 1.000000**, term rms 17.10 |
+| `opendde` | ALL FOUR gap | **corr 1.000000**, term rms 6.62 |
+| `intellifold2` | zeros | **corr 1.000000**, term rms 9.46 |
+| `rosettafold3` | zeros (single unconditional pass) | **corr 1.000000**, term rms 17.66 |
+| `boltz2` | zeros, and MASKED | **both exactly zero** |
+
+So opendde's gap-restype fix is no longer a code reading -- it is an activation
+comparison, and so is the DIVISOR: aggregating four identical empty slots equals
+the single-slot result to max|d| 6e-05, which is what `sum / slot count` means
+and what would fail loudly if either side divided by the number of PRESENT
+templates.
+
+**boltz2 is the one vendor that contributes nothing, and it is worth being
+precise about why.** Both its TemplateModule and TemplateV2Module do
+`u = (v * template_mask).sum(dim=1) / num_templates.clamp(min=1)` -- the
+per-slot output is MASKED before the average, so an absent template contributes
+exactly zero even though the Z-dependent half was computed. Every other vendor
+here divides by the slot count without masking, which is why their term survives.
+Its checkpoint also declares `use_templates=True`, so the module runs on every
+forward regardless; it just returns zero.
+
+**One harness fault found on the way, and it read exactly like a port bug.** The
+first EMPTY run reported boltz2 native at rms 2.180 against our 0 -- a
+protenix-shaped finding. It was `native_boltz2` hardcoding
+`'template_mask': torch.ones(1, 1, N)`, i.e. telling boltz an all-zero template
+was PRESENT. The mask is now derived from the features
+(`(atom_mask.sum(-1) > 0)`), which is all-ones with a real template, so the
+existing gate is unchanged: boltz2, intellifold2 and opendde all still read corr
+1.000000 there.
+
 ## An external report on our opendde path: 2 of 3 confirmed (2026-09-11)
 
 From chlee19990109-cloud, whose own Protenix port ([[teammate-protenix-port]])

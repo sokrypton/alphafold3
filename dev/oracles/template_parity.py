@@ -326,7 +326,12 @@ def native_boltz2(model, feats, z, pair_mask, hidden_scale_up):
       'template_cb': t(feats['cb'])[None][None],
       'template_ca': t(ca)[None][None],
       'template_mask_cb': t(feats['cb_mask'])[None][None],
-      'template_mask': torch.ones(1, 1, N),
+      # DERIVED, not assumed. Boltz masks its per-template output with
+      # `feats["template_mask"].any(dim=2)` before averaging, so an all-ones mask
+      # tells it an empty template is PRESENT -- which made the EMPTY gate read
+      # rms 2.18 for native against our 0, and that was the harness, not a port
+      # difference. With a real template this is all-ones anyway.
+      'template_mask': t((msk.sum(-1) > 0).astype(np.float32))[None][None],
   }
   with torch.no_grad():
     out = net(t(z)[None], fd, t(pair_mask)[None])
@@ -639,7 +644,33 @@ def main(argv=None):
   covered = int((np.asarray(templates.atom_mask).sum(-1) > 0).sum())
   print('  %d template(s), %d tokens, %d covered residues'
         % (n_tmpl, n_tok, covered))
-  if not covered:
+  # EMPTY=1: the NO-TEMPLATE case, which is the one every fold in this repo
+  # actually runs and the one nothing gated. It is not an all-zero comparison:
+  # protenix, opendde and intellifold2 all keep a Z-DEPENDENT half
+  # (`linear_z(layer_norm_z(z))`, summed over the padded slots and divided by
+  # the SLOT count), and rf3 runs its single pass unconditionally, so the term
+  # is live with no template at all. Dropping it cost protenix1 9 A on
+  # ubiquitin. What differs per vendor is the empty slot's RESTYPE -- protenix
+  # fills the first slot with GAP, opendde fills all four, intellifold2
+  # deliberately uses 0 -- and the featuriser knob `empty_template_gap` is what
+  # this checks.
+  empty = bool(os.environ.get('EMPTY'))
+  if empty:
+    # Take the TRUE empty slots -- re-featurise with no template at all, so the
+    # slot carries whatever the vendor's convention puts there (protenix and
+    # opendde: the GAP restype; intellifold2, rf3 and boltz2: zeros). Zeroing a
+    # self-template's coordinates instead would leave the QUERY's restypes in
+    # slot 0 and test nothing about the convention.
+    e_batch, _, _ = fold_check._fold_setup(args.model, seq, args.model_dir)
+    templates = feat_batch.Batch.from_data_dict(e_batch).templates
+    n_tmpl = np.asarray(templates.aatype).shape[0]
+    covered = 0
+    print('  EMPTY: no template supplied; %d slots, aatype per slot %s, any '
+          'atom mask %s'
+          % (n_tmpl, [np.unique(np.asarray(templates.aatype)[t]).tolist()
+                      for t in range(n_tmpl)],
+             bool(np.asarray(templates.atom_mask).any())))
+  if not covered and not empty:
     raise SystemExit('the template covers NOTHING -- the gate would compare '
                      'two all-zero paths and pass meaninglessly')
 
@@ -656,10 +687,16 @@ def main(argv=None):
   # .copy() is load-bearing: construct_input does `dense_atom_positions *=
   # dense_atom_mask[..., None]` in place, which numpy refuses on a read-only
   # view ("output array is read-only"). Harmless under jax tracing, fatal here.
+  # ONE slot on both sides, in EMPTY mode too: the native adapters take a single
+  # template's features, and feeding ours four while native sees one compares
+  # 4/4 against 1/1 -- which is a comparison of the DIVISOR, not of the term. The
+  # divisor is checked separately (EMPTY_SLOTS below), where it is exact by
+  # construction whenever the slots are identical.
+  keep = 1
   one = type(templates)(
-      aatype=np.array(templates.aatype)[:1].copy(),
-      atom_positions=np.array(templates.atom_positions)[:1].copy(),
-      atom_mask=np.array(templates.atom_mask)[:1].copy())
+      aatype=np.array(templates.aatype)[:keep].copy(),
+      atom_positions=np.array(templates.atom_positions)[:keep].copy(),
+      atom_mask=np.array(templates.atom_mask)[:keep].copy())
   single = type(templates)(
       aatype=np.asarray(templates.aatype)[0],
       atom_positions=np.asarray(templates.atom_positions)[0],
@@ -681,6 +718,30 @@ def main(argv=None):
     return 0
   ref = NATIVES[args.model](args.model, feats, z, pair_mask, hsu)
   got = ours(args.model, cfg, model_dir, one, z, pair_mask, multichain)
+  if empty:
+    # THE DIVISOR. Our module sums over every padded slot and divides by their
+    # COUNT, which is what protenix, opendde and intellifold2 all do
+    # (`u / (n_templ + eps)`). With identical empty slots that makes the
+    # aggregate equal to the single-slot result -- so this comparison IS the
+    # divisor check, and it fails loudly if either side divides by the number of
+    # PRESENT templates (which would be a division by zero, clipped to 1) or by
+    # anything else.
+    allslots = type(templates)(
+        aatype=np.array(templates.aatype).copy(),
+        atom_positions=np.array(templates.atom_positions).copy(),
+        atom_mask=np.array(templates.atom_mask).copy())
+    agg = ours(args.model, cfg, model_dir, allslots, z, pair_mask, multichain)
+    ident = all(np.array_equal(np.asarray(templates.aatype)[0],
+                               np.asarray(templates.aatype)[t])
+                for t in range(np.asarray(templates.aatype).shape[0]))
+    _cmp('divisor: %d slots vs 1%s' % (np.asarray(templates.aatype).shape[0],
+                                       '' if ident else ' (slots DIFFER)'),
+         np.asarray(agg), np.asarray(got))
+    if np.abs(np.asarray(got)).max() < 1e-6 and np.abs(ref).max() < 1e-6:
+      print('  BOTH ZERO -- this vendor MASKS its empty template slots before '
+            'averaging, so the term really is absent with no template. That is '
+            'the convention, not a vacuous pass: protenix, opendde, '
+            'intellifold2 and rf3 all keep a Z-dependent half here.')
   print('  shapes: ours %s native %s' % (got.shape, ref.shape))
   _cmp('template_embed', got, ref)
   return 0
