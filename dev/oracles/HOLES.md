@@ -1032,9 +1032,51 @@ windows and shifting the flat atom axis of every chain after the first. Fixed
 with the knob esmfold2 and chai-1 already use (`drop_atoms=('OXT',)`,
 `AF3_NO_BOLTZ2_DROP_OXT=1` to A/B).
 
-Fold effect, both ways: 6MRR 0.477 -> 0.466, 1LMB complex 0.386 -> 0.384. Small,
-as an out-of-distribution atom at a chain end should be -- the case for the fix
-is that the vendor's own featuriser says 573 and now so do we.
+### The same convention, across five models -- and what it costs
+
+Reading each vendor's own source rather than generalising from boltz2 (the tally
+is the finding as much as the fix):
+
+| DROPS terminal atoms | KEEPS them |
+|---|---|
+| `openfold3`, `openbind0` -- `remove_std_residue_terminal_atoms`, with `MOLECULE_TYPE_TO_LEAVING_ATOMS = {PROTEIN: [OXT], DNA/RNA: [OP3, O3P]}` | `protenix1/2` -- `constants.py` indexes OXT per residue (`"ALA": {... "OXT": 5}`) |
+| `boltz2` -- fixed tables (`ref_atoms["GLU"]` ends at OE2, `"A"` starts at P) and a CCD flagging OXT `leaving_atom: True` | `opendde` -- appends it explicitly: `staying_atoms = np.append(staying_atoms, ["OXT"])` |
+| `intellifold2` -- forks boltz's tables | |
+| `rosettafold3` -- its predict path calls atomworks' `remove_protein_terminal_oxygen` and the OP3 filter | |
+| (`chai1`, `esmfold2` already carried the knob) | |
+
+**The nucleic half matters more than the protein half.** OXT is the LAST atom of
+a protein residue, so it only displaces the tail; OP3 is the FIRST atom of
+residue 1, so carrying it shifted the ENTIRE flat atom axis of every nucleic
+chain by one against native's. Our RNA batches started `OP3 P OP1 OP2 O5'` where
+every one of these vendors starts at `P`.
+
+A/B on the five (old -> fixed, best of 5, one process each):
+
+| model | 1EHZ RNA | 6MRR |
+|---|---|---|
+| `openfold3` | 1.328 -> 1.333 | 1.546 -> 1.548 |
+| `openbind0` | 1.315 -> 1.318 | 1.645 -> **1.579** |
+| `boltz2` | 1.197 -> 1.195 | 0.474 -> 0.468 |
+| `intellifold2` | 1.477 -> 1.487 | 1.521 -> 1.512 |
+| `rosettafold3` | 1.047 -> 1.049 | 0.985 -> 0.965 |
+
+**The per-process band is about 0.003 A** (openfold3 / 1EHZ repeated under the
+SAME setting: 1.335, 1.332 -- two repeats of one cell, so a weak estimate and
+quoted as one). Every delta above is within two or three times that except
+openbind0's 6MRR, -0.066 and reproducible on a second process (1.579 twice),
+which is the only one worth calling real. Signs are mixed and the mean is
+-0.006: there is no systematic effect, and an earlier reading of "consistently
+slightly worse" from the first three cells was noise, retracted.
+
+**So the case for this fix is not the RMSD.** It is that five vendors' own
+featurisers emit 601 protein atoms and 1625 RNA atoms where we emitted 602 and
+1626, and of3 states the reason in its own source: "Models like AF3 and AF2
+expect all tokens with the same restype to map to the same number of atoms". We
+were feeding five models an atom their training never contained. That it costs
+nothing measurable on these two targets is a fact about the targets.
+
+`AF3_NO_TERMINAL_DROP=1` restores the old behaviour for every model at once.
 
 `ref_pos` is the conformer draw already documented for protenix (0.90 A per
 residue there, 0.99 here) and already priced: substituting native's own
