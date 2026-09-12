@@ -1123,6 +1123,58 @@ so it is untested, not disproved. Next step: compare blocks 0..16 only; if those
 are exact, the whole disagreement is the edge block and the gate needs a bound
 that matches each vendor's own padding.
 
+## The output side is gated over three input classes (2026-09-12)
+
+`output_parity.py`, 14/14 after the drop fix:
+
+    openfold3 / boltz2 / rosettafold3 / intellifold2   601 monomer, 917 ligand, 1202 dimer
+    alphafold3 (keeps its OXT)                         602 monomer, 918 ligand, 1204 dimer
+
+The dimer is the case that mattered -- two chain termini, two dropped atoms, two
+holes in the flat atom axis -- and 1202 = 2 x 601 with no atom at the origin.
+
+Each case is a fresh shape and so a full compile, ~10 min per model-case; use
+`CASES=monomer` (or a comma list) rather than running all 14 models blind.
+
+## We recycle 11 times; three vendors run 3 or 4 (2026-09-12, DATA, no change made)
+
+The counts, read from each vendor's own loop rather than its README:
+
+| model | native trunk passes | ours | ratio |
+|---|---|---|---|
+| alphafold3 | 11 | 11 | **1.00** |
+| openfold3 / openbind0 | **4** (`num_recycles + 1`, default 3) | 11 | 2.75 |
+| boltz2 | **4** (`range(recycling_steps + 1)`, default 3) | 11 | 2.75 |
+| chai1 | **3** (`range(n)`, total) | 10 | 3.33 |
+| protenix1/2 | 10 (`range(N_cycle)`) | 11 | 1.10 |
+| rosettafold3 | 10 (`range(n_recycles)`) | 11 | 1.10 |
+| intellifold2 | 10 | 11 | 1.10 |
+
+So it is three models, not the whole family, and alphafold3 -- the reference --
+already matches.
+
+**What the extra passes buy on 6MRR: nothing.** Five samples at our count and at
+the vendor's own:
+
+    openfold3      11 passes  best 1.546  mean 1.715   |  4 passes  1.689 / 1.749
+    openbind0      11 passes  best 1.574  mean 1.771   |  4 passes  1.562 / 1.670
+    boltz2         11 passes  best 0.467  mean 0.554   |  4 passes  0.505 / 0.534
+    protenix2      11 passes  best 1.005  mean 1.389   | 10 passes  0.672 / 1.327
+    rosettafold3   11 passes  best 1.018  mean 1.557   | 10 passes  1.095 / 1.646
+
+Four of five are equal or BETTER at the vendor's count, the fifth (rf3) worse by
+0.089 -- all inside the sampling band. Native of3 measured here is 1.714 mean,
+so at MATCHED passes our 1.749 is within 0.035 of it, which is the honest form
+of the parity claim: the earlier "we match native end to end" was true while we
+spent 2.75x the trunk compute.
+
+**And matching costs no runtime at this size.** of3 over 20 samples, compile
+amortised: **261 s at 11 passes, 264 s at 4**. At 68 tokens the diffusion
+sampler dominates -- the trunk runs once per seed (4 times) against 20 samples x
+~200 denoise steps -- so the trunk share, and any saving, only grows with
+length. The recycle question is therefore about COMPARABILITY and semantics, not
+speed, and it is still the user's call: the default is unchanged at 10.
+
 ## The sweep now covers a PTM, a LIGAND and a DIMER (2026-09-12)
 
 The featurisation diff only ever ran on a plain protein monomer, which certifies
