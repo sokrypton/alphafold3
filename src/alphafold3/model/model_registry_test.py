@@ -239,7 +239,11 @@ class RegistryTest(parameterized.TestCase):
     from alphafold3.model.pipeline import model_features
     source = pathlib.Path(model_features.__file__).read_text()
     read = {a or b for a, b in
-            re.findall(r"knobs\.get\('(\w+)'\)|knobs\['(\w+)'\]", source)}
+            # `knobs.get('x')` AND `knobs.get('x', default)` -- the regex
+            # once required the closing paren immediately, so a knob read WITH
+            # a default (empty_template_gap_slots) read as unconsumed and this
+            # test failed for a knob that was being honoured all along.
+            re.findall(r"knobs\.get\('(\w+)'[^)]*\)|knobs\['(\w+)'\]", source)}
     declared = set()
     for name in model_registry.MODEL_SPECS:
       declared |= set(model_registry.get(name).featurise or {})
