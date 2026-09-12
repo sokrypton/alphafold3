@@ -996,7 +996,7 @@ re-learn: best-of-5 is a TAIL statistic.** Both "regressions" were a single
 lucky or unlucky draw, and both took one 20-sample run to settle. Do not open an
 investigation on a best-of-5 move again.
 
-## The terminal-atom drop MASKS where the vendors REMOVE (2026-09-12, CONFIRMED)
+## The terminal-atom drop MASKED where the vendors REMOVE (2026-09-12, FIXED)
 
 The of3-lineage cluster above is a REGRESSION, and the cause is this week's
 terminal-atom drop. `parity_audit` over the same 274 comparisons:
@@ -1045,6 +1045,28 @@ to catch.
 `atom_name.astype(bool)`, so the flat axis compacts by itself), rebuild the
 `AtomCrossAtt` gathers, and filter `flat_output_layout` + `empty_output_struc`
 so nothing is written at the origin.
+
+**FIXED** in `_remove_dropped_atoms_from_layouts`. All 14 BAD cells resolved,
+with the drop still applied (573 atoms, so the convention is kept):
+
+    openfold3  a_token       0.997932 -> 1.000000   (max|d| 231.8 -> 0.00101)
+               q_atom        0.997916 -> 1.000000   (121.6  -> 0.00107)
+               p_pair_valid  0.994137 -> 1.000000   (62.79  -> 0.00012)
+    openbind0  all three     -> 1.000000
+    of3        denoise per-atom mean  1.2147 A -> 0.0002 A
+    openbind0  denoise per-atom mean  1.2130 A -> 0.0013 A
+
+which reproduces the 2026-09-10 numbers exactly. Every model's layouts now
+agree (output == structure == predicted == real queries), and 6MRR is unmoved:
+of3 1.548/1.718, openbind0 1.578/1.773, boltz2 0.467/0.553, if2 1.511/1.626,
+rf3 1.020/1.556. The SEP-20 PTM case still gives 605 atoms on both of3 and
+boltz2 -- the OXT dropped and phosphoserine's O3P kept -- so the
+atomised-residue distinction survives the layout rebuild.
+
+The filter is by the same BOOLEAN, never by atom name: a name filter would take
+the O3P case with it. And a drop combined with `flat_atom_order` now raises
+rather than silently discarding the permutation; opendde is the only model with
+a structural atom order and it keeps its terminal atoms.
 
 ## The of3-lineage atom path: a module gap with no fold cost (2026-09-12, OPEN)
 
