@@ -970,6 +970,41 @@ does, we reproduce), and for boltz2 (ONE slot, `template_mask` all zero, so its
 present-weighted mean contributes exactly zero -- ours too). `intellifold2`,
 `opendde` and `rosettafold3` have NOT been checked.
 
+## TO WATCH: NVIDIA's BioNeMo Inference Runtime, for the runtime comparison (2026-09-12)
+
+https://developer.nvidia.com/blog/high-throughput-structure-prediction-with-bionemo-inference-runtime
+
+A PyTorch inference runtime ("BioIR") for **Boltz-2, OpenFold3 and OpenFold2** --
+two of the three are vendors this file compares against. Three layers: kernel
+selection (BioIR-custom / cuEquivariance / PyTorch fallback, chosen from model
+config, GPU, dtype and tensor shape), CUDA Graph capture per module, and Ray
+replicas across GPUs. Claimed 1.78x (Boltz-2), 1.55x (OpenFold3), 2.56x
+(OpenFold2) on model-forward latency against a `torch.compile` baseline, and
+2.90x residue-normalised throughput on 8xH100.
+
+**Not usable here today, for reasons that will not change quickly:** it is
+PyTorch (we are JAX/XLA), it is H100/H200 (this box is an A10, cc 8.6, and the
+fleet's others are A100s), and BioIR itself is closed source. The one reachable
+piece, cuEquivariance, has JAX bindings but is the library already measured in
+this project at **1.09x on the A10 and datacenter-only** -- which matches
+NVIDIA's own support line.
+
+**Two things to carry forward.**
+
+  1. **The runtime comparison we will want.** Our published numbers are against
+     stock native implementations on an A10 ([[af3-runtime-benchmarks]],
+     [[runtime-vs-native]]). A fair "how fast is the port" answer on modern
+     hardware has to say WHICH native: stock PyTorch, `torch.compile`, or BioIR.
+     Against BioIR the honest baseline is 1.5-2.6x faster than the one we have
+     been comparing to, and it needs an H100 to run at all.
+  2. **AND IT IS A DIFFERENT REFERENCE, NUMERICALLY.** Swapping kernels changes
+     the arithmetic. Anyone who compares our port against a BioIR-served Boltz-2
+     or OpenFold3 instead of the stock package is comparing against a different
+     implementation of the same weights -- which is exactly the failure that cost
+     four days on openbind0 (native at `main` over v0.5.0 weights) and that
+     `native_of3` now asserts against. If BioIR ever becomes the reference here,
+     the adapters need the same kind of guard.
+
 ## The featurisation diff, vendor by vendor: boltz2 has NO terminal OXT (2026-09-12)
 
 Every port bug found on 2026-09-11/12 was an INPUT convention, and L0-L4 cannot

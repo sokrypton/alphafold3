@@ -557,7 +557,7 @@ _FEATURISE = {
     # already use.
     'boltz2': dict(modified_as_one_token=True, padded_keys=True,
                    **({} if os.environ.get('AF3_NO_BOLTZ2_DROP_OXT')
-                      else dict(drop_atoms=('OXT',))),
+                      else dict(drop_atoms=('OXT', 'OP3', 'O3P'))),
                    dedupe_self_msa=not os.environ.get('AF3_NO_BOLTZ2_DEDUPE_MSA')),
     # opendde runs its diffusion on an expanded structural-token set, and pads
     # the atom key window rather than sliding it in bounds.
@@ -621,9 +621,14 @@ _FEATURISE = {
     # the pairing loop included, so a chain with no alignments gets a DEPTH-1
     # MSA (one dummy sequence, first row per chain, nothing left to pair or
     # append). AF3 hands the same input the query twice.
+    # drop_atoms: IntelliFold forks boltz's fixed atom tables, which carry no
+    # terminal OXT and no 5' OP3 (`const.ref_atoms["GLU"]` ends at OE2, its "A"
+    # starts at P).
     'intellifold2': dict(qblock_keys=True,
                          dedupe_self_msa=not os.environ.get(
-                             'AF3_NO_IF2_DEDUPE_MSA')),
+                             'AF3_NO_IF2_DEDUPE_MSA'),
+                         **({} if os.environ.get('AF3_NO_TERMINAL_DROP')
+                            else dict(drop_atoms=('OXT', 'OP3', 'O3P')))),
     # rf3 (atomworks) renames atomised atoms to their ELEMENT symbol, carries
     # chirality features, aligns restypes to its own alphabet, and calls an
     # atomised polymer token UNKNOWN where AlphaFold 3 keeps the parent residue
@@ -639,7 +644,12 @@ _FEATURISE = {
     # `full_encoded_msa = expand_dims(encoded["seq"], 0)` -- the query alone,
     # shape [1, n_tokens] -- when no polymer MSA is present. AF3 hands the same
     # input the query twice.
-    'rosettafold3': dict(chirals=True, atomized_element_names=True,
+    # drop_atoms: rf3's prediction path calls atomworks'
+    # `remove_protein_terminal_oxygen` (OXT, non-atomized protein residues only)
+    # and the matching nucleic OP3 filter, so neither reaches its model.
+    'rosettafold3': dict(**({} if os.environ.get('AF3_NO_TERMINAL_DROP')
+                            else dict(drop_atoms=('OXT', 'OP3', 'O3P'))),
+                         chirals=True, atomized_element_names=True,
                          restype_alignment=True,
                          atomized_unknown_restype=True,
                          atomized_backbone_bonds=True,
@@ -676,6 +686,26 @@ _FEATURISE = {
 # Derived from the list rather than restated, so the two cannot disagree.
 for _m in model_config.CENTRE_REF_CONFORMERS:
   _FEATURISE.setdefault(_m, {})['centre_conformers'] = True
+
+
+# TERMINAL ATOMS. of3 removes them explicitly and says why:
+# `remove_std_residue_terminal_atoms` -- "Models like AF3 and AF2 expect all
+# tokens with the same restype to map to the same number of atoms" -- with
+# `MOLECULE_TYPE_TO_LEAVING_ATOMS = {PROTEIN: ["OXT"], DNA/RNA: ["OP3", "O3P"]}`.
+# Measured against its own featuriser on ubiquitin: 601 atoms to our 602, the
+# extra one being the C-terminal OXT.
+#
+# NOT universal -- protenix indexes OXT per residue (`constants.py` "ALA":
+# {... "OXT": 5}) and opendde appends it explicitly
+# (`staying_atoms = np.append(staying_atoms, ["OXT"])`), so both keep it and are
+# deliberately absent here.
+#
+# The nucleic half matters more than the protein half: OP3 is the FIRST atom of
+# residue 1, so carrying it shifts the ENTIRE flat atom axis of a nucleic chain
+# by one against native's, where OXT only displaces the tail of a protein chain.
+for _m in ('openfold3', 'openbind0'):
+  if not os.environ.get('AF3_NO_TERMINAL_DROP'):
+    _FEATURISE.setdefault(_m, {})['drop_atoms'] = ('OXT', 'OP3', 'O3P')
 
 
 # Where a converted model's weights are published. The file name is what

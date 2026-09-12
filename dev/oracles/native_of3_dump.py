@@ -48,6 +48,14 @@ def run_trunk(self, batch, num_cycles, inplace_safe=False):
   caught['s_trunk'] = s.detach().float().cpu().numpy()
   caught['z_trunk'] = z.detach().float().cpu().numpy()
   caught['num_cycles'] = np.asarray(num_cycles)
+  # the ATOM-level features too, for dev/oracles/featurisation_diff.py -- the
+  # direction L0-L4 cannot see, since they feed each module native's own features
+  for k in list(batch):
+    if any(t in k for t in ('ref_', 'atom_', 'template_', 'profile', 'deletion',
+                            'token_bonds', 'is_')):
+      v = batch[k]
+      if torch.is_tensor(v):
+        caught['batch_' + k] = _np(v)
   for k in ('token_mask', 'restype', 'asym_id', 'residue_index', 'entity_id',
             'sym_id', 'token_index', 'msa', 'is_protein'):
     if k in batch:

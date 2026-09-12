@@ -49,6 +49,19 @@ def main(argv=None):
   if seq is None:
     seq = fold_check.parse_ca(os.path.expanduser('~/6MRR.pdb'))[0]
   d = np.load(npz)
+  # Dumps written by the native_*_dump.py hooks prefix batch fields with
+  # 'batch_'; accept either naming.
+  if any(k.startswith('batch_') for k in d.files):
+    _stripped = {k[len('batch_'):] if k.startswith('batch_') else k: d[k]
+                 for k in d.files}
+
+    class _Dump:                       # the npz interface the rest of this uses
+      files = list(_stripped)
+
+      def __getitem__(self, k):
+        return _stripped[k]
+
+    d = _Dump()
   _sq = lambda k: d[k][0] if d[k].ndim > 1 or d[k].shape[0] == 1 else d[k]
   # The vendor pads its atom axis too (boltz2: 576 slots for 574 real atoms),
   # and comparing unfiltered reads as a shape mismatch that looks like a missing
