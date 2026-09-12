@@ -970,6 +970,50 @@ does, we reproduce), and for boltz2 (ONE slot, `template_mask` all zero, so its
 present-weighted mean contributes exactly zero -- ours too). `intellifold2`,
 `opendde` and `rosettafold3` have NOT been checked.
 
+## The featurisation diff, vendor by vendor: boltz2 has NO terminal OXT (2026-09-12)
+
+Every port bug found on 2026-09-11/12 was an INPUT convention, and L0-L4 cannot
+see one by construction -- they feed each module NATIVE's own features. So the
+systematic answer is to diff the FEATURES, which had been done once (protenix,
+2026-09-08) and for nobody else. `dev/oracles/featurisation_diff.py` now does it
+against any vendor dump. boltz2 first, on 6MRR:
+
+| field | result |
+|---|---|
+| atom COUNT | **574 ours, 573 native** -- the extra one is the C-terminal OXT |
+| atom order (by name, after the fix) | **573/573 agree** |
+| `ref_charge`, `ref_space_uid`, `ref_element` | **exact** |
+| `residue_index`, `token_index`, `asym_id`, `entity_id`, `sym_id` | **exact** |
+| `deletion_mean` | exact |
+| `profile` | ours 31 classes, native 33 -- a consistent RELABELING (free: the converter permutes the consuming Linear) |
+| `ref_pos` | differs, 0.990 A per residue after alignment (max 1.54) |
+
+**BOLTZ HAS NO OXT, EVER, and this is not an artifact of the input.** Its
+canonical atom table is fixed and does not list one --
+`const.ref_atoms["GLU"] = [N, CA, C, O, CB, CG, CD, OE1, OE2]` -- and its own CCD
+mol carries OXT flagged `leaving_atom: True`. So we were handing it one atom per
+protein chain that the model never saw in training, occupying a slot in the atom
+windows and shifting the flat atom axis of every chain after the first. Fixed
+with the knob esmfold2 and chai-1 already use (`drop_atoms=('OXT',)`,
+`AF3_NO_BOLTZ2_DROP_OXT=1` to A/B).
+
+Fold effect, both ways: 6MRR 0.477 -> 0.466, 1LMB complex 0.386 -> 0.384. Small,
+as an out-of-distribution atom at a chain end should be -- the case for the fix
+is that the vendor's own featuriser says 573 and now so do we.
+
+`ref_pos` is the conformer draw already documented for protenix (0.90 A per
+residue there, 0.99 here) and already priced: substituting native's own
+conformers into a protenix fold moved it 0.01 A. Same class, not a bug.
+
+**Two harness faults of mine inside this diff, both of the same shape as the
+findings:** comparing 576 native slots against our 574 real atoms without
+applying the vendor's `atom_pad_mask` (reads as a missing atom), and assuming
+of3/protenix's 0-indexed element one-hot for boltz2, whose base is 1 (reported
+100% of elements wrong). The script now filters by the vendor's pad mask and
+DETECTS the element base instead of assuming it, and treats a width-mismatched
+categorical as a relabeling question rather than comparing the first k columns of
+two different vocabularies.
+
 ## boltz2 runs TemplateV2, and V2 does not mask by chain (2026-09-12)
 
 Found by auditing the native adapters themselves rather than our port -- the last

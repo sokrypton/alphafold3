@@ -547,7 +547,17 @@ _FEATURISE = {
     # the first row of each chain and then finds nothing to add, so its batch
     # carries msa at (1, 1, 68). Read off boltz's inference data module, not
     # inferred. AF3 hands the same input the query TWICE.
+    # drop_atoms OXT: boltz has no terminal OXT, ever. Its canonical atom table
+    # is fixed and does not list one (`const.ref_atoms["GLU"] = [N, CA, C, O,
+    # CB, CG, CD, OE1, OE2]`), its own CCD mol flags OXT `leaving_atom: True`,
+    # and its featuriser's output on 6MRR carries 573 atoms where ours carries
+    # 574 -- the extra one being the C-terminal OXT. An atom the model never saw
+    # in training, occupying a slot in the atom windows and shifting the flat
+    # atom axis of every chain after the first. Same knob esmfold2 and chai-1
+    # already use.
     'boltz2': dict(modified_as_one_token=True, padded_keys=True,
+                   **({} if os.environ.get('AF3_NO_BOLTZ2_DROP_OXT')
+                      else dict(drop_atoms=('OXT',))),
                    dedupe_self_msa=not os.environ.get('AF3_NO_BOLTZ2_DEDUPE_MSA')),
     # opendde runs its diffusion on an expanded structural-token set, and pads
     # the atom key window rather than sliding it in bounds.
