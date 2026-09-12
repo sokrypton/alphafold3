@@ -44,18 +44,14 @@ attention, and an IPA head over backbone frames) and runs as a sibling network
 under `alphafold3.af2`, reached through the same CLI and the same output writer.
 Check `model_registry.get(name).engine` rather than testing the name.
 
-`6MRR` is best-of-5 CA-RMSD, de novo from a single sequence, 68 aa — the shared
-regression gate (`dev/bench/sweep22.sh`). It says how well a model folds, not
-how faithfully it was ported; for that see [Parity status](#parity-status).
-
 ### AlphaFold 3 lineage
 
-| `--model` | model | weights | 6MRR Å |
-|---|---|---|---|
-| `alphafold3` | AlphaFold 3 (Google DeepMind) | request from DeepMind | 0.632 |
-| `openfold3` | [OpenFold3 preview-2](https://github.com/aqlaboratory/openfold3) (AlQuraishi Lab) | Apache 2.0 | 1.541 |
-| `openbind0` | [OpenFold3 v0.5.0 "OpenBind"](https://github.com/aqlaboratory/openfold-3/releases/tag/v0.5.0) | Apache 2.0 | 1.649 |
-| `intellifold2` | [IntelliFold-v2](https://huggingface.co/intelligenAI/intellifold) (IntelligenAI) | see upstream | 1.514 |
+| `--model` | model | weights |
+|---|---|---|
+| `alphafold3` | AlphaFold 3 (Google DeepMind) | request from DeepMind |
+| `openfold3` | [OpenFold3 preview-2](https://github.com/aqlaboratory/openfold3) (AlQuraishi Lab) | Apache 2.0 |
+| `openbind0` | [OpenFold3 v0.5.0 "OpenBind"](https://github.com/aqlaboratory/openfold-3/releases/tag/v0.5.0) | Apache 2.0 |
+| `intellifold2` | [IntelliFold-v2](https://huggingface.co/intelligenAI/intellifold) (IntelligenAI) | see upstream |
 
 ### Protenix family
 
@@ -69,30 +65,30 @@ keeping them spread parity work across variants without adding coverage. The
 machinery that made them one-liners is untouched, so re-adding one is still a
 `sources.py` entry, a converter alias and a `MODELS` line.
 
-| `--model` | model | weights | 6MRR Å |
-|---|---|---|---|
-| `protenix2` | [Protenix-v2](https://github.com/bytedance/Protenix) (ByteDance) | Apache 2.0 | 0.702 |
-| `protenix1` | Protenix-v1 | Apache 2.0 | 1.694 |
+| `--model` | model | weights |
+|---|---|---|
+| `protenix2` | [Protenix-v2](https://github.com/bytedance/Protenix) (ByteDance) | Apache 2.0 |
+| `protenix1` | Protenix-v1 | Apache 2.0 |
 
 ### Other AF3-architecture models
 
-| `--model` | model | weights | 6MRR Å |
-|---|---|---|---|
-| `boltz2` | [Boltz-2](https://github.com/jwohlwend/boltz) | MIT | 0.434 |
-| `opendde` | [OpenDDE](https://huggingface.co/aurekaresearch/OpenDDE) (Aureka Research) | see upstream | 0.767 |
-| `rosettafold3` | [RoseTTAFold3](https://files.ipd.uw.edu/pub/rf3/) (RosettaCommons) | see upstream | 0.986 |
-| `chai1` | [chai-1](https://github.com/chaidiscovery/chai-lab) (Chai Discovery) | Apache 2.0 | 1.719 |
+| `--model` | model | weights |
+|---|---|---|
+| `boltz2` | [Boltz-2](https://github.com/jwohlwend/boltz) | MIT |
+| `opendde` | [OpenDDE](https://huggingface.co/aurekaresearch/OpenDDE) (Aureka Research) | see upstream |
+| `rosettafold3` | [RoseTTAFold3](https://files.ipd.uw.edu/pub/rf3/) (RosettaCommons) | see upstream |
+| `chai1` | [chai-1](https://github.com/chaidiscovery/chai-lab) (Chai Discovery) | Apache 2.0 |
 
 ### ESMFold2 family — folds from ESM-C, not an MSA
 
 Pair-only trunk conditioned on an ESM-C language model.
 
-| `--model` | model | weights | 6MRR Å |
-|---|---|---|---|
-| `esmfold2` | [ESMFold2](https://huggingface.co/biohub/ESMFold2) (Arc / CZ Biohub) | MIT | 1.483 |
-| `esmfold2_fast` | [ESMFold2-Fast](https://huggingface.co/biohub/ESMFold2-Fast) — half the trunk | MIT | 1.245 |
-| `esmfold2_lm600m` | […-base600M-step1500k](https://huggingface.co/biohub/ESMFold2-Experimental-Fast-base600M-step1500k) — **ESM-C 600M** | MIT | 0.858 |
-| `esmfold2_lm300m` | […-base300M-step1500k](https://huggingface.co/biohub/ESMFold2-Experimental-Fast-base300M-step1500k) — **ESM-C 300M** | MIT | 1.753 |
+| `--model` | model | weights |
+|---|---|---|
+| `esmfold2` | [ESMFold2](https://huggingface.co/biohub/ESMFold2) (Arc / CZ Biohub) | MIT |
+| `esmfold2_fast` | [ESMFold2-Fast](https://huggingface.co/biohub/ESMFold2-Fast) — half the trunk | MIT |
+| `esmfold2_lm600m` | […-base600M-step1500k](https://huggingface.co/biohub/ESMFold2-Experimental-Fast-base600M-step1500k) — **ESM-C 600M** | MIT |
+| `esmfold2_lm300m` | […-base300M-step1500k](https://huggingface.co/biohub/ESMFold2-Experimental-Fast-base300M-step1500k) — **ESM-C 300M** | MIT |
 
 All but the last two condition on ESM-C 6B; those use the 600M and 300M towers
 and cost 0.5 GB and 0.3 GB against 5.1. Upstream ships the "Experimental" line
@@ -107,10 +103,10 @@ Supplying neither is the one broken configuration.
 
 ### AlphaFold 2 — a sibling network, not the AF3 graph
 
-| `--model` | model | weights | 6MRR Å |
-|---|---|---|---|
-| `af2_ptm` | AlphaFold 2 monomer pTM (`params_model_*_ptm.npz`) | CC BY 4.0 | 1.712 |
-| `af2_multimer` | AlphaFold 2 multimer v3 (`params_model_*_multimer_v3.npz`) | CC BY 4.0 | 1.788 |
+| `--model` | model | weights |
+|---|---|---|
+| `af2_ptm` | AlphaFold 2 monomer pTM (`params_model_*_ptm.npz`) | CC BY 4.0 |
+| `af2_multimer` | AlphaFold 2 multimer v3 (`params_model_*_multimer_v3.npz`) | CC BY 4.0 |
 
 DeepMind's own AlphaFold 2 parameters, read from `--model_dir` as
 `params/params_model_*.npz` — nothing is converted or republished. Monomer and
@@ -120,9 +116,9 @@ or an inter-chain bond raises rather than silently folding the protein subset.
 MSAs come from the AF3 data pipeline, chain pairing included. Templates are not
 wired up yet.
 
-The two AF2 rows are single-seed at float32 with zero recycles, not best-of-5 at
-config defaults like the rows above, so read them against each other rather than
-against the AF3 lineage.
+AF2 is measured single-seed at float32 with zero recycles, not best-of-5 at
+config defaults like the AF3 lineage, so read the two AF2 numbers in
+[Folds](#folds) against each other rather than against the rest.
 
 ## Parity status
 
@@ -131,27 +127,33 @@ reproduces its own vendor's implementation rather than merely producing a
 plausible structure. `PARITY.md` is the full record and `dev/oracles/HOLES.md`
 tracks what is still open; this is the current state.
 
-Parity is measured at seven levels, from the weights inwards to the fold:
+Parity is measured level by level, from the weights inwards to the fold:
 
 | level | what it compares |
 |---|---|
 | **L0** | conversion coverage — every checkpoint tensor accounted for, both directions |
 | **L1** | the trunk: z-init, pairformer, MSA module, template embedder, distogram |
+| **L1x** | the same, on a COMPLEX — the cross-chain terms are constant on one chain |
 | **L2** | diffusion conditioning, token transformer, atom encoder and decoder |
 | **L3** | one full denoise step |
 | **L4** | the confidence head: PAE, PDE, pLDDT, resolved |
 | **L5** | an end-to-end fold, scored against an experimental structure |
 | **L6** | modality: RNA, DNA, ligands, complexes, modified residues |
 
-### Current numbers (2026-09-11)
+### Current numbers (2026-09-13)
 
-L0 through L5 have all been driven to completion across every model they apply
-to. Grading each comparison on correlation **and** `max|d|/rms`:
+Every level has been driven to completion across every model it applies to, L6
+and L1x included. Grading each comparison on correlation **and** `max|d|/rms`:
 
 ```
-274 comparisons in 131 logs
-PARITY=237   CLOSE=8   FLOOR=17   LOOSE=10   BAD=2
+294 comparisons in 151 logs      276 OK   1 SKIP   71 N/A   0 FAIL
+PARITY=262   CLOSE=10   FLOOR=17   LOOSE=5   BAD=0
 ```
+
+The one SKIP is a real hole: `boltz2` has no in-process L3 adapter, so its
+denoise step is gated by injection (`L3.denoise_inject`) instead. N/A means the
+model does not have that module at all — `gate_applies.py` decides, from the
+registry, so an empty cell can never quietly mean "not run".
 
 `bash dev/oracles/run_all_parity.sh all` re-runs everything;
 `dev/oracles/parity_audit.py <logdir>` grades it and
@@ -165,30 +167,48 @@ the stack is driven far outside its trained distribution — the shallower
 `L1.trunk1` is the measurement that counts. A cell only earns FLOOR by measuring
 it, so this cannot quietly excuse anything.
 
-**The 2 BAD** are `esmfold2_fast`'s PAE and PDE, and they are understood rather
-than open: native runs its confidence pairformer's triangle multiplications
-under `autocast(bfloat16)` — its tensors round-trip through bf16 at max|d| 0 —
+**Nothing is BAD.** The last cluster — 14 cells across the OpenFold3 lineage's
+atom encoder, decoder and denoise — was a regression introduced by a terminal-atom
+drop that MASKED atoms where the vendors REMOVE them, leaving a hole in the flat
+atom axis that shifted every attention window after it and left the dropped atom
+in the mmCIF to be written at the origin. Fixed on 2026-09-13; those cells went
+from 1.21 Å per-atom back to 0.0002.
+
+**The 5 LOOSE** are all confidence tails — `chai1`'s injected PAE/PDE logits,
+`protenix2`'s PAE and PDE, `opendde`'s PDE — every one at corr ≥ 0.99994 with a
+`max|d|/rms` of a few percent in the distribution's tail. `esmfold2_fast`'s PAE
+and PDE, previously the 2 BAD, are understood the same way: native runs its
+confidence pairformer's triangle multiplications under `autocast(bfloat16)`
 while we run fp32, which costs ~0.5% per sub-module with bit-identical weights
 on identical inputs.
 
 ### Folds
 
-6MRR, best of 5 samples, against each model's recorded baseline:
+`6MRR` is best-of-5 CA-RMSD, de novo from a single sequence, 68 aa — the shared
+regression gate, and the L5 row of the matrix above. It says how well a model
+folds, not how faithfully it was ported; that is what L0-L4 measure.
 
 | model | best Å | | model | best Å |
 |---|---|---|---|---|
-| `boltz2` | 0.421 | | `intellifold2` | 1.515 |
-| `alphafold3` | 0.626 | | `openfold3` | 1.544 |
-| `protenix2` | 0.697 | | `esmfold2_lm600m` | 1.522 |
-| `opendde` | 0.737 | | `openbind0` | 1.650 |
-| `rosettafold3` | 1.026 | | `protenix1` | 1.684 |
-| `esmfold2_fast` | 1.181 | | `esmfold2_lm300m` | 1.687 |
-| `esmfold2` | 1.339 | | `chai1` | 1.723 |
+| `boltz2` | 0.459 | | `intellifold2` | 1.512 |
+| `alphafold3` | 0.628 | | `esmfold2_lm600m` | 1.522 |
+| `opendde` | 0.729 | | `openfold3` | 1.547 |
+| `rosettafold3` | 0.967 | | `protenix1` | 1.555 |
+| `protenix2` | 1.016 | | `openbind0` | 1.578 |
+| `esmfold2_fast` | 1.182 | | `esmfold2_lm300m` | 1.687 |
+| `esmfold2` | 1.330 | | `chai1` | 1.713 |
 
-Read these as a band, not a ranking: several models are **nondeterministic run
-to run on the same seed**. Three runs of `rosettafold3` seed 0 give 0.968, 0.949
-and 1.026, because one sample sits near a decision boundary. A single fold
-number to three decimals is not a gate.
+AlphaFold 2 runs single-seed at float32 with zero recycles rather than
+best-of-5, so its numbers belong beside each other and not in the table above:
+`af2_ptm` 1.712, `af2_multimer` 1.788.
+
+Read these as a band, not a ranking. Several models are **nondeterministic run
+to run on the same seed** — three runs of `rosettafold3` seed 0 give 0.968,
+0.949 and 1.026, because one sample sits near a decision boundary — and
+best-of-5 is a TAIL statistic, so a single number to three decimals is not a
+gate. Two apparent regressions chased in 2026-09 were both one unlucky draw and
+dissolved at 20 samples. For a real comparison use means over ≥ 20 samples
+against native.
 
 ### Modality
 

@@ -5,7 +5,11 @@
     ~/venv/bin/python dev/oracles/parity_audit.py dev/oracles/parity_runs/2026-09-13-full
     -> PARITY=262  CLOSE=10  FLOOR=17  LOOSE=5  BAD=0
 
-    277 OK   2 SKIP   73 N/A   0 FAIL
+    294 comparisons in 151 logs
+    276 OK   1 SKIP   71 N/A   0 FAIL
+
+The one SKIP is the only real hole: boltz2 has no in-process L3 adapter and is
+gated by `L3.denoise_inject` instead.
 
 Every level runs, including L6 (the modality screens) and the new L1x
 (cross-chain). The terminal-drop regression below is fixed and the cells that
