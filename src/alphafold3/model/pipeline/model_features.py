@@ -220,7 +220,107 @@ def _drop_atoms_by_name(batch, names):
     else:
       mask &= ~np.isin(idxs, list(dead))
     batch[f'{key}:gather_mask'] = mask
+
+  _remove_dropped_atoms_from_layouts(batch, drop)
   return len(drop)
+
+
+def _remove_dropped_atoms_from_layouts(batch, drop):
+  '''REMOVE the dropped atoms from the layouts, the way the vendors do.
+
+  Masking a finished batch is not the same thing as the vendor never emitting
+  the atom, because a mask leaves a HOLE in the flat atom axis and two things
+  are cut on that axis:
+
+    * the 32-atom attention windows. Every block after the hole has a different
+      membership than the vendor's compacted axis. This is the whole of the
+      openfold3/openbind0 atom-encoder regression of 2026-09-12 (14 BAD cells
+      that read corr 1.000000 two days earlier, with the gate headers reading
+      `574 real atoms` before and `573` after). rf3, if2 and boltz2 took the
+      same drop and stayed exact only because their native adapters consume our
+      flat features hole and all, so it cancels on both sides.
+    * the mmCIF gather, which reaches users. `flat_output_layout` and
+      `empty_output_struc` are built during featurisation and the drop never
+      touched them, so the model stopped predicting an atom the output still
+      asked for -- and `predicted_structure_from_coords` writes a missing atom
+      at (0, 0, 0) behind a `logging.warning`. openfold3 and boltz2 were handing
+      back 574 output atoms for 573 predicted ones.
+
+  `token_atoms_mask` is just `atom_name.astype(bool)`, so blanking the name
+  compacts the flat axis by itself; the AtomCrossAtt gathers are then rebuilt
+  from the compacted layout and the output layout is filtered to match.
+  '''
+  import dataclasses
+
+  from alphafold3.model import features as _features
+
+  lay = _features._unwrap(batch.get('token_atoms_layout'))
+  if lay is None:
+    return
+
+  names = np.array(lay.atom_name, copy=True)
+  gone = [(str(lay.chain_id[t, a]), int(lay.res_id[t, a]), str(names[t, a]))
+          for t, a in drop if names[t, a]]
+  for t, a in drop:
+    names[t, a] = ''
+  lay = dataclasses.replace(lay, atom_name=names)
+  batch['token_atoms_layout'] = np.array(lay, object)
+
+  # Rebuild the atom cross-attention gathers on the COMPACTED axis. The subset
+  # sizes and the padded atom count are read back off the batch rather than
+  # re-derived from config, so this cannot drift from the arrays it replaces.
+  q_idxs = np.asarray(batch['token_atoms_to_queries:gather_idxs'])
+  num_subsets, q_size = q_idxs.shape
+  k_size = np.asarray(batch['queries_to_keys:gather_idxs']).shape[1]
+  shapes = _features.PaddingShapes(
+      num_tokens=lay.shape[0], msa_size=0, num_chains=0, num_templates=0,
+      num_atoms=num_subsets * q_size)
+  # `flat_atom_order` ranks the rows of the OLD flat axis, so removing rows
+  # invalidates it. No model needs both today -- opendde is the only one with a
+  # structural atom order and it KEEPS its terminal atoms (918/1204 against its
+  # own featuriser) -- so this refuses the combination rather than silently
+  # dropping a permutation that reorders every atom.
+  if batch.get('flat_atom_order') is not None:
+    raise NotImplementedError(
+        'dropping atoms from a model that also permutes the flat atom axis '
+        '(flat_atom_order) would need the permutation re-ranked over the '
+        'remaining atoms; no model currently does both')
+  aca = _features.AtomCrossAtt.compute_features(
+      all_token_atoms_layout=lay,
+      queries_subset_size=q_size,
+      keys_subset_size=k_size,
+      padding_shapes=shapes)
+  batch.update(aca.as_data_dict())
+
+  # The OUTPUT side: drop the same atoms from the flat output layout and from
+  # the empty structure the coordinates are written into, so nothing is left
+  # asking for an atom the model no longer predicts.
+  fol = _features._unwrap(batch.get('flat_output_layout'))
+  struc = _features._unwrap(batch.get('empty_output_struc'))
+  if fol is None or not gone:
+    return
+  keep = np.ones(fol.shape[0], bool)
+  gone_set = set(gone)
+  for i in range(fol.shape[0]):
+    if (str(fol.chain_id[i]), int(fol.res_id[i]),
+        str(fol.atom_name[i])) in gone_set:
+      keep[i] = False
+  if keep.all():
+    return
+  batch['flat_output_layout'] = np.array(fol[keep], object)
+  if struc is not None:
+    # empty_output_struc is indexed 1:1 by flat_output_layout, so the SAME
+    # boolean is applied to both. Filtering by atom NAME instead would also
+    # remove atoms that were deliberately kept -- an OXT inside an atomised
+    # residue, which is exactly the distinction the drop itself is careful
+    # about.
+    if struc.num_atoms != keep.shape[0]:
+      raise ValueError(
+          'empty_output_struc has %d atoms, flat_output_layout %d -- they are '
+          'meant to be 1:1' % (struc.num_atoms, keep.shape[0]))
+    batch['empty_output_struc'] = np.array(struc.filter(mask=keep), object)
+
+
 
 
 def _override_ref_conformers(batch, conformers):
