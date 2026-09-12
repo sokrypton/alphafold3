@@ -719,6 +719,14 @@ def main(argv=None):
   ap = argparse.ArgumentParser()
   ap.add_argument('model')
   ap.add_argument('--pdb', default=os.path.expanduser('~/6MRR.pdb'))
+  ap.add_argument('--chains_json', default=None,
+                  help='a fold-input JSON whose chains replace --pdb. THE ONLY '
+                       'WAY TO REACH A CROSS-CHAIN CONVENTION: z-init is where '
+                       'the relative-position encoding lives, and its '
+                       'chain/entity/sym terms are constant on a monomer -- '
+                       'both the boltz2 entity bucket and the esmfold2 chain '
+                       'bucket were per-channel constants there. Every gate in '
+                       'this directory otherwise runs one protein chain.')
   ap.add_argument('--model_dir', default=None)
   args = ap.parse_args(argv)
   sys.argv = sys.argv[:1]
@@ -734,9 +742,16 @@ def main(argv=None):
   from alphafold3.model.network import evoformer as evo
   from alphafold3.model import model_config
 
-  seq, _ = fold_check.parse_ca(args.pdb)
+  chains = None
+  if args.chains_json:
+    from alphafold3.common import folding_input
+    chains = list(folding_input.Input.from_json(
+        open(args.chains_json).read()).chains)
+    seq = getattr(chains[0], 'sequence', '')
+  else:
+    seq, _ = fold_check.parse_ca(args.pdb)
   batch, cfg, model_dir = fold_check._fold_setup(args.model, seq,
-                                                 args.model_dir)
+                                                 args.model_dir, chains=chains)
   batch = feat_batch.Batch.from_data_dict(batch)
   n = int(np.asarray(batch.token_features.mask).shape[0])
   rng = np.random.default_rng(0)

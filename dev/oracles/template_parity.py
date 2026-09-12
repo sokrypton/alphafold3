@@ -174,7 +174,7 @@ def native_protenix(model, feats, z, pair_mask, hidden_scale_up):
   # feature with it. It also builds restype_i/j itself by one-hotting
   # template_aatype, so those two are not passed.
   ifd = {
-      'asym_id': torch.zeros(z.shape[0], dtype=torch.long),
+      'asym_id': torch.as_tensor(np.asarray(feats.get('asym_id', np.zeros(z.shape[0]))), dtype=torch.long),
       'template_aatype': torch.tensor(
           np.asarray(feats['restype_i']).max(axis=0).argmax(-1),
           dtype=torch.long)[None],
@@ -280,8 +280,10 @@ def native_boltz2(model, feats, z, pair_mask, hidden_scale_up):
     return np.column_stack([e1, e2, e3]), ca
 
   ckpt = os.path.expanduser('~/boltz2_weights/boltz2_conf.ckpt')
-  sd = torch.load(ckpt, map_location='cpu', weights_only=False)
-  sd = sd.get('state_dict', sd)
+  _ckpt = torch.load(ckpt, map_location='cpu', weights_only=False)
+  # keep the FULL checkpoint: `hyper_parameters` carries use_templates_v2, and
+  # it is gone once this is narrowed to the state dict.
+  sd = _ckpt.get('state_dict', _ckpt) if isinstance(_ckpt, dict) else _ckpt
   pre = 'template_module.'
   sub = {k[len(pre):]: v for k, v in sd.items() if k.startswith(pre)}
   if not sub:
@@ -292,8 +294,20 @@ def native_boltz2(model, feats, z, pair_mask, hidden_scale_up):
   n_blocks = 1 + max(int(k.split('.')[2]) for k in bl)
   print('  checkpoint: template_dim %d, token_z %d, a_proj %d-d, %d blocks'
         % (c, token_z, raw_dim, n_blocks))
-  net = TemplateModule(token_z=token_z, template_dim=c,
-                       template_blocks=n_blocks, dropout=0.0)
+  # THE CLASS IS A CHECKPOINT FLAG, not a default. boltz2 builds
+  # `TemplateV2Module` when `use_templates_v2` is set and this checkpoint
+  # carries use_templates_v2=True (hyper_parameters). The two classes share a
+  # parameter set, so `load_state_dict` accepts either and the wrong one only
+  # shows on a PARTIALLY COVERED complex: V2 masks by `visibility_ids`, V1 by
+  # `asym_id`. Building V1 here read corr 0.80 against our (correct) port. Same
+  # lesson as the relpos entity bucket -- read the flag from the checkpoint.
+  from boltz.model.modules.trunkv2 import TemplateV2Module
+  _v2 = bool(_ckpt.get('hyper_parameters', {}).get('use_templates_v2', False)) \
+      if isinstance(_ckpt, dict) else False
+  cls = TemplateV2Module if _v2 else TemplateModule
+  print('  native class: %s (use_templates_v2=%s)' % (cls.__name__, _v2))
+  net = cls(token_z=token_z, template_dim=c,
+            template_blocks=n_blocks, dropout=0.0)
   missing, unexpected = net.load_state_dict(sub, strict=False)
   print('  native: %d tensors, %d missing, %d unexpected %s'
         % (len(sub), len(missing), len(unexpected), list(missing)[:2]))
@@ -318,7 +332,7 @@ def native_boltz2(model, feats, z, pair_mask, hidden_scale_up):
   # boltz's restype vocabulary is AF3's + 2 (see Boltz2TemplateEmbedding).
   restype = np.eye(raw_dim - 76, dtype=np.float32)[np.clip(aa + 2, 0, None)]
   fd = {
-      'asym_id': torch.zeros(1, N, dtype=torch.long),
+      'asym_id': torch.as_tensor(np.asarray(feats.get('asym_id', np.zeros(N))), dtype=torch.long)[None],
       'template_restype': t(restype)[None][None],
       'template_frame_rot': t(rot)[None][None],
       'template_frame_t': t(ca)[None][None],
@@ -333,6 +347,18 @@ def native_boltz2(model, feats, z, pair_mask, hidden_scale_up):
       # difference. With a real template this is all-ones anyway.
       'template_mask': t((msk.sum(-1) > 0).astype(np.float32))[None][None],
   }
+  if cls is TemplateV2Module:
+    # boltz's own rule (featurizerv2): a TEMPLATED chain takes the template's
+    # pdb_id, an untemplated one takes `-1 - asym_id`, and tokens attend where
+    # the ids match. So every chain this template covers shares one id, and each
+    # uncovered chain gets its own. Assigned per CHAIN, not per token.
+    asym_np = np.asarray(feats.get('asym_id', np.zeros(N))).astype(np.int64)
+    covered_tok = (msk.sum(-1) > 0)
+    vis = np.zeros(N, np.float32)
+    for a in np.unique(asym_np):
+      sel = asym_np == a
+      vis[sel] = 0.0 if covered_tok[sel].any() else (-1.0 - float(a))
+    fd['visibility_ids'] = t(vis)[None][None]
   with torch.no_grad():
     out = net(t(z)[None], fd, t(pair_mask)[None])
   return np.asarray(out).reshape(z.shape[0], z.shape[1], -1)
@@ -438,7 +464,7 @@ def native_of3(model, feats, z, pair_mask, hidden_scale_up):
   aa = np.asarray(feats['aatype'])
   restype = np.eye(32, dtype=np.float32)[np.asarray(remap)[aa]]
   batch = {
-      'asym_id': torch.zeros(z.shape[0], dtype=torch.long)[None],
+      'asym_id': torch.as_tensor(np.asarray(feats.get('asym_id', np.zeros(z.shape[0]))), dtype=torch.long)[None],
       'template_restype': t(restype)[None][None],
       'template_distogram': t(feats['dgram'])[None][None],
       'template_pseudo_beta_mask': t(feats['pb_mask'])[None][None],
@@ -512,7 +538,7 @@ def native_if2(model, feats, z, pair_mask, hidden_scale_up):
   aa = np.asarray(feats['aatype'])
   restype = np.eye(n_aa, dtype=np.float32)[np.clip(aa, 0, n_aa - 1)]
   batch = {
-      'asym_id': torch.zeros(z.shape[0], dtype=torch.long)[None],
+      'asym_id': torch.as_tensor(np.asarray(feats.get('asym_id', np.zeros(z.shape[0]))), dtype=torch.long)[None],
       'template_aatype': t(restype)[None][None],
       'template_distogram': t(feats['dgram'])[None][None],
       'template_pseudo_beta_mask': t(feats['pb_mask'])[None][None],
@@ -580,7 +606,7 @@ def native_opendde(model, feats, z, pair_mask, hidden_scale_up):
   bb2 = feats['bb_mask'][:, None] * feats['bb_mask'][None, :]
   t = lambda a, d=torch.float32: torch.tensor(np.asarray(a), dtype=d)
   ifd = {
-      'asym_id': torch.zeros(z.shape[0], dtype=torch.long),
+      'asym_id': torch.as_tensor(np.asarray(feats.get('asym_id', np.zeros(z.shape[0]))), dtype=torch.long),
       'template_aatype': t(aat, torch.long)[None],
       'template_distogram': t(feats['dgram'])[None],
       'template_pseudo_beta_mask': t(pb2)[None],
@@ -614,6 +640,14 @@ def main(argv=None):
                   help='a SINGLE-chain mmCIF; folding_input.Template rejects '
                        'more than one (5CAJ has 2, which is what caught this)')
   ap.add_argument('--chain', default='A')
+  ap.add_argument('--dimer', action='store_true',
+                  help='put the self-template on chain A of a TWO-CHAIN input. '
+                       'The template embedder masks cross-chain pairs '
+                       '(multichain_mask_2d), and boltz2 masks by template '
+                       'COVERAGE instead (visibility_ids, '
+                       'TEMPLATE_VISIBILITY_BY_COVERAGE) -- neither term does '
+                       'anything on the one-chain input this gate otherwise '
+                       'runs, so both shipped ungated.')
   ap.add_argument('--model_dir', default=None)
   args = ap.parse_args(argv)
   sys.argv = sys.argv[:1]
@@ -635,8 +669,28 @@ def main(argv=None):
   seq, tmpl = _self_template(args.cif, args.chain)
   print('%s template embedder: %d residues, self-template from %s'
         % (args.model, len(seq), os.path.basename(args.cif)))
-  batch, cfg, model_dir = fold_check._fold_setup(
-      args.model, seq, args.model_dir, templates=[tmpl])
+  if args.dimer:
+    from alphafold3.common import folding_input
+    chains = [
+        folding_input.ProteinChain(id='A', sequence=seq, ptms=[],
+                                   unpaired_msa='', paired_msa='',
+                                   templates=[tmpl]),
+        # A GENUINELY different sequence. With the same one AF3 gives chain B
+        # the same entity and propagates the template to it, so all 152 tokens
+        # are covered and every cross-chain term is trivial again -- and note
+        # that 5K9P IS ubiquitin, so "ubiquitin" is not the foreign chain it
+        # looks like. 6MRR (a designed protein) is unrelated to both.
+        folding_input.ProteinChain(
+            id='B',
+            sequence=('GWSTELEKHREELKEFLKKEGITNVEIRIDNGRLEVRVEGGTERLKRFLEELR'
+                      'QKLEKKGYTVDIKIE'),
+            ptms=[], unpaired_msa='', paired_msa='', templates=[]),
+    ]
+    batch, cfg, model_dir = fold_check._fold_setup(
+        args.model, seq, args.model_dir, chains=chains)
+  else:
+    batch, cfg, model_dir = fold_check._fold_setup(
+        args.model, seq, args.model_dir, templates=[tmpl])
   fb = feat_batch.Batch.from_data_dict(batch)
   templates = fb.templates
   n_tmpl = np.asarray(templates.aatype).shape[0]
@@ -678,7 +732,13 @@ def main(argv=None):
   rng = np.random.default_rng(0)
   z = (rng.normal(size=(n_tok, n_tok, c_z)) * 0.5).astype(np.float32)
   pair_mask = np.ones((n_tok, n_tok), np.float32)
-  multichain = np.ones((n_tok, n_tok), np.float32)
+  # THE REAL CHAIN IDS. Both sides used to be told "one chain" -- ours by an
+  # all-ones multichain mask here, native by `asym_id=zeros` in every adapter --
+  # which is right on the monomer this gate ran and silently disables every
+  # cross-chain term on `--dimer`. With the real ids, our multichain mask and
+  # native's asym_id describe the SAME two chains.
+  asym = np.asarray(fb.token_features.asym_id).astype(np.int64)
+  multichain = (asym[:, None] == asym[None, :]).astype(np.float32)
 
   # ONE template on BOTH sides. The batch pads to 4 template slots; our module
   # aggregates over all of them while native loops over exactly the ones it is
@@ -702,6 +762,8 @@ def main(argv=None):
       atom_positions=np.asarray(templates.atom_positions)[0],
       atom_mask=np.asarray(templates.atom_mask)[0])
   feats = our_features(args.model, cfg.evoformer.template, single, multichain)
+  # Hand the adapters the same chain ids our side just used.
+  feats['asym_id'] = asym
   print('  our features: ' + ', '.join(
       '%s %s' % (k.replace('template_', ''), v.shape)
       for k, v in sorted(feats.items())))

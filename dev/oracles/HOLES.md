@@ -1123,6 +1123,63 @@ so it is untested, not disproved. Next step: compare blocks 0..16 only; if those
 are exact, the whole disagreement is the edge block and the gate needs a bound
 that matches each vendor's own padding.
 
+## The template embedder on a PARTIALLY COVERED complex (2026-09-13, OPEN)
+
+Every module gate in this directory ran ONE protein chain, so no L1-L4 cell
+exercised a cross-chain convention -- and two of this project's bugs (boltz2's
+relpos entity bucket, esmfold2's chain bucket) lived exactly there. Two gates
+now take a two-chain input:
+
+* `trunk_init_parity.py --chains_json <fold input>` -- z-init is where the
+  relative-position encoding lives. **All nine models pass**: corr 1.000000,
+  max|d| <= 5.5e-04 on a 152-token homodimer.
+* `template_parity.py --dimer` -- chain A carries the self-template, chain B is
+  an unrelated sequence, so only 76 of 144 tokens are covered.
+
+The template gate finds a real split:
+
+| model | corr | max\|d\|/rms |
+|---|---|---|
+| opendde | **1.000000** | 2.9e-05 |
+| rosettafold3 | **1.000000** | 1.0e-05 |
+| protenix1 | **1.000000** | 4.4e-06 |
+| protenix2 | **1.000000** | 1.1e-05 |
+| openfold3 | 0.999841 | 1.30 |
+| intellifold2 | 0.995935 | 3.74 |
+| openbind0 | 0.995623 | 4.27 |
+| **boltz2** | **0.801064** | 8.54 |
+
+**Four models are exact on this input, so the gate is sound and the other four
+are real leads.** boltz2 is the outlier by an order of magnitude, and its output
+is systematically SMALLER than native's (rms ratio 0.736).
+
+Three harness faults were fixed getting here, and they are the reason this was
+never seen:
+
+1. **Both sides were told "one chain."** Ours by `multichain = np.ones(...)`,
+   native by `asym_id = torch.zeros(...)` in EVERY adapter. Correct on a
+   monomer, and it silently disables every cross-chain term on a complex. Both
+   now take the batch's real `asym_id`.
+2. **The wrong native CLASS.** The boltz2 adapter built `TemplateModule` where
+   the checkpoint's `hyper_parameters` carry `use_templates_v2=True`, i.e.
+   `TemplateV2Module`. The two share a parameter set, so `load_state_dict`
+   accepts either -- the same trap as loading openbind0's weights into of3
+   main. It is now read from the checkpoint, and `visibility_ids` is built by
+   boltz's own rule (a templated chain takes the template's pdb_id, an
+   untemplated one `-1 - asym_id`). NOTE: with exactly one templated chain the
+   V1 and V2 masks COINCIDE, so this was not the cause of the 0.80 -- the
+   output was identical to six digits before and after.
+3. **5K9P IS ubiquitin.** The first version of `--dimer` used "ubiquitin" as the
+   foreign chain against a 5K9P template and got 152 of 152 tokens covered,
+   same-entity propagation, and a meaningless corr 1.000000. Chain B is now
+   6MRR's designed sequence, which is unrelated to both.
+
+**Next**: the divergence is specific to UNCOVERED tokens (the same gate reads
+1.000000 when both chains are covered). The masks provably agree, so the
+suspicion is what each side puts in the template features for an uncovered
+token, not how they are masked -- compare our internal per-template features
+against the `our_features` arrays handed to native, on chain B's tokens alone.
+
 ## The output side is gated over three input classes (2026-09-12)
 
 `output_parity.py`, 14/14 after the drop fix:
