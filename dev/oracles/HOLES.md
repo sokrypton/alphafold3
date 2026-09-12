@@ -970,6 +970,49 @@ does, we reproduce), and for boltz2 (ONE slot, `template_mask` all zero, so its
 present-weighted mean contributes exactly zero -- ours too). `intellifold2`,
 `opendde` and `rosettafold3` have NOT been checked.
 
+## The featurisation sweep is COMPLETE: five vendors, one finding, one correction (2026-09-12)
+
+Every vendor whose featuriser can be driven here has now been diffed against
+ours, field by field, with the atom axis matched BY NAME first
+(`dev/oracles/native_{boltz,dde,if2,rf3}_featdump.py` + `native_of3_dump.py`,
+all feeding `featurisation_diff.py`).
+
+| vendor | atoms ours/native | atom order | ref_charge / ref_space_uid / ref_element | token ids, profile, deletion_mean | ref_pos |
+|---|---|---|---|---|---|
+| `boltz2` | 574/573 -> **573/573** | 573/573 | exact | exact / relabeling / exact | 0.990 A per residue |
+| `openfold3`, `openbind0` | 602/601 -> **601/601** | 601/601 | exact | exact | conformer draw |
+| `opendde` | **602/602** | 602/602 | exact | exact / relabeling / exact | conformer draw |
+| `intellifold2` | **573/573** | 573/573 | exact | exact, and `profile` EXACT (same 31-class width as ours) | conformer draw |
+| `rosettafold3` | **573/573** | 573/573 | exact | exact | conformer draw |
+
+Two of those atom counts were ours being wrong (the terminal-atom convention,
+above); `opendde`'s 602/602 is the independent confirmation that it KEEPS the
+OXT, and `intellifold2`'s and `rosettafold3`'s 573/573 confirm they drop it --
+the drop/keep split now rests on each vendor's own featuriser output, not on
+reading its tables.
+
+**What the sweep produced, end to end: one finding (the terminal atoms, which
+generalised to five models), one correction of my own fix (opendde's empty
+template is [31, 0, 0, 0], not all-31), and otherwise a clean bill.** Everything
+else -- charges, space uids, element indices, atom ORDER, residue/token/asym/
+entity/sym ids, deletion means, MSA profiles -- agrees exactly or differs by a
+documented relabeling.
+
+`ref_pos` differs for every vendor, always by the same amount (about 1 A per
+residue after alignment) and always for the same reason: the conformer is a
+different RDKit draw, not a different molecule. It is priced -- substituting
+native's own `ref_pos` into a protenix fold moved it 0.01 A -- and it is the one
+input difference that is not worth chasing.
+
+**Three harness faults surfaced inside the tool itself**, each the same shape as
+the findings it looks for: comparing padded native slots against our real atoms
+(needs the vendor's pad mask), assuming of3's 0-indexed element one-hot for
+boltz2's 1-indexed one, and dropping the first axis of every multi-dimensional
+array -- which turned opendde's unbatched `ref_pos` (602, 3) into (3,) and read
+as "native has 3 atoms". The tool now filters by the vendor's own masks, detects
+the element base, trims a padded TOKEN axis, and handles both atom layouts (flat
+with a pad mask; dense per token, which is what intellifold2 and we use).
+
 ## opendde's featurisation: clean, and it CORRECTS my own template fix (2026-09-12)
 
 Second vendor through `featurisation_diff.py`, driven through opendde's own

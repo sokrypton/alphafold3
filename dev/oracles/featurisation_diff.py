@@ -77,9 +77,21 @@ def main(argv=None):
       _pad = _sq(k).astype(bool)
       break
 
+  # Some vendors pad the TOKEN axis too (intellifold2: 256 slots for 68 real
+  # tokens). Trim it, or every per-token comparison reads as a shape mismatch.
+  _ntok = None
+  for k in ('token_pad_mask', 'token_mask', 'seq_mask'):
+    if k in d.files:
+      _ntok = int(np.asarray(_sq(k)).astype(bool).sum())
+      break
+
   def sq(k, atoms=False):
     v = _sq(k)
-    return v[_pad] if (atoms and _pad is not None and v.shape[0] == _pad.shape[0]) else v
+    if atoms and _pad is not None and v.shape[:_pad.ndim] == _pad.shape:
+      return v[_pad]
+    if (not atoms) and _ntok is not None and v.ndim >= 1 and v.shape[0] > _ntok:
+      return v[:_ntok]
+    return v
   b, cfg, _ = fold_check._fold_setup(model, seq, None)
   mask = np.asarray(b['pred_dense_atom_mask']) > 0
   flat = mask.reshape(-1)
