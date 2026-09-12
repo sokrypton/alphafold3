@@ -1,0 +1,15 @@
+{
+ "queries": {
+  "6mrr": {
+   "chains": [
+    {
+     "molecule_type": "protein",
+     "chain_ids": [
+      "A"
+     ],
+     "sequence": "GWSTELEKHREELKEFLKKEGITNVEIRIDNGRLEVRVEGGTERLKRFLEELRQKLEKKGYTVDIKIE"
+    }
+   ]
+  }
+ }
+}

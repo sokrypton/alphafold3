@@ -970,6 +970,76 @@ does, we reproduce), and for boltz2 (ONE slot, `template_mask` all zero, so its
 present-weighted mean contributes exactly zero -- ours too). `intellifold2`,
 `opendde` and `rosettafold3` have NOT been checked.
 
+## L0-L6 re-run clean, and what the two "movers" actually were (2026-09-12)
+
+The matrix had gone ~40 commits stale. Re-run in full: **256 OK, 0 FAIL, 1 SKIP,
+63 N/A**. The SKIP is the one real hole (boltz2 has no in-process L3 adapter; its
+`L3.denoise_inject` cell covers the same module by injection).
+
+Two L5 rows sat above the 2026-09-06 baseline and BOTH dissolved under the right
+statistic rather than a fix:
+
+* **protenix2 0.702 -> 1.016 best-of-5.** Not the input-convention knobs: with
+  `AF3_NO_PX_TEMPLATE_GAP` and `AF3_NO_PX_DEDUPE_MSA` set, every combination
+  lands at mean 1.386-1.394, i.e. the knobs move this target by ~0.005 A. Over
+  **20 samples** (SEEDS=0,1,2,3) it reaches **best 0.589, mean 1.459** -- better
+  than the baseline row. 0.702 was a best-of-5 tail draw.
+* **esmfold2_lm600m 0.858 -> 1.522 best-of-5.** Not the hidden-state file
+  either: `dev/bench/hid_new.npz` and `lm_inputs/esmc_600m.protein_6mrr.npz`
+  give 1.503 and 1.527. Over 20 samples: **best 1.090, mean 1.508**, which
+  reproduces the own-tower condition recorded in
+  [[esmfold2-relpos-chain-bucket]] (1.044 best / 1.519 mean) to 0.05 / 0.01 A.
+  The 0.858 baseline row was measured under a different condition, not lost.
+
+**The lesson is the one the baseline memory already states and I still had to
+re-learn: best-of-5 is a TAIL statistic.** Both "regressions" were a single
+lucky or unlucky draw, and both took one 20-sample run to settle. Do not open an
+investigation on a best-of-5 move again.
+
+## The of3-lineage atom path: a module gap with no fold cost (2026-09-12, OPEN)
+
+Three levels in a row single out openfold3 and openbind0 and nobody else:
+
+    L2.atom_encoder  p_pair_valid  corr 0.994137 / 0.987120   (others 1.000000)
+    L2.atom_decoder  r_update      corr 0.998142 / 0.999486   (others 1.000000)
+    L3.denoise       per-atom      mean 1.2147 A / 1.2130 A   (others <= 0.0003)
+
+All three are recorded OK because each gate scales by rms(native) (15-20 A at
+the denoise step). What has been established:
+
+* It is NOT the input. `denoise_parity`/`atom_parity` build OUR batch and feed
+  the SAME features to both sides, so the conformer difference the featurisation
+  diff found cannot reach this.
+* It is NOT the per-atom reference features. `c_atom_cond` is bit-exact
+  (corr 1.000000, max|d| 0), and the FEAT sweep (keep pos / charge / element /
+  chars, zero the rest) leaves the pair gap at 0.9943-0.9947 every time --
+  including with positions zeroed, which makes every offset zero.
+* It is NOT fully the trunk-pair gather: zeroing z moves 0.9941 -> 0.9968, and
+  zeroing z AND positions together still leaves 0.9977.
+* The key-window edge policy is NOT the cause: `slide_qblock` (if2's convention,
+  and the one that reproduces native's 576-atom bound) makes it WORSE,
+  0.9941 -> 0.9835. Retracted.
+
+**And it costs nothing end to end.** Native of3 was run on 6MRR for both
+releases, 5 samples each, scored the same way:
+
+    openfold3 (preview-2)  ours 1.546 / 1.717      native 1.637 / 1.714
+    openbind0 (v0.5.0)     ours 1.579 / 1.776      native 1.644 / 1.766
+
+Means agree to 0.003 and 0.010 A, and our best is better in both. So whatever
+the module gap is, it does not reach the fold on this target.
+
+The remaining suspicion is the COMPARISON itself: our `p_lm` is (51, 32, 128, 16)
+against native's (18, 32, 128, 16), because we pad the flat atom axis to
+`padded_tokens * average_num_atoms_per_token` (1632) where native compacts to
+`ceil(573/32)*32` (576). The gate truncates ours to native's 18 blocks, which is
+only like-for-like if the key windows agree -- and for the LAST block holding
+real atoms they do not (ours 496..623, native 448..575). An attempt to test this
+by lowering `average_num_atoms_per_token` did not take effect (still 51 blocks),
+so it is untested, not disproved. Next step: compare blocks 0..16 only; if those
+are exact, the whole disagreement is the edge block and the gate needs a bound
+that matches each vendor's own padding.
+
 ## The sweep now covers a PTM, a LIGAND and a DIMER (2026-09-12)
 
 The featurisation diff only ever ran on a plain protein monomer, which certifies
