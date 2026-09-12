@@ -12,7 +12,11 @@ sys.path.insert(0, '/home/ubuntu/BoltzDesign1/boltz2/src')
 from boltz.data.types import Manifest
 from boltz.data.module.inferencev2 import Boltz2InferenceDataModule
 
-proc = Path('/home/ubuntu/boltz2_6mrr/out/boltz_results_6mrr/processed')
+# PROC lets the ligand / two-chain cases run: point it at any tree written by
+# boltz's own process_inputs (see the prep script beside this one).
+import os
+proc = Path(os.environ.get(
+    'PROC', '/home/ubuntu/boltz2_6mrr/out/boltz_results_6mrr/processed'))
 dm = Boltz2InferenceDataModule(
     manifest=Manifest.load(proc / 'manifest.json'), target_dir=proc / 'structures',
     msa_dir=proc / 'msa', mol_dir=Path('/home/ubuntu/.boltz/mols'), num_workers=0,

@@ -20,11 +20,21 @@ from rf3.utils.inference import InferenceInput
 SEQ = os.environ.get('SEQ', 'GWSTELEKHREELKEFLKKEGITNVEIRIDNGRLEVRVEGGTERLKRFLEELRQKLEKKGYTVDIKIE')
 OUT = sys.argv[1]
 
-spec = InferenceInput.from_json_dict(
-    {'name': 'feat_dump', 'components': [{'seq': SEQ, 'chain_id': 'A'}]})
+# COMPONENTS lets the ligand and two-chain cases be driven through rf3's own
+# component schema ({'seq':..} / {'ccd_code':..}); SEQ stays the monomer default.
+import json
+comps = json.loads(os.environ['COMPONENTS']) if os.environ.get('COMPONENTS') else [
+    {'seq': SEQ, 'chain_id': 'A'}]
+spec = InferenceInput.from_json_dict({'name': 'feat_dump', 'components': comps})
+# use_element_for_atom_names_of_atomized_tokens DEFAULTS TO FALSE here, but
+# rf3's own inference engine sets it True
+# (models/rf3/src/rf3/inference_engines/rf3.py:330). Leaving it at the default
+# makes this dump hand a ligand its CCD atom names, which rf3 never sees, and
+# reads as a port bug in our (correct) element-name branch.
 pipeline = build_af3_transform_pipeline(
     is_inference=True, protein_msa_dirs=[], rna_msa_dirs=[], n_recycles=1,
-    residue_cache_dir=None)
+    residue_cache_dir=None,
+    use_element_for_atom_names_of_atomized_tokens=True)
 out = pipeline(spec.to_pipeline_input())
 
 

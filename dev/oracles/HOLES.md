@@ -991,6 +991,37 @@ that matters for a CCD-built component: a different CCD read would reorder them.
 `ref_pos` differs in all three, by the usual conformer draw, as it does
 everywhere.
 
+**All five vendors now run the ligand and the dimer, and all five are clean:**
+
+| vendor | ligand atoms ours/native | dimer atoms ours/native | names | every other field |
+|---|---|---|---|---|
+| openfold3 | 917/917 | 1202/1202 | 100% | exact |
+| opendde | **918/918** | **1204/1204** | 100% | exact |
+| intellifold2 | 917/917 | 1202/1202 | 100% | exact |
+| rosettafold3 | 917/917 | 1202/1202 | 100% | exact |
+| boltz2 | 917/917 | 1202/1202 | 100% | exact |
+
+opendde's counts are one higher PER CHAIN because opendde KEEPS the terminal
+OXT where the other four drop it -- and our side matches each vendor, which is
+the per-model terminal-atom convention checked on both termini of a two-chain
+input rather than on one monomer.
+
+Two dump scripts were under-specified and had to be fixed before they could be
+believed:
+
+* `native_rf3_featdump.py` built rf3's pipeline with
+  `use_element_for_atom_names_of_atomized_tokens` at its **library default of
+  False**, while rf3's own inference engine sets it True
+  (`models/rf3/src/rf3/inference_engines/rf3.py:330`). The dump therefore gave
+  BTN its CCD names (C11 O11 O12 ...) where rf3 only ever sees `C O O ...`, and
+  the ligand case read as "16/917 atom names disagree" -- a phantom bug in our
+  correct `atomized_element_names` branch. **A vendor featuriser has to be
+  driven with the vendor's INFERENCE overrides, not its constructor defaults**,
+  which is the same lesson as building a native from the wrong release.
+* `featurisation_diff.py` only stripped the `batch_` dump prefix, so rf3's
+  nested `feats.*` names missed every field lookup.
+
+
 **So of3's featurisation now agrees with ours on four input classes** -- monomer,
 modified residue, ligand complex, two chains -- to every field but the conformer.
 The remaining featurisation gap is the other vendors on these same three cases:

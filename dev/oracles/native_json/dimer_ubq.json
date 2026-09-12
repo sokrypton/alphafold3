@@ -1,0 +1,17 @@
+[
+ {
+  "sequences": [
+   {
+    "proteinChain": {
+     "sequence": "MQIFVKTLTGKTITLEVEPSDTIENVKAKIQDKEGIPPDQQRLIFAGKQLEDGRTLSDYNIQKESTLHLVLRLRGG",
+     "count": 2,
+     "id": [
+      "A",
+      "B"
+     ]
+    }
+   }
+  ],
+  "name": "dimer_ubq"
+ }
+]

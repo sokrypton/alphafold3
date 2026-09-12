@@ -60,9 +60,16 @@ def main(argv=None):
   d = np.load(npz)
   # Dumps written by the native_*_dump.py hooks prefix batch fields with
   # 'batch_'; accept either naming.
-  if any(k.startswith('batch_') for k in d.files):
-    _stripped = {k[len('batch_'):] if k.startswith('batch_') else k: d[k]
-                 for k in d.files}
+  # 'batch_' is the of3/protenix hook prefix, 'feats.' rf3's nested pipeline
+  # output flattened.
+  _PRE = [p for p in ('batch_', 'feats.') if any(k.startswith(p) for k in d.files)]
+  if _PRE:
+    def _strip(k):
+      for p in _PRE:
+        if k.startswith(p):
+          return k[len(p):]
+      return k
+    _stripped = {_strip(k): d[k] for k in d.files}
 
     class _Dump:                       # the npz interface the rest of this uses
       files = list(_stripped)

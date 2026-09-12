@@ -1,0 +1,25 @@
+[
+ {
+  "sequences": [
+   {
+    "proteinChain": {
+     "sequence": "AEAGITGTWYNQLGSTFIVTAGADGALTGTYESAVGNAESRYVLTGRYDSAPATDGSGTALGWTVAWKNNYRNAHSATTWSGQYVGGAEARINTQWLLTSGTTEANAWKSTLVGHDTFTKV",
+     "count": 1,
+     "id": [
+      "A"
+     ]
+    }
+   },
+   {
+    "ligand": {
+     "ligand": "CCD_BTN",
+     "count": 1,
+     "id": [
+      "B"
+     ]
+    }
+   }
+  ],
+  "name": "ligand_1stp"
+ }
+]
