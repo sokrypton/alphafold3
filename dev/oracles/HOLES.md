@@ -970,6 +970,33 @@ does, we reproduce), and for boltz2 (ONE slot, `template_mask` all zero, so its
 present-weighted mean contributes exactly zero -- ours too). `intellifold2`,
 `opendde` and `rosettafold3` have NOT been checked.
 
+## The sweep now covers a PTM, a LIGAND and a DIMER (2026-09-12)
+
+The featurisation diff only ever ran on a plain protein monomer, which certifies
+a plain protein monomer -- and the first extension (the PTM case) immediately
+found a bug I had just introduced. The other two extensions are now run, against
+of3 in its own schema:
+
+| case | tokens | atoms ours/native | atom order | ref_charge / space_uid / element | token ids |
+|---|---|---|---|---|---|
+| SEP-20 ubiquitin (ATOMISED) | 85 | **605/605** | 605/605 | exact | exact |
+| 1STP + BTN (LIGAND) | 137 | **917/917** | 917/917 | exact | exact, plus `is_ligand` and `is_protein` identical |
+| ubiquitin homodimer (TWO CHAINS) | 152 | **1202/1202** | 1202/1202 | exact | `asym_id`, `entity_id`, `sym_id`, `token_index`, `residue_index` all identical |
+
+The dimer's 1202 is 2 x 601, which also shows the terminal-atom drop applying
+per chain rather than once. The ligand's 16 BTN atoms come out in native's own
+order (C11 O11 O12 C10 C9 C8 C7 C2 S1 C6 C5 N1 C3 O3 N2 C4), which is the check
+that matters for a CCD-built component: a different CCD read would reorder them.
+
+`ref_pos` differs in all three, by the usual conformer draw, as it does
+everywhere.
+
+**So of3's featurisation now agrees with ours on four input classes** -- monomer,
+modified residue, ligand complex, two chains -- to every field but the conformer.
+The remaining featurisation gap is the other vendors on these same three cases:
+each has been diffed on a monomer only, and the PTM case is exactly where the
+one bug turned up.
+
 ## The terminal-atom drop was eating a PHOSPHOSERINE oxygen (2026-09-12)
 
 Caught by extending the featurisation diff to the ATOMISED path -- every run of

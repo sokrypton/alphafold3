@@ -1,0 +1,22 @@
+{
+ "queries": {
+  "1stp_btn": {
+   "chains": [
+    {
+     "molecule_type": "protein",
+     "chain_ids": [
+      "A"
+     ],
+     "sequence": "AEAGITGTWYNQLGSTFIVTAGADGALTGTYESAVGNAESRYVLTGRYDSAPATDGSGTALGWTVAWKNNYRNAHSATTWSGQYVGGAEARINTQWLLTSGTTEANAWKSTLVGHDTFTKV"
+    },
+    {
+     "molecule_type": "ligand",
+     "chain_ids": [
+      "B"
+     ],
+     "ccd_codes": "BTN"
+    }
+   ]
+  }
+ }
+}

@@ -46,6 +46,15 @@ def main(argv=None):
   model, npz = argv[0], argv[1]
   seq = argv[2] if len(argv) > 2 else None
   import fold_check
+  # Third argument: a SEQUENCE, or a fold-input JSON so the LIGAND and
+  # MULTI-CHAIN cases can be driven -- a diff run only on a plain monomer
+  # certifies a plain monomer, which is how the terminal-atom drop came to eat a
+  # phosphoserine's O3P (see HOLES.md).
+  chains = None
+  if seq and seq.endswith('.json'):
+    from alphafold3.common import folding_input
+    chains = list(folding_input.Input.from_json(open(seq).read()).chains)
+    seq = getattr(chains[0], 'sequence', '')
   if seq is None:
     seq = fold_check.parse_ca(os.path.expanduser('~/6MRR.pdb'))[0]
   d = np.load(npz)
@@ -92,7 +101,7 @@ def main(argv=None):
     if (not atoms) and _ntok is not None and v.ndim >= 1 and v.shape[0] > _ntok:
       return v[:_ntok]
     return v
-  b, cfg, _ = fold_check._fold_setup(model, seq, None)
+  b, cfg, _ = fold_check._fold_setup(model, seq, None, chains=chains)
   mask = np.asarray(b['pred_dense_atom_mask']) > 0
   flat = mask.reshape(-1)
   print('%s: %d tokens, %d real atoms (native %d)'
