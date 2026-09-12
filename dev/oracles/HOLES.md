@@ -970,6 +970,42 @@ does, we reproduce), and for boltz2 (ONE slot, `template_mask` all zero, so its
 present-weighted mean contributes exactly zero -- ours too). `intellifold2`,
 `opendde` and `rosettafold3` have NOT been checked.
 
+## CLOSED: protenix's bf16 autocast is not something to match (2026-09-12)
+
+Recorded earlier as "an opportunity, not a bug" -- protenix INFERS under
+`torch.autocast(bf16)`, so bf16 is arguably part of its convention, and our
+`BF16=all` is a different thing (it casts parameters where autocast keeps fp32
+masters and casts per-op). Measured now, on the MSA-conditioned 5K9P case, which
+is deterministic where the single-sequence one is bistable:
+
+| | vs native fp32 | vs native autocast-bf16 |
+|---|---|---|
+| native's other mode | -- | corr **0.99829228**, max\|d\| 178.7 |
+| ours `BF16=none` | corr **0.99999968**, max\|d\| 3.3 | 0.99829162 |
+| ours `BF16=all` | 0.99992155, max\|d\| 32.3 | 0.99824220 |
+| ours fp32 arrays + matmul `bfloat16` | -- | 0.99829408 |
+| ours fp32 arrays + matmul `tensorfloat32` | -- | 0.99829130 |
+
+**Every one of our modes sits at 0.9983 from native-bf16 -- the same distance
+native's OWN fp32 sits at.** Our precision knobs move the trunk by far less than
+the bf16 gap, so they all read as "native-fp32-like", and none of them tracks
+native's bf16 trajectory. That is not a defect to fix: reproducing a bf16
+trajectory means reproducing the op order and the kernel rounding, which is not
+achievable across frameworks and is not what parity means. `JAX_DEFAULT_MATMUL_PRECISION=bfloat16`
+was the plausible route to autocast's semantics (fp32 arrays, bf16 matmul inputs,
+fp32 accumulation) and it changes the sixth decimal.
+
+**And it buys nothing.** The fold on this target, two processes each, bit-stable:
+`BF16=all` 1.854 / 1.854, `BF16=none` 1.857. The precision that matters is the
+one the deterministic comparison uses, and there our fp32 trunk matches native's
+fp32 trunk to corr 0.99999968.
+
+So the standing item is CLOSED rather than fixed, and the general statement is
+worth keeping: **bf16 IS the noise floor here, on both sides.** A parity claim
+about protenix has to be made in fp32, which is what
+`native_protenix_dump.py --dtype fp32` already defaults to, and a fold number
+quoted in bf16 is quoting a draw from that floor.
+
 ## TO WATCH: NVIDIA's BioNeMo Inference Runtime, for the runtime comparison (2026-09-12)
 
 https://developer.nvidia.com/blog/high-throughput-structure-prediction-with-bionemo-inference-runtime
