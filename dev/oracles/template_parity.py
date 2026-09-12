@@ -330,7 +330,15 @@ def native_boltz2(model, feats, z, pair_mask, hidden_scale_up):
     rot[i] = r
   t = lambda a, d=torch.float32: torch.tensor(np.asarray(a), dtype=d)
   # boltz's restype vocabulary is AF3's + 2 (see Boltz2TemplateEmbedding).
-  restype = np.eye(raw_dim - 76, dtype=np.float32)[np.clip(aa + 2, 0, None)]
+  # UNCOVERED tokens take class 0, not their real residue type. boltz allocates
+  # `res_type = np.zeros(num_tokens)` and fills it only for tokens the template
+  # covers (featurizerv2), so on a partially covered complex every token of an
+  # untemplated chain is the zero class. Handing native `aa + 2` everywhere gave
+  # it residue types our port correctly withholds, and read as boltz2 diverging
+  # at corr 0.80 with its output "too small" -- the port was right.
+  _cov = (msk.sum(-1) > 0)
+  restype = np.eye(raw_dim - 76, dtype=np.float32)[
+      np.clip(np.where(_cov, aa + 2, 0), 0, None)]
   fd = {
       'asym_id': torch.as_tensor(np.asarray(feats.get('asym_id', np.zeros(N))), dtype=torch.long)[None],
       'template_restype': t(restype)[None][None],
@@ -394,7 +402,18 @@ def _af3_template_features(cfg, single, asym_mask_2d):
     rigid, bb_mask = T.make_backbone_rigid(
         geometry.Vec3Array.from_array(pos), msk, grp.astype(jnp.int32))
     uv = rigid[:, None].inverse().apply_to_point(rigid.translation).normalized()
-    return dgram, pb_mask, bb_mask, jnp.stack([uv.x, uv.y, uv.z], -1)
+    uv = jnp.stack([uv.x, uv.y, uv.z], -1)
+    # MASK THEM, as the module does. `SingleTemplateEmbedding.construct_input`
+    # multiplies the distogram by `pseudo_beta_mask_2d` and the unit vector by
+    # `backbone_mask_2d`, and BOTH have already been multiplied by
+    # `multichain_mask_2d`. Handing native the raw tensors gave it geometry for
+    # pairs our module zeroes -- invisible on a covered monomer, where the masks
+    # are all ones, and worth 1-5% on a partially covered complex. The mask is
+    # 0/1 so this is idempotent for a native that masks internally too.
+    am = jnp.asarray(asym_mask_2d)
+    pb2 = pb_mask[:, None] * pb_mask[None, :] * am
+    bb2 = bb_mask[:, None] * bb_mask[None, :] * am
+    return dgram * pb2[..., None], pb_mask, bb_mask, uv * bb2[..., None]
 
   f = hk.transform(fwd)
   dgram, pb_mask, bb_mask, uv = f.apply(f.init(jax.random.PRNGKey(0)),
@@ -739,6 +758,10 @@ def main(argv=None):
   # native's asym_id describe the SAME two chains.
   asym = np.asarray(fb.token_features.asym_id).astype(np.int64)
   multichain = (asym[:, None] == asym[None, :]).astype(np.float32)
+  if os.environ.get('TMPL_MC') == 'ones':
+    # OUR side stops masking cross-chain template pairs. If the gap closes, the
+    # two sides disagree about whether a template attends ACROSS chains.
+    multichain = np.ones_like(multichain)
 
   # ONE template on BOTH sides. The batch pads to 4 template slots; our module
   # aggregates over all of them while native loops over exactly the ones it is
@@ -806,6 +829,34 @@ def main(argv=None):
             'intellifold2 and rf3 all keep a Z-dependent half here.')
   print('  shapes: ours %s native %s' % (got.shape, ref.shape))
   _cmp('template_embed', got, ref)
+  if os.environ.get('TMPL_FLOOR'):
+    # DOES THIS CELL HAVE RESOLUTION? Run NATIVE again on a z perturbed by a
+    # relative 1e-6 and compare it to native's own first answer. A stack that
+    # turns 1e-6 into a percent is an amplifier being measured, not a port --
+    # the same question the trunk gate's --blocks help text asks.
+    z2 = (z * (1.0 + 1e-6)).astype(z.dtype)
+    ref2 = NATIVES[args.model](args.model, feats, z2, pair_mask, hsu)
+    a, b = np.asarray(ref, np.float64), np.asarray(ref2, np.float64)
+    print('    FLOOR native(z) vs native(z*(1+1e-6)):  corr %.6f  '
+          'mean|d| %.5g  rms %.4g'
+          % (np.corrcoef(a.reshape(-1), b.reshape(-1))[0, 1],
+             np.abs(a - b).mean(), np.sqrt((a ** 2).mean())))
+  if os.environ.get('TMPL_SPLIT'):
+    # WHERE the disagreement lives, on the arrays the gate just compared.
+    # `--dimer` covers one chain of two, and a masking difference shows up on
+    # the cross-chain block while a FEATURE difference for an uncovered token
+    # shows up on that chain's own block.
+    cov = (np.asarray(single.atom_mask).sum(-1) > 0)
+    g, r = np.asarray(got, np.float64), np.asarray(ref, np.float64)
+    d = np.abs(g - r).mean(-1)
+    for nm, sel in (('covered x covered', np.outer(cov, cov)),
+                    ('uncov x uncov', np.outer(~cov, ~cov)),
+                    ('cross', np.outer(cov, ~cov) | np.outer(~cov, cov))):
+      if not sel.any():
+        continue
+      print('    %-18s mean|d| %-10.5g ours rms %-9.4g native rms %.4g'
+            % (nm, d[sel].mean(), np.sqrt((g[sel] ** 2).mean()),
+               np.sqrt((r[sel] ** 2).mean())))
   return 0
 
 

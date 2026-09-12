@@ -1123,62 +1123,61 @@ so it is untested, not disproved. Next step: compare blocks 0..16 only; if those
 are exact, the whole disagreement is the edge block and the gate needs a bound
 that matches each vendor's own padding.
 
-## The template embedder on a PARTIALLY COVERED complex (2026-09-13, OPEN)
+## Cross-chain gates: two modules, and FOUR harness faults (2026-09-13, CLOSED)
 
-Every module gate in this directory ran ONE protein chain, so no L1-L4 cell
-exercised a cross-chain convention -- and two of this project's bugs (boltz2's
-relpos entity bucket, esmfold2's chain bucket) lived exactly there. Two gates
-now take a two-chain input:
+Every module gate ran ONE protein chain, so no L1-L4 cell exercised a
+cross-chain convention -- and two of this project's bugs (boltz2's relpos entity
+bucket, esmfold2's chain bucket) lived exactly there. Two gates now take a
+complex:
 
-* `trunk_init_parity.py --chains_json <fold input>` -- z-init is where the
-  relative-position encoding lives. **All nine models pass**: corr 1.000000,
-  max|d| <= 5.5e-04 on a 152-token homodimer.
+* `trunk_init_parity.py --chains_json <fold input>` -- z-init, where the
+  relative-position encoding lives. **All nine models pass** on a 152-token
+  homodimer: corr 1.000000, max|d| <= 5.5e-04.
 * `template_parity.py --dimer` -- chain A carries the self-template, chain B is
-  an unrelated sequence, so only 76 of 144 tokens are covered.
+  an unrelated sequence, so 76 of 144 tokens are covered. **All eight models
+  pass**: corr 1.000000, max|d| <= 2.0e-03.
 
-The template gate finds a real split:
-
-| model | corr | max\|d\|/rms |
-|---|---|---|
-| opendde | **1.000000** | 2.9e-05 |
-| rosettafold3 | **1.000000** | 1.0e-05 |
-| protenix1 | **1.000000** | 4.4e-06 |
-| protenix2 | **1.000000** | 1.1e-05 |
-| openfold3 | 0.999841 | 1.30 |
-| intellifold2 | 0.995935 | 3.74 |
-| openbind0 | 0.995623 | 4.27 |
-| **boltz2** | **0.801064** | 8.54 |
-
-**Four models are exact on this input, so the gate is sound and the other four
-are real leads.** boltz2 is the outlier by an order of magnitude, and its output
-is systematically SMALLER than native's (rms ratio 0.736).
-
-Three harness faults were fixed getting here, and they are the reason this was
-never seen:
+**Both gates ended green, and every one of the four faults on the way was in the
+HARNESS.** That is the finding: a cross-chain gate is easy to write in a way
+that tests nothing, and easy to make read like a port bug.
 
 1. **Both sides were told "one chain."** Ours by `multichain = np.ones(...)`,
-   native by `asym_id = torch.zeros(...)` in EVERY adapter. Correct on a
-   monomer, and it silently disables every cross-chain term on a complex. Both
-   now take the batch's real `asym_id`.
-2. **The wrong native CLASS.** The boltz2 adapter built `TemplateModule` where
-   the checkpoint's `hyper_parameters` carry `use_templates_v2=True`, i.e.
-   `TemplateV2Module`. The two share a parameter set, so `load_state_dict`
-   accepts either -- the same trap as loading openbind0's weights into of3
-   main. It is now read from the checkpoint, and `visibility_ids` is built by
-   boltz's own rule (a templated chain takes the template's pdb_id, an
-   untemplated one `-1 - asym_id`). NOTE: with exactly one templated chain the
-   V1 and V2 masks COINCIDE, so this was not the cause of the 0.80 -- the
-   output was identical to six digits before and after.
-3. **5K9P IS ubiquitin.** The first version of `--dimer` used "ubiquitin" as the
-   foreign chain against a 5K9P template and got 152 of 152 tokens covered,
-   same-entity propagation, and a meaningless corr 1.000000. Chain B is now
-   6MRR's designed sequence, which is unrelated to both.
+   native by `asym_id = torch.zeros(...)` in EVERY adapter. Correct on the
+   monomer the gate ran, and it silently disables every cross-chain term on a
+   complex. Both now take the batch's real `asym_id`.
+2. **5K9P IS ubiquitin.** The first `--dimer` used "ubiquitin" as the foreign
+   chain against a 5K9P template, got 152 of 152 tokens covered by same-entity
+   propagation, and read a meaningless corr 1.000000. Chain B is now 6MRR's
+   designed sequence.
+3. **The wrong native CLASS, and the wrong restype rule** (boltz2, read
+   corr 0.801). The adapter built `TemplateModule` where the checkpoint's
+   `hyper_parameters` carry `use_templates_v2=True`; the two share a parameter
+   set, so `load_state_dict` takes either -- the openbind0-into-of3-main trap
+   again. With one templated chain the V1 `asym_id` mask and the V2
+   `visibility_ids` mask COINCIDE, so the class was not the cause: the cause was
+   the adapter handing native `aa + 2` for every token when boltz allocates
+   `res_type = np.zeros(...)` and fills it only where the template covers
+   (featurizerv2). Native saw residue types our port correctly withholds. Both
+   are fixed, and `visibility_ids` is now built by boltz's own rule (templated
+   chain -> the template's pdb_id, untemplated -> `-1 - asym_id`).
+4. **An UNMASKED re-derivation** (openfold3 0.9998, openbind0 0.9956,
+   intellifold2 0.9959). `_af3_template_features` rebuilds the features for the
+   four models that ride AF3's `TemplateEmbedding` -- which has no `_features`
+   method to borrow -- and it returned the distogram and unit vector RAW, where
+   `SingleTemplateEmbedding.construct_input` multiplies them by
+   `pseudo_beta_mask_2d` and `backbone_mask_2d`, both already multiplied by
+   `multichain_mask_2d`. Native was handed geometry our module zeroes. Invisible
+   on a covered monomer, where those masks are all ones.
 
-**Next**: the divergence is specific to UNCOVERED tokens (the same gate reads
-1.000000 when both chains are covered). The masks provably agree, so the
-suspicion is what each side puts in the template features for an uncovered
-token, not how they are masked -- compare our internal per-template features
-against the `our_features` arrays handed to native, on chain B's tokens alone.
+**The floor test is what made these worth chasing.** `TMPL_FLOOR=1` reruns
+NATIVE on `z * (1 + 1e-6)` and compares it to native's own answer: mean|d|
+**1.2e-06** against disagreements of 0.31 (of3) and 0.48 (if2). Five orders of
+resolution, so "an amplifier being measured" was ruled out before any code was
+touched. `TMPL_SPLIT=1` reports the error per chain block (covered x covered,
+uncovered x uncovered, cross), which is what showed boltz2's output was half
+native's magnitude on uncovered pairs.
+
+The monomer case is unmoved by all of this (of3 max|d| 0.00024, boltz2 0.00003).
 
 ## The output side is gated over three input classes (2026-09-12)
 
