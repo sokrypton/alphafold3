@@ -996,6 +996,56 @@ re-learn: best-of-5 is a TAIL statistic.** Both "regressions" were a single
 lucky or unlucky draw, and both took one 20-sample run to settle. Do not open an
 investigation on a best-of-5 move again.
 
+## The terminal-atom drop MASKS where the vendors REMOVE (2026-09-12, CONFIRMED)
+
+The of3-lineage cluster above is a REGRESSION, and the cause is this week's
+terminal-atom drop. `parity_audit` over the same 274 comparisons:
+
+    2026-09-10   PARITY=237  CLOSE=8   FLOOR=17  LOOSE=10  BAD=2
+    2026-09-12   PARITY=228  CLOSE=10  FLOOR=17  LOOSE=5   BAD=14
+
+and all 14 BADs are openfold3/openbind0 atom encoder / decoder / denoise, which
+on 2026-09-10 read corr 1.000000 (a_token max|d| 0.0011, p_pair_valid max|d|
+0.00012). The gate headers date it exactly: `574 real atoms` -> `573`.
+
+**The drop itself is right** -- of3's own featuriser agrees (the ligand/dimer
+diff above matched 917 and 1202 atoms exactly). **The implementation is not.**
+`_drop_atoms_by_name` masks the atom in place, and the vendors REMOVE it before
+tokenising. A mask leaves a HOLE in the flat atom layout, and two things are cut
+on that axis:
+
+1. **The 32-atom attention windows.** Every block after the hole has a different
+   membership than the vendor's compacted axis. That is the whole of the of3
+   cluster -- and why only of3 and openbind0 show it, though rf3, if2 and boltz2
+   ALL went 574 -> 573 too: of3's native adapter builds its own compacted layout,
+   so our hole misaligns against it, while the other three consume our flat
+   features hole and all, so it cancels on both sides.
+2. **The mmCIF gather -- and this one reaches users.** `flat_output_layout` and
+   `empty_output_struc` are built at featurisation and the drop never touches
+   them, so the dropped atom is still in the output while the model no longer
+   predicts it. Measured, featurisation only:
+
+        alphafold3   flat_output_layout 574 | model predicts 574   ok
+        openfold3    flat_output_layout 574 | model predicts 573   1 ORIGIN ATOM
+        boltz2       flat_output_layout 574 | model predicts 573   1 ORIGIN ATOM
+
+   i.e. every mmCIF from the five drop models (openfold3, openbind0, boltz2,
+   intellifold2, rosettafold3) carries a terminal atom at (0, 0, 0), announced
+   only by a `logging.warning`. `output_parity.py` was written blind to this and
+   catches it on its first run, which is the argument for the gate.
+
+**The fold is unaffected** (native of3 on 6MRR: 1.637/1.714 preview-2 and
+1.644/1.766 v0.5.0, against our 1.546/1.717 and 1.579/1.776) because our graph
+masks the hole consistently everywhere inside itself. Only a module gate and the
+output side can see it -- which is exactly the class of bug L0-L6 was extended
+to catch.
+
+**Fix**: remove the atoms from the layouts rather than masking a finished batch
+-- blank them in `token_atoms_layout` (`token_atoms_mask` is just
+`atom_name.astype(bool)`, so the flat axis compacts by itself), rebuild the
+`AtomCrossAtt` gathers, and filter `flat_output_layout` + `empty_output_struc`
+so nothing is written at the origin.
+
 ## The of3-lineage atom path: a module gap with no fold cost (2026-09-12, OPEN)
 
 Three levels in a row single out openfold3 and openbind0 and nobody else:
