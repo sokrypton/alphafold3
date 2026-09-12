@@ -1179,6 +1179,14 @@ native's magnitude on uncovered pairs.
 
 The monomer case is unmoved by all of this (of3 max|d| 0.00024, boltz2 0.00003).
 
+**Both are now a LEVEL in the driver**, `L1x`, and in the default level list --
+a gate the driver does not run is a gate that rots (three tracked gates had
+already stopped running once). First driver run: **21 OK, 6 N/A, 0 FAIL**
+(`parity_runs/2026-09-13-l1x/`). `gate_applies.py` learned that `L1x.template`
+inherits `L1t.template`'s rules, or the four ESMFold2 variants -- which have no
+template embedder at all -- reported SKIP, and a SKIP that is not a real hole is
+what makes the summary stop meaning anything.
+
 ## The output side is gated over three input classes (2026-09-12)
 
 `output_parity.py`, 14/14 after the drop fix:

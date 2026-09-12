@@ -199,7 +199,7 @@ want () {  # is this level selected?
   case " $LEVELS " in *" all "*|*" $lvl "*) return 0 ;; *) return 1 ;; esac
 }
 
-LEVELS=${*:-L0 L1 L1b L1t L1d L2 L3 L4}
+LEVELS=${*:-L0 L1 L1b L1t L1x L1d L2 L3 L4}
 echo "levels: $LEVELS"
 echo "models: $MODELS"
 echo "logs:   $LOGDIR"
@@ -308,6 +308,26 @@ fi
 if want L1t; then
   echo "== L1 template embedder"
   for m in $MODELS; do gate L1t.template "$m" 'template|corr' dev/oracles/template_parity.py "$m"; done
+fi
+# --- L1x: the same two modules on a COMPLEX. Everything else in this file
+#     runs one protein chain, so no cell exercises a cross-chain convention --
+#     and both the boltz2 relpos entity bucket and the esmfold2 chain bucket
+#     lived exactly there. z-init carries the relative-position encoding;
+#     the template embedder masks cross-chain pairs and, for boltz2, masks by
+#     template COVERAGE. Chain B of the template case is 6MRR, which is
+#     unrelated to the 5K9P template -- note 5K9P IS ubiquitin, so "use
+#     ubiquitin as the foreign chain" silently covers both chains and tests
+#     nothing.
+if want L1x; then
+  echo "== L1x cross-chain (z-init and template on a complex)"
+  for m in $MODELS; do
+    gate L1x.zinit "$m" 'z_init|corr' dev/oracles/trunk_init_parity.py "$m" \
+      --chains_json /home/ubuntu/dimer_ours.json
+  done
+  for m in $MODELS; do
+    gate L1x.template "$m" 'template|corr' dev/oracles/template_parity.py "$m" \
+      --dimer
+  done
 fi
 if want L1d; then
   echo "== L1 distogram head"

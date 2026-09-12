@@ -49,7 +49,12 @@ def reason(gate, model):
     return '%s has no MSA encoder (ESMFOLD2_VARIANTS msa=0)' % model
   if gate.startswith('L4.') and model in mc.NO_CONFIDENCE_HEAD:
     return '%s ships no confidence head (NO_CONFIDENCE_HEAD)' % model
-  if gate == 'L1t.template' and fam:
+  # L1x is the same module on a COMPLEX, so it inherits every rule keyed on the
+  # monomer cell's name. Without this the cross-chain template cell reported
+  # SKIP ("a module the model HAS with no adapter") for the four ESMFold2
+  # variants, which have no template embedder at all -- and a SKIP that is not a
+  # real hole is exactly what makes the summary stop meaning anything.
+  if gate in ('L1t.template', 'L1x.template') and fam:
     return 'the ESMFold2 family has no template embedder'
 
   # --- covered by a DIFFERENT cell ---------------------------------------
