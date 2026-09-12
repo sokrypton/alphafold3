@@ -1187,6 +1187,61 @@ inherits `L1t.template`'s rules, or the four ESMFold2 variants -- which have no
 template embedder at all -- reported SKIP, and a SKIP that is not a real hole is
 what makes the summary stop meaning anything.
 
+## What the 5 LOOSE confidence cells are (2026-09-13, investigated)
+
+All five are L4 PAE/PDE: protenix2 `full_pae` / `full_pde`, opendde `full_pde`,
+chai1's two injected logits. Every one clears the correlation bar (three at
+PARITY grade, corr >= 0.99998) and is demoted only by `max|d|/rms`, i.e. by a
+SINGLE worst element. Taking protenix2's `full_pae` (max|d| 0.611 A on rms 26.6)
+apart:
+
+**It accumulates through the stack.** `BLOCKS=` truncates the confidence
+pairformer on both sides:
+
+    BLOCKS=0 (re-embed + heads)   max|d| 0.045   ratio 3.0e-03   corr 1.000000
+    BLOCKS=1                      max|d| 0.056   ratio 2.9e-03   corr 1.000000
+    BLOCKS=2                      max|d| 0.256   ratio 1.8e-02
+    BLOCKS=4 (full)               max|d| 0.611   ratio 2.3e-02   <- the LOOSE cell
+
+So a ~0.3% difference is present BEFORE the stack and compounds roughly 2x per
+block. The stack is not where it starts.
+
+**Four explanations were tested and ruled out**, which is the part worth keeping:
+
+* *Softmax amplifying a near-tie.* PAE is an expectation over binned logits, so a
+  pair whose mass is split between distant bins moves far for a tiny logit
+  change. But `dE/dlogit = p_k (c_k - E)` at the worst pair is **0.65, BELOW the
+  median 1.94**, and corr(|d|, sensitivity) is 0.197. The worst pair is a
+  LESS sensitive one than average.
+* *The 447-vs-449 `s_inputs` LayerNorm width* -- the trap already fixed for
+  ESMFold2 (447 -> 451). Measured at 0.225% median, but **not concentrated where
+  the error is** (token 10 sits at the median), and in any case protenix's
+  confidence head has **no `s_inputs_norm` at all**: tracing every LayerNorm it
+  builds gives `input_single_norm`, `pae_ln`, `pde_ln` and friends on s and z.
+* *The dropped-column term.* Dropping a column from a Linear is safe only when
+  its INPUT is zero, and here the input is an LN OUTPUT -- `(0 - mu_t)/sigma_t *
+  gamma + beta`, nonzero and per-token. Predicts the error should track
+  `|mu_t|/sigma_t`; measured **corr -0.012**, and the worst token ranks 46th of
+  68 on that score.
+* *Input mismatch.* Ruled out by construction: the gate draws ONE random
+  `s_inputs` and zeroes the two dropped columns BEFORE native runs, and the
+  rep-atom coordinates are asserted equal at 0.00e+00.
+
+**And the hot token means nothing.** The inputs are a random draw, so "token 10"
+is not a residue with a property -- it is where this draw happens to be extreme.
+The floor run (perturb the inputs, compare our own outputs) lights up a
+different arbitrary set (53, 56, 31), which is what any small perturbation does
+after four blocks.
+
+**Scale, for deciding whether to care**: 0.61 A of PREDICTED ERROR at one pair
+of 4624, p99.9 at 0.34 A, on synthetic random input; ranking score and ipTM
+average over the whole map. The floor at a 2e-3 perturbation is 0.284, so the
+observed difference is equivalent to roughly a 4e-3 relative input shift.
+
+**If it is ever chased further**, the only lead left is the ~0.3% at BLOCKS=0 --
+the re-embedding and logits path, not the pairformer. Everything above is
+already excluded.
+
 ## The output side is gated over three input classes (2026-09-12)
 
 `output_parity.py`, 14/14 after the drop fix:
