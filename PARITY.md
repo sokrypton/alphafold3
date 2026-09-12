@@ -1,3 +1,41 @@
+# STATE OF PLAY -- 2026-09-12
+
+    dev/oracles/parity_runs/2026-09-12/           full L0-L6 (256 OK, 0 FAIL)
+    dev/oracles/parity_runs/2026-09-12-postfix/   L0-L4 after the drop fix
+
+    ~/venv/bin/python dev/oracles/parity_audit.py dev/oracles/parity_runs/2026-09-12-postfix
+    -> PARITY=242  CLOSE=10  FLOOR=17  LOOSE=5  BAD=0
+
+**L6 has now been run** (it had never been included in a matrix): all seven
+modality cases over all fourteen models, no failures. The full L0-L6 run is
+256 OK, 1 SKIP (boltz2's missing in-process L3 adapter, covered by
+`L3.denoise_inject`), 63 N/A, 0 FAIL.
+
+### A regression, caught by diffing the audit between runs
+
+The same 274 comparisons, graded by the same auditor:
+
+    2026-09-10   PARITY=241  CLOSE=10  FLOOR=17  LOOSE=6  BAD=0
+    2026-09-12   PARITY=228  CLOSE=10  FLOOR=17  LOOSE=5  BAD=14   <-- regressed
+    post-fix     PARITY=242  CLOSE=10  FLOOR=17  LOOSE=5  BAD=0
+
+(The `BAD=2` recorded below for the 2026-09-10 run was written under older audit
+thresholds; re-graded today that run is BAD=0.)
+
+All 14 BAD cells were openfold3/openbind0 atom encoder / decoder / denoise, and
+the cause was this week's terminal-atom drop MASKING an atom where the vendors
+REMOVE it -- a hole in the flat atom axis, which shifts every attention-window
+block after it and leaves the dropped atom in the mmCIF output to be written at
+(0, 0, 0). Fixed by removing from the layouts; see HOLES.md and
+`_remove_dropped_atoms_from_layouts`. The fold could not see any of it (6MRR is
+identical before and after), and three of the five models taking the same drop
+stayed at corr 1.000000 because their native adapters share our layout.
+
+**Read this as method**: no single number looked alarming -- the gates recorded
+every one of those cells as OK, because each scales by rms(native). The signal
+was a cell moving PARITY -> BAD between two runs, and the confirmation was the
+atom count in the gate header (`574 real atoms` -> `573`).
+
 # STATE OF PLAY -- 2026-09-10
 
 ## STATE OF PLAY — L0 THROUGH L5 COMPLETE (2026-09-11)
