@@ -1,0 +1,18 @@
+{
+ "queries": {
+  "5k9p_ptm": {
+   "chains": [
+    {
+     "molecule_type": "protein",
+     "chain_ids": [
+      "A"
+     ],
+     "sequence": "MQIFVKTLTGKTITLEVEPSDTIENVKAKIQDKEGIPPDQQRLIFAGKQLEDGRTLSDYNIQKESTLHLVLRLRGG",
+     "non_canonical_residues": {
+      "20": "SEP"
+     }
+    }
+   ]
+  }
+ }
+}

@@ -169,9 +169,22 @@ def _drop_atoms_by_name(batch, names):
       chr(int(c) + 32) if 0 <= c < 64 else '' for c in row).strip()
   ref_mask = np.array(batch['ref_mask'])
   n_atoms_per_token = ref_mask.shape[1]
+  # STANDARD RESIDUES ONLY. Every vendor that drops these drops them from
+  # standard residues and keeps them elsewhere, and says so: of3's
+  # `remove_std_residue_terminal_atoms` is named for it ("terminal atoms can be
+  # kept for any non-standard residues, as they are tokenized per-atom") and
+  # rf3's filter carries `& ~is_atomized`.
+  #
+  # It is not pedantry, because these names mean different things in different
+  # residues. **O3P is a sidechain atom of phosphoserine.** Dropping by name
+  # alone took our SEP-20 ubiquitin to 604 atoms where of3's own featuriser has
+  # 605 -- we removed the OXT correctly and then removed a phosphate oxygen that
+  # native keeps. An ATOMISED residue is one token per atom, so it is identified
+  # here by its token holding exactly one real atom.
+  n_real = ref_mask.sum(axis=1)
   drop = {(t, a) for t in range(ref_mask.shape[0])
           for a in range(n_atoms_per_token)
-          if ref_mask[t, a] and decode(chars[t, a]) in names}
+          if ref_mask[t, a] and decode(chars[t, a]) in names and n_real[t] > 1}
   if not drop:
     return 0
   flat = {t * n_atoms_per_token + a for t, a in drop}

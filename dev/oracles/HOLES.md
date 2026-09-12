@@ -970,6 +970,34 @@ does, we reproduce), and for boltz2 (ONE slot, `template_mask` all zero, so its
 present-weighted mean contributes exactly zero -- ours too). `intellifold2`,
 `opendde` and `rosettafold3` have NOT been checked.
 
+## The terminal-atom drop was eating a PHOSPHOSERINE oxygen (2026-09-12)
+
+Caught by extending the featurisation diff to the ATOMISED path -- every run of
+it so far had been a plain protein monomer, and modified residues are where atom
+layouts get interesting.
+
+of3's own featuriser on SEP-20 ubiquitin: **605 atoms**. Ours: **604** with
+yesterday's drop on, **606** with it off. Both wrong, in opposite directions, and
+the 604 is the one I introduced: `drop_atoms=('OXT', 'OP3', 'O3P')` drops by NAME
+alone, and **O3P is a sidechain atom of phosphoserine**. We removed the terminal
+OXT correctly and then removed a phosphate oxygen that native keeps.
+
+Every vendor that drops these drops them from STANDARD residues only, and says
+so -- of3's function is literally `remove_std_residue_terminal_atoms` ("terminal
+atoms can be kept for any non-standard residues, as they are tokenized per-atom")
+and rf3's filter carries `& ~is_atomized`. `_drop_atoms_by_name` now skips any
+token holding a single real atom, which is what an atomised residue is.
+
+After: **605 / 605, and 605/605 by name.** Folds: openfold3 6MRR 1.544, ptm 5K9P
+1.436; boltz2 6MRR 0.459, ptm 5K9P 2.020.
+
+**The lesson is about the sweep, not the bug.** A featurisation diff run only on
+a plain monomer certifies a plain monomer. The same argument that made the
+protein-only gates blind to nucleic OP3, and the monomer-only gates blind to
+boltz2's cross-chain template visibility, applies to the diff itself: it needs a
+PTM case, a ligand case and a two-chain case before "our featurisation matches"
+means anything general. One of those three is now run.
+
 ## WE RECYCLE 11 TIMES FOR EVERYONE; the vendors do not (2026-09-12, OPEN)
 
 Found while asking what the sweep still misses. Our `num_recycles` is 10 for
