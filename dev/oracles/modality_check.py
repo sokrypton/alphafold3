@@ -302,9 +302,20 @@ def run_multi(args, case):
   for cid, (_ch, kind, seq, _c) in zip(ids, ents):
     letters = ''.join(l for _, l in seq)
     if kind == 'protein':
+      # TEMPLATE=<cif>:<chain> gives EVERY protein chain the same template, which
+      # is the case that separates boltz2's template visibility convention from
+      # AF3's: its TemplateV2Module masks by `visibility_ids` (the template's own
+      # PDB id, shared by every chain that template covers), where AF3 masks by
+      # asym_id. On a shared template that is 50% of the pair map -- the whole
+      # cross-chain block, i.e. the interface the template exists to carry.
+      tm = []
+      if os.environ.get('TEMPLATE'):
+        import template_parity as _TP
+        _cif, _, _ch = os.environ['TEMPLATE'].partition(':')
+        tm = [_TP._self_template(_cif, _ch or 'A')[1]]
       chains.append(folding_input.ProteinChain(
           id=cid, sequence=letters, ptms=[], unpaired_msa='>q\n%s\n' % letters,
-          paired_msa='', templates=[]))
+          paired_msa='', templates=tm))
     elif kind == 'dna':
       chains.append(folding_input.DnaChain(id=cid, sequence=letters,
                                            modifications=[]))

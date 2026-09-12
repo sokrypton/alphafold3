@@ -28,6 +28,9 @@ from alphafold3.model import protein_data_processing
 from alphafold3.model.components import haiku_modules as hm
 from . import modules
 from alphafold3.model.scoring import scoring
+
+import os
+
 import haiku as hk
 import jax
 import jax.numpy as jnp
@@ -522,8 +525,22 @@ class Boltz2TemplateEmbedding(hk.Module):
         hm.LayerNorm(name='z_norm', use_fast_variance=False)(z))       # (N,N,64)
     pair_mask = padding_mask_2d
 
-    def per_template(aa, pos, am):
-      a_tij = self._features(aa, pos, am, multichain_mask_2d).astype(dtype)
+    # Boltz-2 masks by SOURCE TEMPLATE, not by chain: a row that covers two
+    # chains makes their cross-chain block visible. See
+    # model_config.TEMPLATE_VISIBILITY_BY_COVERAGE. Built per row, because that
+    # is what the coverage is -- an untemplated chain falls back to seeing only
+    # itself, which is `-1 - asym_id` upstream.
+    by_coverage = (gc.model in model_config.TEMPLATE_VISIBILITY_BY_COVERAGE
+                   and not os.environ.get('AF3_NO_BOLTZ2_TEMPLATE_VIS'))
+    if by_coverage:
+      covered = (atom_mask.reshape(T, atom_mask.shape[1], -1).sum(-1) > 0)  # (T,N)
+      cov_2d = (covered[:, :, None] & covered[:, None, :])
+      un_2d = ((~covered)[:, :, None] & (~covered)[:, None, :]
+               & multichain_mask_2d.astype(jnp.bool_)[None])
+      vis_2d = (cov_2d | un_2d).astype(multichain_mask_2d.dtype)          # (T,N,N)
+
+    def per_template(aa, pos, am, vis):
+      a_tij = self._features(aa, pos, am, vis).astype(dtype)
       v = z_part + hm.Linear(c.num_channels, use_bias=False, name='a_proj')(a_tij)
 
       def block(x):
@@ -545,8 +562,11 @@ class Boltz2TemplateEmbedding(hk.Module):
           v = stacked
       return hm.LayerNorm(name='v_norm', use_fast_variance=False)(v)   # (N,N,64)
 
+    vis_in = vis_2d if by_coverage else jnp.broadcast_to(
+        multichain_mask_2d[None], (T,) + multichain_mask_2d.shape)
     v_all = hk.vmap(per_template, in_axes=0, out_axes=0,
-                    split_rng=False)(aatype, atom_positions, atom_mask)  # (T,N,N,64)
+                    split_rng=False)(aatype, atom_positions, atom_mask,
+                                     vis_in)                            # (T,N,N,64)
     if self.global_config.model in model_config.TEMPLATE_MEAN_OVER_ALL_SLOTS:
       # protenix divides by the PADDED slot count and sums every slot, so the
       # Z-dependent half of v survives with no template at all. See

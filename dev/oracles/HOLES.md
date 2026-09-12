@@ -970,6 +970,54 @@ does, we reproduce), and for boltz2 (ONE slot, `template_mask` all zero, so its
 present-weighted mean contributes exactly zero -- ours too). `intellifold2`,
 `opendde` and `rosettafold3` have NOT been checked.
 
+## boltz2 runs TemplateV2, and V2 does not mask by chain (2026-09-12)
+
+Found by auditing the native adapters themselves rather than our port -- the last
+two faults were adapters lying to native, so the deep dive started there.
+
+`template_parity.native_boltz2` imports **TemplateModule**. The checkpoint says
+otherwise: `hyper_parameters['use_templates_v2'] = True` (and `use_templates` is
+True, so the module runs on every forward). Diffing the two classes in
+`trunkv2.py` shows they are the same modules, same shapes, same aggregation --
+81 template tensors load into either -- and differ in exactly ONE input:
+
+    V1   asym_id          asym_mask = (asym_id_i == asym_id_j)
+    V2   visibility_ids   vis_mask  = (visibility_ids_i == visibility_ids_j)
+
+and `visibility_ids` is **not** asym_id. `featurizerv2` sets it to the
+TEMPLATE'S PDB ID for every chain that template covers, and to `-1 - asym_id`
+for chains with no template. So under V2 two chains templated from the same
+structure SEE EACH OTHER, which is the entire point of giving a complex a complex
+template; an untemplated chain still sees only itself.
+
+We masked by asym_id for every model, boltz2 included. **On a shared template
+that is the whole cross-chain block: 11552 of 23104 pairs, 50% of the pair map,
+zeroed.** Our features express the right thing directly -- handing the same
+template to both chains produces ONE row covering both (measured: 152 tokens
+across chains {1, 2} for a ubiquitin homodimer, and 164 tokens across chains
+{1, 2} in the 1LMB screen) -- so the row's own coverage IS the visibility group,
+and `TEMPLATE_VISIBILITY_BY_COVERAGE` builds the mask per row from it, falling
+back to same-chain for uncovered tokens (which is what `-1 - asym_id` means).
+
+**Fold effect on the one templated complex we can score: none.** 1LMB with a
+shared single-chain template reads 0.303 with the old mask and 0.304 with the
+new one -- boltz2 already folds that complex at 0.387 with no template at all, so
+there is no room for the interface block to help. The fix is faithfulness to the
+convention the checkpoint declares, and it is live on that input (the row covers
+both protein chains), not dormant.
+
+**Why no gate could see it.** `folding_input.Template` is per chain and
+`template_parity` folds a single one, so the cross-chain block is identically
+zero on both sides there -- the gate reads corr 1.000000 before and after this
+change, which is correct and uninformative. Same blind spot, third time: the
+padded-window work was verified on RNA, openbind0's pair bias against the wrong
+release, and this against a monomer. A convention that only exists BETWEEN chains
+cannot be gated on one chain.
+
+`AF3_NO_BOLTZ2_TEMPLATE_VIS=1` restores the old mask, and `TEMPLATE=<cif>:<chain>`
+in `modality_check` gives every protein chain the same template, which is how the
+complex case above was run.
+
 ## The empty-template convention, now GATED for all five (2026-09-12)
 
 The template half of the sweep was settled by reading each vendor's code. That

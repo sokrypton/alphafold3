@@ -747,6 +747,34 @@ TRANSPOSED_COLUMN_PAIR_BIAS = ('openfold3', 'opendde', 'boltz2') + PROTENIX_FAMI
 TEMPLATE_MEAN_OVER_ALL_SLOTS = PROTENIX_FAMILY
 
 
+# Models whose template cross-chain visibility is "SAME SOURCE TEMPLATE" rather
+# than "same chain".
+#
+# AF3 masks a template's pair features with `asym_id_i == asym_id_j`, because its
+# templates are per chain and carry no inter-chain information. Boltz-2's
+# TemplateV2Module -- which is what its checkpoint declares
+# (`hyper_parameters['use_templates_v2'] = True`) -- masks with
+# `visibility_ids_i == visibility_ids_j` instead, and visibility_ids is NOT
+# asym_id: `featurizerv2` sets it to the TEMPLATE'S PDB ID for every chain that
+# template covers, and to `-1 - asym_id` for chains with no template. So two
+# chains templated from the same structure SEE EACH OTHER, which is the entire
+# point of giving a complex a complex template -- and an untemplated chain still
+# sees only itself.
+#
+# Identical for a single chain, and identical when each chain has its own
+# template from a different source. It differs exactly where a template spans
+# more than one chain, which is where the interface information lives. Our
+# features express that directly: handing the same template to both chains of a
+# homodimer produces ONE row covering both (152 tokens, chains {1, 2}), so the
+# row's own coverage IS the visibility group.
+#
+# `template_parity.py` cannot see this -- `folding_input.Template` is per chain
+# and the gate folds a single one, which is the same blind spot that hid the
+# structural atom axis (verified on RNA) and openbind0's pair bias (verified on
+# the wrong release).
+TEMPLATE_VISIBILITY_BY_COVERAGE = ('boltz2',)
+
+
 # Models whose TEMPLATE stack adds an OUTER residual around the whole pairformer
 # (`v = v + stack(v)`) rather than replacing the activation (`v = stack(v)`).
 #
