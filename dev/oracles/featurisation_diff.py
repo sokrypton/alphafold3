@@ -62,7 +62,12 @@ def main(argv=None):
         return _stripped[k]
 
     d = _Dump()
-  _sq = lambda k: d[k][0] if d[k].ndim > 1 or d[k].shape[0] == 1 else d[k]
+  def _sq(k):
+    # Drop a LEADING BATCH AXIS only when it is actually one. Dropping the first
+    # axis of every multi-dimensional array turned opendde's unbatched
+    # `ref_pos` (602, 3) into (3,) and read as "native has 3 atoms".
+    v = d[k]
+    return v[0] if (v.ndim > 1 and v.shape[0] == 1) else v
   # The vendor pads its atom axis too (boltz2: 576 slots for 574 real atoms),
   # and comparing unfiltered reads as a shape mismatch that looks like a missing
   # atom. Filter by the vendor's own pad mask.

@@ -566,15 +566,22 @@ _FEATURISE = {
     # to fit it ("Can't pad to a smaller shape" for anything larger). Left unset,
     # attach_structural_batch rounds the true count up to a multiple of 32, which
     # keeps shapes stable across similar inputs without capping them.
-    # empty_template_gap ('all'): opendde's `make_dummy_feature` fills the whole
-    # (4, N) template_aatype block with 31 -- its own comment says "# gap" --
-    # and its TemplateEmbedder divides by the padded slot count, so the template
-    # term is LIVE with no template supplied. Same convention as protenix, but
-    # every slot is a gap template rather than only the first.
+    # empty_template_gap: opendde's TemplateEmbedder divides by the padded slot
+    # count, so the template term is LIVE with no template supplied -- and its
+    # empty slots are GAP in slot 0, zero in slots 1-3, exactly protenix's
+    # pattern.
+    #
+    # CORRECTED 2026-09-12. This said 'all' first, read off `make_dummy_feature`
+    # (`torch.full(..., 31)  # gap` over the whole (4, N) block). That path only
+    # runs when the template featurizer returns NOTHING; its own featuriser
+    # actually emits [31, 0, 0, 0], measured on both `--use_template true` and
+    # `false`. Reading the code got the right question and the wrong answer, and
+    # the feature dump is what settled it -- which is the argument for
+    # dev/oracles/featurisation_diff.py existing.
     'opendde': dict(opendde=True, padded_keys=True,
                     empty_template_gap=not os.environ.get(
                         'AF3_NO_DDE_TEMPLATE_GAP'),
-                    empty_template_gap_slots='all'),
+                    empty_template_gap_slots='first'),
     # PER FAMILY, not per model. One `protenix/model/modules/primitives.py`
     # serves every protenix release, so the padded key window is a property of
     # the implementation and not of a checkpoint. It was set for protenix2

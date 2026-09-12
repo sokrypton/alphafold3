@@ -970,6 +970,44 @@ does, we reproduce), and for boltz2 (ONE slot, `template_mask` all zero, so its
 present-weighted mean contributes exactly zero -- ours too). `intellifold2`,
 `opendde` and `rosettafold3` have NOT been checked.
 
+## opendde's featurisation: clean, and it CORRECTS my own template fix (2026-09-12)
+
+Second vendor through `featurisation_diff.py`, driven through opendde's own
+`build_inference_config` + `InferenceDataset` (its CLI path, not a
+reimplementation), on plain ubiquitin:
+
+| field | result |
+|---|---|
+| atom count | **602 / 602** -- both keep the terminal OXT, which is the independent confirmation of the split recorded above |
+| atom order by name | **602/602** |
+| `ref_charge`, `ref_space_uid`, `ref_element` | **exact** |
+| `residue_index`, `token_index`, `asym_id`, `entity_id`, `sym_id`, `deletion_mean` | **exact** |
+| `profile` | ours 31 classes, native 32 -- a consistent RELABELING (free) |
+| `ref_pos` | the conformer draw, as everywhere |
+
+**AND IT OVERTURNS HALF OF YESTERDAY'S opendde FIX.** I had set its empty
+template to GAP in ALL FOUR slots, read off `make_dummy_feature`
+(`torch.full(..., 31)  # gap` across the whole (4, N) block). Its own featuriser
+emits **[31, 0, 0, 0]** -- gap in slot 0, zero in the rest, exactly protenix's
+pattern. Measured on BOTH `--use_template true` and `--use_template false`, so it
+is not a flag artifact: the all-31 path only runs when the template featurizer
+returns nothing at all, and it does not return nothing.
+
+Corrected to `empty_template_gap_slots='first'`, verified by remapping our
+`template_aatype` through `_AF3_TO_OF3`: ours [[31], [0], [0], [0]] against
+native's [[31], [0], [0], [0]]. Folds after the correction: 6MRR 0.729 (from
+0.808 under the wrong pattern, 0.734 before any of this), plain 5K9P 1.592
+(1.641 wrong, 1.591 before).
+
+**This is the argument for the feature diff in one line.** I flagged that
+opendde's fix rested on a code reading and named the measurement that would
+close it. The measurement closed it by disagreeing: reading the source got the
+right QUESTION (the empty slot is not zero) and the wrong ANSWER (how many slots
+carry the gap). Every other vendor's empty-template convention in the table above
+was gated by `template_parity EMPTY=1`, which compares our embedder against
+native's on OUR features -- it could not see this, because it feeds both sides
+the same slots.
+
 ## CLOSED: protenix's bf16 autocast is not something to match (2026-09-12)
 
 Recorded earlier as "an opportunity, not a bug" -- protenix INFERS under
