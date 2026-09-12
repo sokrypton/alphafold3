@@ -34,6 +34,13 @@ CASES = {
     'dimer': '/home/ubuntu/dimer_ours.json',
 }
 
+# Each case is a fresh shape and so a FULL COMPILE -- budget ~10 min per
+# model-case, not the ~2 min an L5 fold takes once the shape is cached. CASES=
+# picks a subset for that reason.
+if os.environ.get('CASES'):
+  CASES = {k: v for k, v in CASES.items()
+           if k in os.environ['CASES'].split(',')}
+
 
 def check(model, case, path):
   from alphafold3 import structure

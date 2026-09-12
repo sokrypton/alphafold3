@@ -1063,6 +1063,17 @@ rf3 1.020/1.556. The SEP-20 PTM case still gives 605 atoms on both of3 and
 boltz2 -- the OXT dropped and phosphoserine's O3P kept -- so the
 atomised-residue distinction survives the layout rebuild.
 
+**Closed end to end.** The post-fix matrix (`parity_runs/2026-09-12-postfix/`)
+audits to **PARITY=242 CLOSE=10 FLOOR=17 LOOSE=5 BAD=0** -- one PARITY better
+than before the regression landed. L6 re-run over the five drop models is 36/36
+OK across RNA, DNA, ligand, complex, PTM and both protein targets, with the
+modality numbers unmoved (of3 RNA 1.333 both, ligand 0.457 both, complex 9.178
+-> 8.281). And `output_parity` now passes for every drop model on the case that
+used to carry the origin atom:
+
+    openfold3 / boltz2 / rosettafold3 / intellifold2   monomer  601 atoms  OK
+    alphafold3 (keeps its OXT)                         monomer  602 atoms  OK
+
 The filter is by the same BOOLEAN, never by atom name: a name filter would take
 the O3P case with it. And a drop combined with `flat_atom_order` now raises
 rather than silently discarding the permutation; opendde is the only model with
