@@ -970,6 +970,49 @@ does, we reproduce), and for boltz2 (ONE slot, `template_mask` all zero, so its
 present-weighted mean contributes exactly zero -- ours too). `intellifold2`,
 `opendde` and `rosettafold3` have NOT been checked.
 
+## WE RECYCLE 11 TIMES FOR EVERYONE; the vendors do not (2026-09-12, OPEN)
+
+Found while asking what the sweep still misses. Our `num_recycles` is 10 for
+every model -- AF3's default, i.e. 11 trunk passes -- and almost nobody else runs
+that:
+
+| model | the vendor's OWN default | its trunk passes | ours |
+|---|---|---|---|
+| `boltz2` | `--recycling_steps` **3** | 4 | **11** |
+| `openfold3`, `openbind0` | `num_recycles` **3** (model_config.py:177) | 4 | **11** |
+| `protenix1`, `protenix2` | `N_cycle` **4** | 4 | **11** |
+| `rosettafold3` | `n_recycles` **5** | 6 | **11** |
+| `opendde` | `N_cycle` **10** | 10 | 11 |
+| `intellifold2` | `--recycling_iters` **10** (its config says 3; the CLI overrides) | 10 | 11 |
+| `chai1` | 3 TOTAL passes | 3 | 10 |
+
+Measured, not inferred, for of3: its own dump carries `num_cycles = 4`.
+
+**This is not a correctness bug -- it is a comparability one, and it cuts three
+ways.**
+
+  1. **Fold numbers.** Every L5/L6 row in this repo gives the port ~2.75x the
+     recycling the vendor gives itself. More recycling generally helps, so our
+     table flatters the ports against the vendors' own behaviour, and a reader
+     comparing our `boltz2` row to Boltz's published numbers is not comparing
+     like with like.
+  2. **Runtime.** [[af3-runtime-benchmarks]] quotes 1.9x at 68 tokens against
+     native. If that fold ran 11 passes against native's 4, the comparison
+     understates us -- we did nearly three times the trunk work and were still
+     faster. Either way the number is not what it says it is, and this has to be
+     settled before any comparison against BioIR
+     (see the BioNeMo entry below), because that one is explicitly about speed.
+  3. **Parity.** Unaffected: the trunk comparisons in this file match cycle
+     counts on both sides explicitly (`PASSES=n` against `--model.N_cycle n`),
+     which is why they read 1e-6 rather than drifting.
+
+**NOT CHANGED, because it is a user-facing default across eight models.** The
+options are (a) set `num_recycles` per model to the vendor's own, so "our boltz2"
+means what Boltz means, with the knob to raise it; (b) keep 10 everywhere and
+state the multiplier wherever a number is published. (a) is the more honest
+default and (b) is the smaller change; either way the runtime benchmarks need
+re-running at matched counts.
+
 ## The featurisation sweep is COMPLETE: five vendors, one finding, one correction (2026-09-12)
 
 Every vendor whose featuriser can be driven here has now been diffed against
