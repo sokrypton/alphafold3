@@ -143,6 +143,7 @@ Parity is measured level by level, from the weights inwards to the fold:
 |---|---|
 | **L0** | conversion coverage — every checkpoint tensor accounted for, both directions |
 | **L1** | the trunk: z-init, pairformer, MSA module, template embedder, distogram |
+| **L1r** | the trunk on a REAL input: the input embedder, and recycling |
 | **L1x** | the same, on a COMPLEX — the cross-chain terms are constant on one chain |
 | **L2** | diffusion conditioning, token transformer, atom encoder and decoder |
 | **L3** | one full denoise step |
@@ -263,10 +264,16 @@ Tracked in `dev/oracles/HOLES.md` with the next measurement named for each:
   own float32 — its stack is exact and amplifies 7×, and native's fp32-vs-fp64
   noise through the embedding is the same order as the whole gap. Consistent
   with, not established.
-* **three things no cell covers**: `L1b.msa_nonuniform` is a silent duplicate of
-  the uniform cell for 13 of 14 models; `real_trunk_parity.py` exists and the
-  driver never runs it; `boltz2`'s template module is V2 upstream and we
-  implement V1 (inert on one chain, live on a complex).
+* ~~three things no cell covers~~ — **closed 2026-09-13.**
+  `L1b.msa_nonuniform` reached one adapter of fourteen and duplicated the
+  uniform cell for the rest; given a mask that is actually non-uniform the
+  OpenFold3 lineage failed it (corr 0.9855, `max|d|/rms` 7.7) because of3
+  masks every transition's output and we did not. Fixed, and the membership of
+  `MASK_TRANSITIONS` is now measured per model rather than inherited — though
+  the divergence is dormant on our features, which was measured too.
+  `real_trunk_parity.py` is now the `L1r` level: the input embedder, the trunk
+  on a real featurisation, and recycling. `boltz2`'s template V2 was closed on
+  2026-09-12 and the bullet was stale.
 * **AlphaFold 2 against DeepMind**: `FoldIteration`/`StructureModule` as wholes
   and `EmbeddingsAndEvoformer` end-to-end have no cell; the monomer's TensorFlow
   row selection cannot be compared here (no tensorflow — we use multimer's

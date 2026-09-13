@@ -152,6 +152,13 @@ def adaptive_zero_init(
   return output
 
 
+def _trans_mask(global_config, mask):
+  """The mask a transition should apply, or None -- see MASK_TRANSITIONS."""
+  if global_config.model in model_config.MASK_TRANSITIONS:
+    return mask
+  return None
+
+
 def transition_block(
     x: jnp.ndarray,
     num_intermediate_factor: int,
@@ -160,8 +167,15 @@ def transition_block(
     use_glu_kernel: bool = True,
     name: str = '',
     atom: bool = False,
+    mask: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
-  """Transition Block."""
+  """Transition Block.
+
+  `mask` is OpenFold3's `_mask_trans`: its ConditionedTransitionBlock ends
+  `a = a * mask` and every caller takes the default. See
+  model_config.MASK_TRANSITIONS -- inert on an all-ones mask, live as soon as
+  the token or atom axis is padded.
+  """
   num_channels = x.shape[-1]
   num_intermediates = num_intermediate_factor * num_channels
 
@@ -205,6 +219,8 @@ def transition_block(
   output = adaptive_zero_init(
       c, num_channels, single_cond, global_config, f'{name}ffw_', atom=atom
   )
+  if mask is not None:
+    output = output * mask[..., None].astype(output.dtype)
   return output
 
 
@@ -434,12 +450,14 @@ class Transformer(hk.Module):
           # act, and attn + transition share one residual add.
           act = act + attn + transition_block(
               act, self.config.num_intermediate_factor,
-              self.global_config, single_cond, name=self.name)
+              self.global_config, single_cond, name=self.name,
+              mask=_trans_mask(self.global_config, mask))
         else:
           act += attn
           act += transition_block(
               act, self.config.num_intermediate_factor,
               self.global_config, single_cond, name=self.name,
+              mask=_trans_mask(self.global_config, mask),
           )
         return act
 
@@ -466,6 +484,7 @@ class Transformer(hk.Module):
           self.global_config,
           single_cond,
           name=self.name,
+          mask=_trans_mask(self.global_config, mask),
       )
       return act, None
 
@@ -732,6 +751,7 @@ class CrossAttTransformer(hk.Module):
           queries_single_cond,
           name=self.name,
           atom=True,
+          mask=_trans_mask(self.global_config, queries_mask),
       )
       queries_act = block_in + attn + trans
       # The per-layer output is unused, but layer_stack must keep
@@ -771,12 +791,14 @@ class CrossAttTransformer(hk.Module):
           # RF3 no_residual: transition reads the pre-attention act; one residual.
           queries_act = queries_act + attn + transition_block(
               queries_act, self.config.num_intermediate_factor, self.global_config,
-              queries_single_cond, name=self.name)
+              queries_single_cond, name=self.name,
+              mask=_trans_mask(self.global_config, queries_mask))
         else:
           queries_act += attn
           queries_act += transition_block(
               queries_act, self.config.num_intermediate_factor, self.global_config,
-              queries_single_cond, name=self.name)
+              queries_single_cond, name=self.name,
+              mask=_trans_mask(self.global_config, queries_mask))
         return queries_act
       return hk.experimental.layer_stack(self.config.num_blocks)(od_block)(queries_act)
 

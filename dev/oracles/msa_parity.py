@@ -25,8 +25,42 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from confidence_parity import _cmp                          # noqa: E402
 
 
+def msa_mask_np(n_msa, n_tok):
+  """The msa mask BOTH sides run, uniform unless NONUNIFORM=1.
+
+  An all-ones mask cannot tell two OPM normalisers apart: boltz divides by
+  `mask.sum(1)` -- the row count for token i, broadcast over j -- where AF3
+  divides by the PAIRWISE count einsum('abc,adc->bdc', mask, mask), and those
+  are equal exactly when every row covers every token. That is how a wrong
+  boltz2 fix passed once, so the non-uniform case is not optional polish.
+
+  Only a native module that ACCEPTS an msa mask can run this. rf3's MSAModule,
+  opendde's and the protenix lineage's take no such argument -- their forward
+  assumes full rows -- so for those models the nonuniform cell is not a
+  duplicate of the uniform one, it is not applicable, and the adapter says so
+  rather than quietly running ones twice.
+  """
+  m = np.ones((n_msa, n_tok), np.float32)
+  if os.environ.get('NONUNIFORM'):
+    m[n_msa // 2:, :n_tok // 2] = 0.0
+    print('  NONUNIFORM msa mask: %d of %d entries zero'
+          % (int((m == 0).sum()), m.size))
+  return m
+
+
+def no_msa_mask(model, module):
+  """Refuse NONUNIFORM on a native module that has no msa-mask argument."""
+  if os.environ.get('NONUNIFORM'):
+    raise SystemExit(
+        'N/A: %s runs NONUNIFORM as a no-op -- %s takes no msa mask, so both '
+        'sides would run all-ones and the cell would duplicate L1b.msa'
+        % (model, module))
+
+
 def native_rf3(model, msa, s_inputs, z, n_msa):
   import torch
+
+  no_msa_mask(model, "rf3's MSAModule.forward(f, Z_II, S_inputs_I)")
 
   from rf3.model.layers.pairformer_layers import MSAModule
 
@@ -165,13 +199,15 @@ def native_of3(model, msa, s_inputs, z, n_msa):
            + torch.nn.functional.linear(
                t(s_inputs), emb['linear_s_input.weight'].float())[None])
   n_tok = z.shape[0]
+  mm = msa_mask_np(n_msa, n_tok)
   with torch.no_grad():
     out = net(m=m_emb[None], z=t(z)[None],
-              msa_mask=torch.ones(1, n_msa, n_tok),
-              pair_mask=torch.ones(1, n_tok, n_tok))
+              msa_mask=t(mm)[None],
+              pair_mask=torch.ones(1, n_tok, n_tok),
+              _mask_trans=not os.environ.get('NO_MASK_TRANS'))
   z_out = out[1] if isinstance(out, (tuple, list)) else out
   return (np.asarray(z_out).reshape(z.shape),
-          np.asarray(m_emb.detach()))
+          np.asarray(m_emb.detach()), np.asarray(z), mm)
 
 
 def native_if2(model, msa, s_inputs, z, n_msa):
@@ -282,13 +318,14 @@ def native_if2(model, msa, s_inputs, z, n_msa):
   if ws:
     m_emb = m_emb + torch.nn.functional.linear(t(s_inputs), ws[0].float())[None]
   n_tok = z.shape[0]
+  mm = msa_mask_np(n_msa, n_tok)
   with torch.no_grad():
     out = net(m=m_emb[None], z=t(z)[None],
-              msa_mask=torch.ones(1, n_msa, n_tok),
+              msa_mask=t(mm)[None],
               pair_mask=torch.ones(1, n_tok, n_tok), chunk_size=None)
   z_out = out[1] if isinstance(out, (tuple, list)) else out
   return (np.asarray(z_out).reshape(z.shape),
-          np.asarray(m_emb.detach()))
+          np.asarray(m_emb.detach()), np.asarray(z), mm)
 
 
 def native_opendde(model, msa, s_inputs, z, n_msa):
@@ -305,6 +342,8 @@ def native_opendde(model, msa, s_inputs, z, n_msa):
   a shape that shows up in the weights, so it comes from the harness.
   """
   import torch
+
+  no_msa_mask(model, "opendde's MSAModule.forward(feats, z, s, pair_mask)")
 
   from opendde.model.modules.pairformer import MSAModule
 
@@ -406,10 +445,11 @@ def native_boltz2(model, msa, s_inputs, z, n_msa):
   net.eval()
   t = lambda a: torch.tensor(np.asarray(a), dtype=torch.float32)
   n_tok = z.shape[0]
+  mm = msa_mask_np(n_msa, n_tok)
   zeros = np.zeros((n_msa, n_tok), np.float32)
   feats = {'msa': t(msa)[None], 'has_deletion': t(zeros)[None],
            'deletion_value': t(zeros)[None], 'msa_paired': t(zeros)[None],
-           'msa_mask': torch.ones(1, n_msa, n_tok),
+           'msa_mask': t(mm)[None],
            'token_pad_mask': torch.ones(1, n_tok)}
   emb = np.zeros((n_tok, token_s), np.float32)
   emb[:, :min(token_s, s_inputs.shape[-1])] = \
@@ -423,7 +463,7 @@ def native_boltz2(model, msa, s_inputs, z, n_msa):
     out = net(t(z)[None], t(emb)[None], feats)
   z_out = out[1] if isinstance(out, (tuple, list)) else out
   return (np.asarray(z_out).reshape(z.shape),
-          np.asarray(m_emb.detach())[0])
+          np.asarray(m_emb.detach())[0], np.asarray(z), mm)
 
 
 

@@ -1,3 +1,82 @@
+# STATE OF PLAY -- the three cells that covered nothing (2026-09-13)
+
+README and HOLES both listed the same three items as "no cell covers this".
+All three are now closed, and one of them was hiding a real port bug.
+
+### 1. `L1b.msa_nonuniform` was a silent duplicate -- and the of3 lineage failed it
+
+The cell existed to tell two OPM normalisers apart (boltz divides by the row
+count for token i, AF3 by the pairwise count; equal only when every row covers
+every token). `NONUNIFORM=1` reached exactly ONE adapter -- boltz2's layer-split
+path. Every other native adapter hardcoded `msa_mask=torch.ones(...)`, so for
+13 of 14 models the cell ran the uniform comparison a second time and reported
+it as a pass.
+
+Given a mask that is actually non-uniform, the OpenFold3 lineage broke:
+
+| | before | after |
+|---|---|---|
+| `openfold3`  | corr 0.985510, max\|d\|/rms **7.72** | corr 1.000000, 2.32e-04 |
+| `openbind0`  | corr 0.998553, max\|d\|/rms **1.16** | corr 1.000000, 6.89e-04 |
+| `boltz2`     | corr 1.000000 | unchanged |
+| `intellifold2` | corr 1.000000 | unchanged |
+
+The cause is `_mask_trans`. OpenFold3 multiplies every transition's OUTPUT by
+the mask of the axis it ran over (`layers/transition.py`: `x =
+self.linear_out(x) * mask`), and every caller in of3 takes that default -- MSA
+module, pairformer, diffusion transformer, heads. AF3 does not, and neither did
+we. Localised by flipping native's own flag: `_mask_trans=False` on native took
+the same comparison straight to corr 1.000000, which is the whole diagnosis in
+one run. Fixed by `model_config.MASK_TRANSITIONS`, threaded through all six
+transition sites.
+
+**Do not read this as a fold bug -- it is dormant on our features, and that was
+measured, not assumed.** The live case is a row covering SOME real tokens and
+not others: the masked entry's update travels along the row through the
+pair-weighted averaging into unmasked tokens, and from there into the pair
+track. Our featuriser never makes such a row. `--buckets` pads a 68-token input
+to 128, but a padded token is masked in EVERY row and a fully-masked row cannot
+influence a real one; an unpaired MSA in a complex writes GAP tokens with mask
+1 over the other chain's positions, not mask 0 (checked: two chains, 7 rows,
+all fully covered). End to end, the openfold3 trunk on 6MRR padded 68 -> 128
+reads pair corr 0.99995310 unmasked and 0.99995478 masked. The fold is
+unchanged: 1.547 / 1.574 best-of-5, the same draws as before.
+
+So the value here is the cell, not the delta: membership in `MASK_TRANSITIONS`
+is now MEASURED for every model rather than inherited, and the first feature
+set that does produce a partially covered row will be right instead of
+silently wrong.
+
+Where a native module takes NO msa mask -- rf3's `MSAModule.forward(f, Z_II,
+S_inputs_I)`, opendde's, the protenix family's -- the cell now REFUSES
+(`msa_parity.no_msa_mask` -> N/A) rather than running all-ones twice. A gate
+that cannot distinguish anything should say so.
+
+### 2. `real_trunk_parity.py` existed and the driver never ran it: now `L1r`
+
+It is the only gate that reaches the INPUT EMBEDDER (five oracles build
+`s_inputs` and none compared it), the trunk on a real featurisation rather than
+on noise, and RECYCLING -- L1 through L4 are all a single pass. protenix2 only;
+`native_trunk_dump.sh` needs protenix's own runner and featuriser.
+
+    L1r.6mrr        s_inputs 0.99999781  s_trunk 0.99930916  z_trunk 0.99110407
+    L1r.5k9p_plain  s_inputs 0.99999754  s_trunk 0.99984042  z_trunk 0.94925813
+
+**Both cases, always.** A trunk correlation below 1.0 is normal here -- 48
+blocks x 10 recycles amplify float noise -- so 6MRR, which the port folds well,
+is the control that says whether 5K9P's 0.949 is weather. It is: the input
+embedder is exact on both and 5K9P's SINGLE is the better of the two. Running
+5k9p alone is the mistake that cost most of a session, which is why the driver
+runs the pair and the level skips with a `run first:` line when a dump is
+missing (the npz are gitignored).
+
+### 3. boltz2's template module: already closed, the docs were stale
+
+"boltz2's template module is V2 upstream and we implement V1" was fixed on
+2026-09-12 (`TEMPLATE_VISIBILITY_BY_COVERAGE`) and is gated by `L1x.template`,
+which runs a partially covered dimer -- corr 1.000000 against boltz's own
+`TemplateV2Module` with `visibility_ids`. Nothing to do but stop listing it.
+
 # STATE OF PLAY -- AlphaFold 2, against DEEPMIND'S OWN CODE (2026-09-13)
 
     dev/oracles/parity_runs/2026-09-13-af2native/   L5af2, 16 gates, 16 OK

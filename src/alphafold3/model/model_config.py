@@ -226,6 +226,36 @@ MSA_KEEP_QUERY_ROW = ESMFOLD2_FAMILY
 # lm-tier survivors set msa=0, so no ESMFold2 model reaches an MSA block now.
 MSA_UPDATE_BEFORE_OPM = ('opendde', 'boltz2')
 
+# `_mask_trans`: OpenFold3 multiplies every transition's OUTPUT by the mask of
+# the axis it ran over, and every caller takes that default -- MSA module,
+# pairformer, diffusion transformer, heads. AF3 does not, and neither did we.
+# `L1b.msa_nonuniform` is the cell that finds it: corr 0.9855 with max|d|/rms
+# 7.7 before, 1.000000 after. Every other cell reads 1.000000 either way,
+# because they all feed ONE chain with an all-ones mask.
+#
+# DORMANT IN OUR FEATURISATION TODAY, and the claim was measured rather than
+# assumed. The live case is a row that covers SOME real tokens and not others:
+# a masked entry's transition update travels along the row through the
+# pair-weighted averaging and reaches unmasked tokens, which then reach the
+# pair track through the OPM. Our features never produce that row --
+# `--buckets` pads a 68-token input to 128, but a padded token is masked in
+# EVERY row, and a fully-masked row cannot influence a real one; and an
+# unpaired MSA in a complex writes GAP tokens with mask 1 over the other
+# chain's positions, not mask 0 (checked on a two-chain input: 7 rows, all
+# fully covered). Measured end to end: the openfold3 trunk on 6MRR padded
+# 68 -> 128 reads pair corr 0.99995310 unmasked and 0.99995478 masked, which is
+# no change. So this is faithfulness to the convention the checkpoint's own
+# code declares, and insurance for the first feature set that does produce a
+# partially covered row -- not a fix to a number anyone has seen.
+#
+# Membership is the OF3 lineage ONLY, and that was measured too: boltz2 and
+# intellifold2 both read corr 1.000000 on the same non-uniform mask, so they do
+# not mask their transitions. rosettafold3's, opendde's and the protenix
+# family's MSA modules take no msa mask at all -- their forward assumes full
+# rows -- so there is nothing to match, and `msa_parity.no_msa_mask` refuses
+# the cell for them rather than running all-ones twice and calling it a pass.
+MASK_TRANSITIONS = ('openfold3', 'openbind0')
+
 # The Protenix family. Its model types differ from one another ONLY in counts
 # and widths (converters/protenix2.derive_dims reads both off the checkpoint), so
 # every FORWARD branch that protenix2 takes, the others take too. Keeping the

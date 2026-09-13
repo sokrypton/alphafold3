@@ -39,7 +39,7 @@ def build_batch(model_name, seq, model_dir=None, templates=None):
 
 
 def _fold_setup(model_name, seq, model_dir=None, templates=None, seed=0,
-                chains=None, bonded_atom_pairs=None):
+                chains=None, bonded_atom_pairs=None, buckets=None):
   """-> (batch, cfg, model_dir). Everything the harnesses need, done once.
 
   `chains` replaces the single protein chain built from `seq`, so the same
@@ -67,8 +67,11 @@ def _fold_setup(model_name, seq, model_dir=None, templates=None, seed=0,
       rng_seeds=[seed],
       bonded_atom_pairs=bonded_atom_pairs)
   ccd = decoded_ccd.get_ccd()
+  # `buckets` is normally None here -- every gate runs the exact token count.
+  # Passing one is how a PADDED batch is built, which is what `--buckets` does
+  # in every real run and what no L0-L4 cell exercises.
   featurise = lambda **kw: featurisation.featurise_input(
-      fold_input=fold_input, ccd=ccd, buckets=None, **kw)
+      fold_input=fold_input, ccd=ccd, buckets=buckets, **kw)
   batch = featurise()[0]
   # ESMFold2 folds from ESM-C's hidden states. LM_PAIR names an npz written by
   # converters.esmfold2_lm; without it the model still folds, just without its
@@ -155,7 +158,7 @@ def _fold_setup(model_name, seq, model_dir=None, templates=None, seed=0,
 
 
 def fold(model_name, seq, model_dir=None, seed=0, templates=None, chains=None,
-         bonded_atom_pairs=None):
+         bonded_atom_pairs=None, buckets=None):
   import haiku as hk
   import jax
   from alphafold3.model import model as af3_model
@@ -163,7 +166,8 @@ def fold(model_name, seq, model_dir=None, seed=0, templates=None, chains=None,
 
   batch, cfg, model_dir = _fold_setup(model_name, seq, model_dir, templates,
                                       seed=seed, chains=chains,
-                                      bonded_atom_pairs=bonded_atom_pairs)
+                                      bonded_atom_pairs=bonded_atom_pairs,
+                                      buckets=buckets)
 
   @hk.transform
   def forward(b):

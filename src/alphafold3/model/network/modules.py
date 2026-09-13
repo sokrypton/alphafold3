@@ -89,7 +89,20 @@ class TransitionBlock(hk.Module):
     self.config = config
     self.global_config = global_config
 
-  def __call__(self, act, broadcast_dim=0):
+  def __call__(self, act, broadcast_dim=0, mask=None):
+    """AF3's transition; `mask` is the OpenFold3 lineage's `_mask_trans`.
+
+    OpenFold3 multiplies every transition's OUTPUT by the mask of the axis it
+    ran over (`layers/transition.py`: `x = self.linear_out(x) * mask`), and
+    every caller in of3 takes the `_mask_trans=True` default -- the MSA module,
+    the pairformer, the diffusion transformer and the heads. AF3 does not, and
+    neither did we.
+
+    Inert on an all-ones mask, which is exactly why no gate saw it: L1 through
+    L4 feed one unpadded chain with a full MSA. `L1b.msa_nonuniform` is the
+    cell that finds it. Read model_config.MASK_TRANSITIONS before assuming it
+    changes a fold -- on our features it does not, and that was measured.
+    """
     num_channels = act.shape[-1]
 
     num_intermediate = int(num_channels * self.config.num_intermediate_factor)
@@ -114,11 +127,14 @@ class TransitionBlock(hk.Module):
       a, b = jnp.split(act, 2, axis=-1)
       c = jax.nn.swish(a) * b
 
-    return hm.Linear(
+    out = hm.Linear(
         num_channels,
         initializer=self.global_config.final_init,
         name='transition2',
     )(c)
+    if mask is not None:
+      out = out * mask[..., None].astype(out.dtype)
+    return out
 
 
 class MSAAttention(hk.Module):
@@ -825,7 +841,16 @@ class PairFormerIteration(hk.Module):
               num_residues, self.global_config.pair_transition_shard_spec
           ),
       )
-    add_pair(transition_block(act if not parallel else pair_in))
+    # `_mask_trans`, the OF3 lineage only -- see model_config.MASK_TRANSITIONS.
+    _mt = self.global_config.model in model_config.MASK_TRANSITIONS
+    # The mask is applied OUTSIDE the sharded call: `sharded_apply` shards its
+    # arguments along axis 0, and handing it a (N, N) mask beside an (N, N, C)
+    # activation is one more thing to get right for no gain -- masking the
+    # output is pointwise, so the two are identical.
+    _trans = transition_block(act if not parallel else pair_in)
+    if _mt:
+      _trans = _trans * pair_mask[..., None].astype(_trans.dtype)
+    add_pair(_trans)
     if parallel:
       act = pair_in + pair_delta
 
@@ -864,7 +889,9 @@ class PairFormerIteration(hk.Module):
           self.config.single_transition,
           self.global_config,
           name='single_transition',
-      )(single_in if parallel else single_act, broadcast_dim=None)
+      )(single_in if parallel else single_act, broadcast_dim=None,
+        mask=(seq_mask if (seq_mask is not None and self.global_config.model
+                           in model_config.MASK_TRANSITIONS) else None))
 
       return act, single_act
     else:
@@ -914,6 +941,9 @@ class EvoformerIteration(hk.Module):
 
     msa_mask, pair_mask = masks['msa'], masks['pair']
 
+    # `_mask_trans`, the OF3 lineage only -- see model_config.MASK_TRANSITIONS.
+    _mask_trans = self.global_config.model in model_config.MASK_TRANSITIONS
+
     def _opm():
       return OuterProductMean(
           config=self.config.outer_product_mean,
@@ -931,7 +961,7 @@ class EvoformerIteration(hk.Module):
                             use_dropout, rate=0.15)
       m = m + TransitionBlock(
           self.config.msa_transition, self.global_config, name='msa_transition'
-      )(m)
+      )(m, mask=msa_mask if _mask_trans else None)
       return m
 
     # OpenDDE's MSABlock updates the MSA FIRST, then feeds the *updated* MSA to the
@@ -996,7 +1026,10 @@ class EvoformerIteration(hk.Module):
                 num_residues, self.global_config.pair_transition_shard_spec
             ),
         )
-      return transition_block(z)
+      out = transition_block(z)          # mask OUTSIDE the sharded call
+      if _mask_trans:
+        out = out * pair_mask[..., None].astype(out.dtype)
+      return out
 
     if self.global_config.model == 'chai1':
       # chai's MSA block is PARALLEL in two stages, and its pair transition sits

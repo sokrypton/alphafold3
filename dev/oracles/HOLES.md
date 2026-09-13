@@ -16,6 +16,18 @@ TWO categories, and the second was invisible until `parity_audit.py` existed:
 | -- | -- | NONE. Every gate now has an adapter for every model the cell applies to. |
 | `L4.confidence` | esmfold2, esmfold2_fast | NO LONGER A HOLE -- the cell RUNS, dump-driven, and its numbers are a finding rather than a gap. See below. |
 
+## The three "no cell covers this" items -- all closed (2026-09-13)
+
+| was open | now |
+|---|---|
+| `L1b.msa_nonuniform` duplicated the uniform cell for 13 of 14 models | `NONUNIFORM=1` reaches every adapter whose native module accepts an msa mask, and REFUSES (N/A) where it does not. It found a real bug: the OF3 lineage masks every transition's output (`_mask_trans`) and we did not -- corr 0.9855 -> 1.000000. Dormant on our features (measured), so this buys the cell, not a fold. |
+| `real_trunk_parity.py` existed and the driver never ran it | It is the `L1r` level, protenix2, BOTH cases (6mrr as the control, 5k9p_plain as the suspect). Skips with `run first:` when the npz dump is absent -- they are gitignored. |
+| boltz2's template module is V2 and we implement V1 | Closed 2026-09-12 by `TEMPLATE_VISIBILITY_BY_COVERAGE` and gated by `L1x.template` on a partially covered dimer, corr 1.000000. The bullet was stale. |
+
+The method that found the first one generalises: a knob that is supposed to
+change a gate's input should be checked to actually REACH each adapter.
+Thirteen adapters ignored it and every one of them reported a pass.
+
 ## AlphaFold 2 (L5af2) -- three cells, all named
 
 L5af2 is 16 gates and all 16 pass; eleven compare against DeepMind's own

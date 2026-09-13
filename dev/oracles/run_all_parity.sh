@@ -90,7 +90,7 @@ classify () {  # classify <log> -> status on stdout
   local rc; rc=$(sed -n 's/^__GATE_EXIT //p' "$log" | tail -1)
   if [ "$rc" = 0 ]; then echo OK; return; fi
   if [ "$rc" = 124 ]; then echo TIMEOUT; return; fi
-  if grep -qi 'no native adapter\|no converter registered\|nothing to audit\|has no msa_encoder\|has no final-block\|no weights for\|no native dump at\|run first:\|No module named\|KeyError' "$log"; then
+  if grep -qi '^N/A:\|no native adapter\|no converter registered\|nothing to audit\|has no msa_encoder\|has no final-block\|no weights for\|no native dump at\|run first:\|No module named\|KeyError' "$log"; then
     echo SKIP; return
   fi
   # A RESOURCE failure is not a result. Two gates sharing a 23 GB card is the
@@ -202,7 +202,7 @@ want () {  # is this level selected?
   case " $LEVELS " in *" all "*|*" $lvl "*) return 0 ;; *) return 1 ;; esac
 }
 
-LEVELS=${*:-L0 L1 L1b L1t L1x L1d L2 L3 L4 L5af2}
+LEVELS=${*:-L0 L1 L1b L1r L1t L1x L1d L2 L3 L4 L5af2}
 echo "levels: $LEVELS"
 echo "models: $MODELS"
 echo "logs:   $LOGDIR"
@@ -312,6 +312,30 @@ if want L1t; then
   echo "== L1 template embedder"
   for m in $MODELS; do gate L1t.template "$m" 'template|corr' dev/oracles/template_parity.py "$m"; done
 fi
+# --- L1r: the trunk on a REAL input. Everything in L1 feeds the trunk RANDOM
+#     s/z, so three things are measured by nothing else: the INPUT EMBEDDER
+#     (five oracles build s_inputs and none compared it), the trunk's output on
+#     a real featurisation, and RECYCLING (L1-L4 are all one pass).
+#     protenix2 only -- `native_trunk_dump.sh` runs protenix's own runner and
+#     featuriser, and no other vendor has an equivalent dump here.
+#     ALWAYS BOTH CASES. A trunk correlation well below 1.0 is normal (48
+#     blocks x 10 recycles amplify float noise; 6MRR correlates 0.960 while
+#     folding to 0.70 A), so the target the port folds WELL is the control that
+#     says whether the other one is weather or a bug. Running 5k9p alone is the
+#     mistake that cost most of a session.
+if want L1r; then
+  echo "== L1r trunk on a REAL input (input embedder + recycling)"
+  for _c in 6mrr 5k9p_plain; do
+    _npz=dev/oracles/native_trunk_$_c.npz
+    if [ ! -f "$_npz" ]; then
+      echo "  L1r.$_c              protenix2                      SKIP     run first: PX_DEPS=... bash dev/oracles/native_trunk_dump.sh $_c"
+      continue
+    fi
+    gate "L1r.$_c" protenix2 'z_trunk' \
+      dev/oracles/real_trunk_parity.py protenix2 --native "$_npz" --case "$_c"
+  done
+fi
+
 # --- L1x: the same two modules on a COMPLEX. Everything else in this file
 #     runs one protein chain, so no cell exercises a cross-chain convention --
 #     and both the boltz2 relpos entity bucket and the esmfold2 chain bucket
