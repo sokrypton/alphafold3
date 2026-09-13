@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from alphafold3.af2.common import residue_constants as rc
+from .common import residue_constants as rc
 
 
 def atom37_to_token_atoms(atom37, batch, per_residue=None):
@@ -94,7 +94,7 @@ def predicted_structure(af2_outputs, batch):
   there. AF2 predicts it per residue; the AF3 writer wants it per atom, so it is
   broadcast over each token's atoms.
   '''
-  from alphafold3.model import model as af3_model
+  from ..model import model as af3_model
 
   atom37 = np.asarray(af2_outputs['structure_module']['final_atom_positions'])
   plddt = af2_outputs.get('plddt')

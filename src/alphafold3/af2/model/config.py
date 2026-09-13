@@ -14,7 +14,7 @@
 """Model config."""
 
 import copy
-from alphafold3.af2.model.tf import shape_placeholders
+from .tf import shape_placeholders
 import ml_collections
 
 

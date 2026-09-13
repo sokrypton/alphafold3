@@ -26,7 +26,7 @@ from typing import Sequence
 
 import jax
 import jax.numpy as jnp
-from alphafold3.af2.model import utils
+from . import utils
 
 def gumbel_noise(key: jnp.ndarray, shape: Sequence[int]) -> jnp.ndarray:
   """Generate Gumbel Noise of given Shape.

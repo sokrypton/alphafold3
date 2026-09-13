@@ -17,12 +17,13 @@ from __future__ import annotations
 
 import concurrent.futures
 import functools
+import os
 
 import numpy as np
 
-from alphafold3.af2 import features as af2_features
-from alphafold3.af2 import output as af2_output
-from alphafold3.af2.common import confidence as af2_confidence
+from . import features as af2_features
+from . import output as af2_output
+from .common import confidence as af2_confidence
 
 _NAN = float('nan')
 
@@ -32,7 +33,8 @@ class AF2ModelRunner:
 
   def __init__(self, spec, device, model_dir, *, num_recycles=3,
                use_bfloat16=True, num_msa=512, num_extra_msa=1024,
-               model_names=None, use_cluster_profile=True):
+               model_names=None, use_cluster_profile=True,
+               use_templates=False):
     self._spec = spec
     self._device = device
     self._model_dir = str(model_dir)
@@ -42,6 +44,14 @@ class AF2ModelRunner:
     self._num_extra_msa = num_extra_msa
     self._model_names = model_names
     self._use_cluster_profile = use_cluster_profile
+    # TEMPLATES ARE NOT JUST A FEATURE HERE. `use_templates` picks a
+    # template-enabled config (model_1_ptm rather than model_3_ptm), KEEPS the
+    # template weights (they are dropped by `rm_templates` otherwise), and
+    # selects the parameter sets trained with templates (1 and 2, not 1-5). With
+    # it False, populated template features reach a graph that ignores them and
+    # the fold is bit-for-bit the no-template fold -- which is exactly what a
+    # self-template test measured before this was threaded through.
+    self._use_templates = use_templates
 
   @property
   def model_dir(self):
@@ -53,10 +63,11 @@ class AF2ModelRunner:
 
   @functools.cached_property
   def _runner(self):
-    from alphafold3.af2.runner import AF2Runner
+    from .runner import AF2Runner
 
     return AF2Runner(
         model_type=self._spec.model_type,
+        use_templates=self._use_templates,
         data_dir=self._model_dir,
         model_names=self._model_names,
         num_recycle=self._num_recycles,
@@ -101,7 +112,14 @@ class AF2ModelRunner:
     import jax
     import jax.numpy as jnp
 
-    inputs, seq = af2_features.from_af3_batch(batch, use_msa=True)
+    # The template alphabet is a property of the CHECKPOINT, so it is looked up
+    # per model rather than fixed here (see features.AF2_TEMPLATE_ALPHABET).
+    inputs, seq = af2_features.from_af3_batch(
+        batch, use_msa=True,
+        template_alphabet=os.environ.get(
+            'AF2_TEMPLATE_ALPHABET',
+            af2_features.AF2_TEMPLATE_ALPHABET.get(self._spec.name,
+                                                   'restype')))
     num_seq = self._runner.num_seq
     aatype = jnp.asarray(
         [af2_features.rc.restype_order.get(a, af2_features.rc.restype_num)
@@ -138,7 +156,7 @@ class AF2ModelRunner:
     """One forward pass, from the SAME featurised batch an AF3 model gets."""
     import jax
 
-    from alphafold3.model import feat_batch
+    from ..model import feat_batch
 
     batch = feat_batch.Batch.from_data_dict(featurised_example)
     outputs = self.forward(batch, key=rng_key)
@@ -161,7 +179,7 @@ class AF2ModelRunner:
 
   def _inference_results(self, batch, result, target_name: str):
     del target_name
-    from alphafold3.model import confidences, model as af3_model
+    from ..model import confidences, model as af3_model
 
     fb = result['__batch__']
     num_tokens = af2_features.num_real_tokens(fb)

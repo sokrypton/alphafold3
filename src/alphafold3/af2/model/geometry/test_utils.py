@@ -15,9 +15,9 @@
 
 import dataclasses
 
-from alphafold3.af2.model.geometry import rigid_matrix_vector
-from alphafold3.af2.model.geometry import rotation_matrix
-from alphafold3.af2.model.geometry import vector
+from . import rigid_matrix_vector
+from . import rotation_matrix
+from . import vector
 import jax.numpy as jnp
 import numpy as np
 

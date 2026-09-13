@@ -44,8 +44,16 @@ def convert_monomer_params(p: dict) -> dict:
   '''monomer param dict -> multimer-graph-shaped param dict (in memory)'''
   out = {}
   for k, v in p.items():
-    if k in _FUSED or 'template' in k:
-      continue                    # handled below / template embedder excluded
+    if k in _FUSED:
+      continue                    # handled below
+    if 'template' in k:
+      # PASSED THROUGH UNCHANGED, not dropped. The graph instantiates the
+      # MONOMER template embedder when the monomer template config is grafted in
+      # (runner.py), and its scope names are exactly the ones these arrays carry
+      # -- so there is nothing to convert. Dropping them is what made a
+      # template-bearing input fold as if it had none.
+      out[k] = v
+      continue
     out[k] = v
 
   # ---- IPA scalar. Monomer reshapes the flat projection to (head, scalar)

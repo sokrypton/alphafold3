@@ -33,7 +33,7 @@ unintended use of these cores on both GPUs and TPUs.
 
 import collections
 from typing import List
-from alphafold3.af2.model import quat_affine
+from . import quat_affine
 import jax.numpy as jnp
 import tree
 

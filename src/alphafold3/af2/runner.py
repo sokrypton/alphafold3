@@ -134,7 +134,7 @@ def make_config(model_type='alphafold2_ptm', use_templates=False,
   # because Triton is a launch-time crash on consumer Ada. 'none' keeps AF2's
   # own einsum, which is what the oracle tests compare against.
   if flash_attention is None:
-    from alphafold3.model.components.platform import attention_config
+    from ..model.components.platform import attention_config
     flash_attention = attention_config()['attention']
   cfg.model.global_config.flash_attention = flash_attention
   # below this the einsum wins anyway, and AF2's MSA column attention over a
@@ -244,11 +244,6 @@ class AF2Runner:
     if cfg is not None:
       self.cfg = cfg
     elif self.on_multimer_graph:
-      if use_templates:
-        raise ValueError('on_multimer_graph does not support templates: the '
-                         'monomer and multimer template embedders differ and '
-                         'monomer template weights cannot be converted. Use '
-                         'native multimer weights for templates.')
       self.cfg = make_config('alphafold2_multimer_v3', use_templates=False,
                              num_recycle=num_recycle, use_remat=use_remat,
                              use_bfloat16=use_bfloat16, use_dgram=use_dgram,
@@ -259,6 +254,23 @@ class AF2Runner:
       # template.enabled stays config (it gates whether the template embedder is
       # instantiated -- a genuine graph choice, not a per-model value).
       self.cfg.model.embeddings_and_evoformer.template.enabled = False
+      if use_templates:
+        # MONOMER TEMPLATES ON THE MULTIMER GRAPH. The trunk is converted
+        # (convert.py) but the template embedder cannot be: the monomer and
+        # multimer architectures differ, and the *_ptm checkpoints only have
+        # weights for the monomer one. So graft the MONOMER template config in
+        # -- modules.py selects MonomerTemplateEmbedding from it (the
+        # `embed_torsion_angles` field is monomer-only) and the scope names then
+        # match the checkpoint, which is why its template weights are passed
+        # through unconverted.
+        _mono = make_config('alphafold2_ptm', use_templates=True,
+                            num_recycle=num_recycle, use_remat=use_remat,
+                            use_bfloat16=use_bfloat16, use_dgram=use_dgram,
+                            use_dgram_pred=use_dgram_pred,
+                            flash_attention=flash_attention, heads=heads)
+        self.cfg.model.embeddings_and_evoformer.template = (
+            _mono.model.embeddings_and_evoformer.template)
+        self.cfg.model.embeddings_and_evoformer.template.enabled = True
     else:
       self.cfg = make_config(
           model_type, use_templates, num_recycle, use_remat, use_bfloat16,

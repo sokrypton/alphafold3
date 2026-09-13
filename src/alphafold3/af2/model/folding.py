@@ -18,13 +18,13 @@ import functools
 import numbers
 from typing import Any, Dict, Iterable, Mapping, Optional, Tuple, Union
 
-from alphafold3.af2.common import residue_constants
-from alphafold3.af2.model import all_atom
-from alphafold3.af2.model import common_modules
-from alphafold3.af2.model import geometry
-from alphafold3.af2.model import prng
-from alphafold3.af2.model import utils
-from alphafold3.af2.model.geometry import utils as geometry_utils
+from ..common import residue_constants
+from . import all_atom
+from . import common_modules
+from . import geometry
+from . import prng
+from . import utils
+from .geometry import utils as geometry_utils
 import haiku as hk
 import jax
 import jax.numpy as jnp
@@ -414,7 +414,7 @@ class FoldIteration(hk.Module):
       safe_key = prng.SafeKey(hk.next_rng_key())
 
     def safe_dropout_fn(tensor, safe_key):
-      from alphafold3.af2.model import modules
+      from . import modules
       return modules.apply_dropout(
           tensor=tensor,
           safe_key=safe_key,

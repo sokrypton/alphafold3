@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from alphafold3.af2.common import residue_constants as rc
+from .common import residue_constants as rc
 
 NUM_ATOM37 = 37
 NUM_ATOM14 = 14
@@ -45,7 +45,7 @@ def _af3_to_af2_aatype() -> np.ndarray:
   rewrite every sequence. So the table is built through the residue NAMES and
   the identity is asserted, not hardcoded.
   '''
-  from alphafold3.constants import residue_names
+  from ..constants import residue_names
 
   af3 = residue_names.POLYMER_TYPES_ORDER_WITH_UNKNOWN_AND_GAP
   gap = len(rc.restypes_with_x_and_gap) - 1          # 21
@@ -74,6 +74,36 @@ def _af3_to_af2_aatype() -> np.ndarray:
 
 
 AF3_TO_AF2_AATYPE = _af3_to_af2_aatype()
+
+
+def _af2_to_hhblits_aatype() -> np.ndarray:
+  """our restype id -> HHBLITS id, the alphabet AF2 TEMPLATES are written in.
+
+  `aatype`, `target_feat` and every MSA row use `restypes_with_x_and_gap`
+  (ARNDCQEGHILKMFPSTWYVX-). AF2's monomer template pipeline instead writes
+  `template_aatype` through `HHBLITS_AA_TO_ID` (ACDEFGHIKLMNPQRSTVWYX-), and
+  **17 of the 22 positions differ**. Feeding one where the other is meant
+  relabels almost every template residue, and does it silently, because class 0
+  is alanine in both -- so a wrong template looks like a plausible one.
+  """
+  table = np.zeros(len(rc.restypes_with_x_and_gap), dtype=np.int32)
+  for i, letter in enumerate(rc.restypes_with_x_and_gap):
+    table[i] = rc.HHBLITS_AA_TO_ID[letter]
+  if sorted(table.tolist()) != list(range(len(table))):
+    raise AssertionError(
+        'restype -> HHBLITS is not a permutation of 0..%d: %s'
+        % (len(table) - 1, table.tolist()))
+  return table
+
+
+AF2_TO_HHBLITS_AATYPE = _af2_to_hhblits_aatype()
+
+# WHICH ALPHABET EACH CHECKPOINT'S TEMPLATE EMBEDDER WAS TRAINED ON. This is a
+# property of the weights, so it is measured, not assumed: fold a target with
+# its OWN structure as the template and see which ordering collapses the RMSD
+# (dev/oracles/af2_template_check.py). AF2_TEMPLATE_ALPHABET can be overridden
+# per run to repeat that A/B.
+AF2_TEMPLATE_ALPHABET = {'af2_ptm': 'restype', 'af2_multimer': 'restype'}
 
 
 def blank_features(L: int, N: int = 1, T: int = 1, eN: int = 1) -> dict:
@@ -119,7 +149,7 @@ def blank_features(L: int, N: int = 1, T: int = 1, eN: int = 1) -> dict:
 
 def protein_chains(fold_input):
   '''the fold input's protein chains, or a refusal naming what AF2 cannot take.'''
-  from alphafold3.common import folding_input
+  from ..common import folding_input
 
   rejected = []
   chains = []
@@ -159,8 +189,74 @@ def num_real_tokens(batch) -> int:
   return n
 
 
+def template_features(batch, L: int, alphabet: str = 'restype') -> dict | None:
+  """AF3 batch templates -> AF2's six `template_*` arrays, or None if there are none.
+
+  Two conversions, both of which are silent when wrong:
+
+  * **the alphabet.** `alphabet='hhblits'` writes `template_aatype` through
+    `AF2_TO_HHBLITS_AATYPE`; 'restype' leaves it in the ordering `aatype` and
+    the MSA use. Which one the weights expect is a property of the CHECKPOINT,
+    not of this code -- see `AF2_TEMPLATE_ALPHABET`.
+  * **the atom layout.** AF3 carries a template's coordinates in its own dense
+    per-token layout (24 slots, meaning-by-restype); AF2 wants atom37. The
+    scatter uses AF3's own `PROTEIN_AATYPE_DENSE_ATOM_TO_ATOM37`, and only where
+    the mask is set -- that table sends an absent atom to index 0, which is N,
+    so scattering unmasked would overwrite every backbone nitrogen.
+  """
+  from ..model import protein_data_processing as pdp
+
+  t = getattr(batch, 'templates', None)
+  if t is None:
+    return None
+  aat3 = np.asarray(t.aatype)
+  if aat3.ndim != 2 or aat3.shape[0] == 0:
+    return None
+  pos3 = np.asarray(t.atom_positions, np.float32)
+  msk3 = np.asarray(t.atom_mask)
+  T = aat3.shape[0]
+
+  dense_to_37 = np.asarray(pdp.PROTEIN_AATYPE_DENSE_ATOM_TO_ATOM37)
+  n_dense = min(msk3.shape[-1], dense_to_37.shape[-1])
+
+  aat = np.zeros((T, L), np.int32)
+  pos = np.zeros((T, L, NUM_ATOM37, 3), np.float32)
+  msk = np.zeros((T, L, NUM_ATOM37), np.float32)
+  present = np.zeros(T, np.float32)
+
+  for ti in range(T):
+    a3 = aat3[ti, :L].astype(int)
+    af2_aat = AF3_TO_AF2_AATYPE[a3]
+    aat[ti] = (AF2_TO_HHBLITS_AATYPE[af2_aat] if alphabet == 'hhblits'
+               else af2_aat)
+    idx = dense_to_37[a3][:, :n_dense]                      # (L, dense)
+    live = msk3[ti, :L, :n_dense].astype(bool)
+    rows = np.repeat(np.arange(L)[:, None], n_dense, axis=1)
+    pos[ti][rows[live], idx[live]] = pos3[ti, :L, :n_dense][live]
+    msk[ti][rows[live], idx[live]] = 1.0
+    present[ti] = float(live.any())
+
+  # AF2's pseudo-beta: CB, except glycine which has none and uses CA.
+  cb, ca = rc.atom_order['CB'], rc.atom_order['CA']
+  is_gly = (AF3_TO_AF2_AATYPE[aat3[:, :L].astype(int)] == rc.restype_order['G'])
+  pick = np.where(is_gly, ca, cb)
+  gi = pick[..., None, None]
+  pb = np.take_along_axis(pos, np.broadcast_to(gi, pos.shape[:2] + (1, 3)),
+                          axis=2)[:, :, 0, :]
+  pb_mask = np.take_along_axis(msk, pick[..., None], axis=2)[:, :, 0]
+  return {
+      'template_aatype': aat,
+      'template_all_atom_positions': pos,
+      'template_all_atom_mask': msk,
+      'template_mask': present,
+      'template_pseudo_beta': pb,
+      'template_pseudo_beta_mask': pb_mask.astype(np.float32),
+  }
+
+
 def from_af3_batch(batch, num_seq: int = 1, num_templates: int = 1,
-                   use_msa: bool = True) -> tuple[dict, str]:
+                   use_msa: bool = True,
+                   template_alphabet: str = 'restype') -> tuple[dict, str]:
   '''an AF3 featurised batch -> (AF2 input dict, one-letter sequence)
 
   The sequence comes back alongside because `AF2Runner.predict` takes it
@@ -184,6 +280,12 @@ def from_af3_batch(batch, num_seq: int = 1, num_templates: int = 1,
 
   aatype = AF3_TO_AF2_AATYPE[np.asarray(tok.aatype)[:L].astype(int)]
   seq = ''.join(rc.restypes_with_x_and_gap[i] for i in aatype)
+
+  tmpl = template_features(batch, L, alphabet=template_alphabet)
+  if tmpl is not None and float(np.sum(tmpl['template_mask'])) > 0:
+    # resize the blank slots to however many the batch actually carries
+    for k, v in tmpl.items():
+      inputs[k] = v
 
   if use_msa and getattr(batch, 'msa', None) is not None:
     # AF3 pads the MSA to a bucket (16384 rows); num_alignments is how many are
@@ -215,16 +317,17 @@ def from_af3_batch(batch, num_seq: int = 1, num_templates: int = 1,
 
 
 def featurise_input(fold_input, num_seq: int = 1, num_templates: int = 1,
-                    use_msa: bool = True, buckets=None, ccd=None):
+                    use_msa: bool = True, buckets=None, ccd=None,
+                    template_alphabet: str = 'restype'):
   '''fold input -> (AF2 input dict, sequence, AF3 batch)
 
   Convenience for callers that have a fold input rather than a batch. It runs
   the SAME featuriser the AF3-family models run and hands the batch back too,
   because `alphafold3.af2.output` needs it to write the structure.
   '''
-  from alphafold3.constants import decoded_ccd
-  from alphafold3.data import featurisation
-  from alphafold3.model import feat_batch
+  from ..constants import decoded_ccd
+  from ..data import featurisation
+  from ..model import feat_batch
 
   protein_chains(fold_input)
   batch_dict = featurisation.featurise_input(
@@ -232,5 +335,6 @@ def featurise_input(fold_input, num_seq: int = 1, num_templates: int = 1,
       buckets=buckets)[0]
   batch = feat_batch.Batch.from_data_dict(batch_dict)
   inputs, seq = from_af3_batch(batch, num_seq=num_seq,
-                               num_templates=num_templates, use_msa=use_msa)
+                               num_templates=num_templates, use_msa=use_msa,
+                               template_alphabet=template_alphabet)
   return inputs, seq, batch

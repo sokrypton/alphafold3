@@ -17,24 +17,24 @@
 The structure generation code is in 'folding.py'.
 """
 import functools
-from alphafold3.af2.common import residue_constants
-from alphafold3.af2.model import common_modules
-from alphafold3.af2.model import layer_stack
-from alphafold3.af2.model import lddt
-from alphafold3.af2.model import mapping
-from alphafold3.af2.model import prng
-from alphafold3.af2.model import quat_affine
-from alphafold3.af2.model import utils
+from ..common import residue_constants
+from . import common_modules
+from . import layer_stack
+from . import lddt
+from . import mapping
+from . import prng
+from . import quat_affine
+from . import utils
 import numpy as np
 from typing import Sequence
-from alphafold3.af2.model import all_atom
-from alphafold3.af2.model import folding
-from alphafold3.af2.model import geometry
+from . import all_atom
+from . import folding
+from . import geometry
 import haiku as hk
 import jax
 import jax.numpy as jnp
 
-from alphafold3.af2.model.r3 import Rigids, Rots, Vecs
+from .r3 import Rigids, Rots, Vecs
 
 def apply_dropout(*, tensor, safe_key, rate, broadcast_dim=None):
   """Applies dropout to a tensor."""
@@ -297,7 +297,7 @@ class Attention(hk.Module):
       total_bias = bias
       if nonbatched_bias is not None:
         total_bias = total_bias + jnp.expand_dims(nonbatched_bias, axis=0)
-      from alphafold3.model.components.attention import dot_product_attention as _flash_dpa
+      from ...model.components.attention import dot_product_attention as _flash_dpa
       weighted_avg = _flash_dpa(
           q, k, v, bias=total_bias, scale=1.0, implementation=impl)
     else:
@@ -1642,8 +1642,15 @@ class EmbeddingsAndEvoformer(hk.Module):
       if c.max_relative_idx:
         pair_activations += self._relative_encoding(batch)
 
+      # WHICH TEMPLATE EMBEDDER. The monomer and multimer architectures differ
+      # (see MonomerSingleTemplateEmbedding), and each checkpoint has weights
+      # for exactly one of them. `embed_torsion_angles` is a monomer-only config
+      # field, so the config that selected the parameter names also selects the
+      # module -- the two cannot drift apart.
+      monomer_templates = 'embed_torsion_angles' in c.template
       if c.template.enabled:
-        template_module = TemplateEmbedding(c.template, gc)
+        template_module = (MonomerTemplateEmbedding if monomer_templates
+                           else TemplateEmbedding)(c.template, gc)
         template_batch = {
             'template_aatype': batch['template_aatype'],
             'template_all_atom_positions': batch['template_all_atom_positions'],
@@ -1666,13 +1673,28 @@ class EmbeddingsAndEvoformer(hk.Module):
         
 
         safe_key, safe_subkey = safe_key.split()
-        template_act = template_module(
-            query_embedding=pair_activations,
-            template_batch=template_batch,
-            padding_mask_2d=mask_2d,
-            multichain_mask_2d=multichain_mask,
-            use_dropout=batch["use_dropout"],
-            safe_key=safe_subkey)
+        if monomer_templates:
+          # the monomer embedder takes the pseudo-beta features directly and
+          # names its padding mask `mask_2d`
+          template_batch['template_pseudo_beta'] = batch['template_pseudo_beta']
+          template_batch['template_pseudo_beta_mask'] = (
+              batch['template_pseudo_beta_mask'])
+          template_batch['template_mask'] = batch['template_mask']
+          template_act = template_module(
+              query_embedding=pair_activations,
+              template_batch=template_batch,
+              mask_2d=mask_2d,
+              multichain_mask_2d=multichain_mask,
+              use_dropout=batch["use_dropout"],
+              safe_key=safe_subkey)
+        else:
+          template_act = template_module(
+              query_embedding=pair_activations,
+              template_batch=template_batch,
+              padding_mask_2d=mask_2d,
+              multichain_mask_2d=multichain_mask,
+              use_dropout=batch["use_dropout"],
+              safe_key=safe_subkey)
         pair_activations += template_act
 
       # Extra MSA stack.
@@ -1723,11 +1745,44 @@ class EmbeddingsAndEvoformer(hk.Module):
         evoformer_masks["cov"] = batch['cov_mask'].astype(dtype)
 
       if c.template.enabled:
-        template_features, template_masks = (
-            template_embedding_1d(batch=batch, num_channel=c.msa_channel, global_config=gc))
+        if monomer_templates:
+          # MONOMER 1-D path: aatype(22) + torsion sin/cos(14) + alt(14) +
+          # mask(7) = 57, which is the width of `template_single_embedding` in
+          # the *_ptm checkpoints. The multimer helper below builds 34 instead
+          # (aatype + chi), so the two are not interchangeable.
+          if c.template.embed_torsion_angles:
+            num_templ, num_res = batch['template_aatype'].shape
+            aatype_one_hot = jax.nn.one_hot(batch['template_aatype'], 22, axis=-1)
+            ret = all_atom.atom37_to_torsion_angles(
+                aatype=batch['template_aatype'],
+                all_atom_pos=batch['template_all_atom_positions'],
+                all_atom_mask=batch['template_all_atom_mask'],
+                placeholder_for_undefined=not gc.zero_init)
+            template_features = jnp.concatenate([
+                aatype_one_hot,
+                jnp.reshape(ret['torsion_angles_sin_cos'],
+                            [num_templ, num_res, 14]),
+                jnp.reshape(ret['alt_torsion_angles_sin_cos'],
+                            [num_templ, num_res, 14]),
+                ret['torsion_angles_mask']], axis=-1).astype(dtype)
+            template_activations = common_modules.Linear(
+                c.msa_channel, initializer='relu',
+                name='template_single_embedding')(template_features)
+            template_activations = jax.nn.relu(template_activations)
+            template_activations = common_modules.Linear(
+                c.msa_channel, initializer='relu',
+                name='template_projection')(template_activations)
+            evoformer_input['msa'] = jnp.concatenate(
+                [evoformer_input['msa'], template_activations], axis=0)
+            template_masks = ret['torsion_angles_mask'][:, :, 2].astype(dtype)
+            evoformer_masks['msa'] = jnp.concatenate(
+                [evoformer_masks['msa'], template_masks], axis=0)
+        else:
+          template_features, template_masks = (
+              template_embedding_1d(batch=batch, num_channel=c.msa_channel, global_config=gc))
 
-        evoformer_input['msa'] = jnp.concatenate([evoformer_input['msa'], template_features], axis=0)
-        evoformer_masks['msa'] = jnp.concatenate([evoformer_masks['msa'], template_masks], axis=0)
+          evoformer_input['msa'] = jnp.concatenate([evoformer_input['msa'], template_features], axis=0)
+          evoformer_masks['msa'] = jnp.concatenate([evoformer_masks['msa'], template_masks], axis=0)
         
       evoformer_iteration = EvoformerIteration(
           c.evoformer, gc, is_extra_msa=False, name='evoformer_iteration')
@@ -1779,6 +1834,139 @@ class EmbeddingsAndEvoformer(hk.Module):
           output[k] = v.astype(jnp.float32)
 
     return output
+
+
+class MonomerSingleTemplateEmbedding(hk.Module):
+  """AF2 MONOMER single-template embedder (Alg. 2 lines 9+11).
+
+  Vendored from ColabDesign v1, which is the ancestor of this tree -- the
+  monomer graph was retired here when everything moved onto the multimer
+  network, and with it the only template embedder the `*_ptm` checkpoints have
+  weights for. The two architectures are genuinely different, which is why
+  `convert.py` cannot map one onto the other:
+
+    monomer   embedding2d(88 -> 64), TemplatePairStack, output_layer_norm, then
+              pointwise ATTENTION over the template axis
+    multimer  query_embedding_norm / template_pair_embedding_* / output_linear
+
+  The 88 input channels are dgram(39) + mask(1) + aatype_i(22) + aatype_j(22)
+  + unit_vector(3) + backbone mask(1).
+
+  `template_aatype` arrives in OUR restype order, not the HHBLITS order the
+  hhsearch pipeline emits -- AF2 converts it with `fix_templates_aatype`
+  (MAP_HHBLITS_AATYPE_TO_OUR_AATYPE) before the model, and so do we, in
+  af2/features.py.
+  """
+
+  def __init__(self, config, global_config, name='single_template_embedding'):
+    super().__init__(name=name)
+    self.config = config
+    self.global_config = global_config
+
+  def __call__(self, query_embedding, batch, mask_2d, multichain_mask_2d,
+               use_dropout):
+    dtype = query_embedding.dtype
+    num_res = batch['template_aatype'].shape[0]
+    num_channels = (self.config.template_pair_stack
+                    .triangle_attention_ending_node.value_dim)
+
+    template_mask = batch['template_pseudo_beta_mask']
+    template_mask_2d = template_mask[:, None] * template_mask[None, :]
+    template_dgram = dgram_from_positions(batch['template_pseudo_beta'],
+                                          **self.config.dgram_features)
+    template_mask_2d = (template_mask_2d * multichain_mask_2d).astype(dtype)
+    template_dgram = (template_dgram * template_mask_2d[..., None]).astype(dtype)
+    to_concat = [template_dgram, template_mask_2d[:, :, None]]
+
+    aatype = jax.nn.one_hot(batch['template_aatype'], 22, axis=-1, dtype=dtype)
+    to_concat.append(jnp.tile(aatype[None, :, :], [num_res, 1, 1]))
+    to_concat.append(jnp.tile(aatype[:, None, :], [1, num_res, 1]))
+
+    n, ca, c = [residue_constants.atom_order[a] for a in ('N', 'CA', 'C')]
+    bb_mask = (batch['template_all_atom_mask'][..., n]
+               * batch['template_all_atom_mask'][..., ca]
+               * batch['template_all_atom_mask'][..., c])
+    bb_mask_2d = bb_mask[:, None] * bb_mask[None, :] * multichain_mask_2d
+
+    if self.config.use_template_unit_vector:
+      raw = batch['template_all_atom_positions'].astype(jnp.float32)
+      rot, trans = quat_affine.make_transform_from_reference(
+          n_xyz=raw[:, n], ca_xyz=raw[:, ca], c_xyz=raw[:, c])
+      affines = quat_affine.QuatAffine(
+          quaternion=quat_affine.rot_to_quat(rot, unstack_inputs=True),
+          translation=trans, rotation=rot, unstack_inputs=True)
+      points = [jnp.expand_dims(x, axis=-2) for x in affines.translation]
+      affine_vec = affines.invert_point(points, extra_dims=1)
+      inv_scalar = jax.lax.rsqrt(1e-6 + sum(jnp.square(x) for x in affine_vec))
+      inv_scalar = inv_scalar * bb_mask_2d.astype(inv_scalar.dtype)
+      unit_vector = [(x * inv_scalar)[..., None] for x in affine_vec]
+    else:
+      unit_vector = [jnp.zeros((num_res, num_res, 1))] * 3
+    to_concat.extend([x.astype(dtype) for x in unit_vector])
+
+    bb_mask_2d = bb_mask_2d.astype(dtype)
+    to_concat.append(bb_mask_2d[..., None])
+
+    act = jnp.concatenate(to_concat, axis=-1)
+    # non-template regions must not contribute arbitrary distogram values
+    act *= bb_mask_2d[..., None]
+    act = common_modules.Linear(num_channels, initializer='relu',
+                                name='embedding2d')(act)
+    act = TemplatePairStack(self.config.template_pair_stack,
+                            self.global_config)(act, mask_2d,
+                                                use_dropout=use_dropout)
+    return common_modules.LayerNorm([-1], True, True,
+                                    name='output_layer_norm')(act)
+
+
+class MonomerTemplateEmbedding(hk.Module):
+  """AF2 MONOMER template set embedder (Alg. 2 lines 9-12, Alg. 17).
+
+  Shares one `MonomerSingleTemplateEmbedding` across templates, then attends
+  from the query to the template axis pointwise. Same scope names as the
+  `*_ptm` checkpoints carry, so their template weights load unchanged.
+  """
+
+  def __init__(self, config, global_config, name='template_embedding'):
+    super().__init__(name=name)
+    self.config = config
+    self.global_config = global_config
+
+  def __call__(self, query_embedding, template_batch, mask_2d,
+               multichain_mask_2d, use_dropout, safe_key=None):
+    num_templates = template_batch['template_mask'].shape[0]
+    num_channels = (self.config.template_pair_stack
+                    .triangle_attention_ending_node.value_dim)
+    num_res = query_embedding.shape[0]
+    dtype = query_embedding.dtype
+    template_mask = template_batch['template_mask'].astype(dtype)
+    query_num_channels = query_embedding.shape[-1]
+
+    embedder = MonomerSingleTemplateEmbedding(self.config, self.global_config)
+
+    def map_fn(batch):
+      return embedder(query_embedding, batch, mask_2d, multichain_mask_2d,
+                      use_dropout=use_dropout)
+
+    template_pair_representation = mapping.sharded_map(map_fn, in_axes=0)(
+        template_batch)
+
+    flat_query = jnp.reshape(query_embedding,
+                             [num_res * num_res, 1, query_num_channels])
+    flat_templates = jnp.reshape(
+        jnp.transpose(template_pair_representation, [1, 2, 0, 3]),
+        [num_res * num_res, num_templates, num_channels])
+    bias = (1e9 * (template_mask[None, None, None, :] - 1.))
+    attn = Attention(self.config.attention, self.global_config,
+                     query_num_channels)
+    embedding = mapping.inference_subbatch(
+        attn, self.config.subbatch_size,
+        batched_args=[flat_query, flat_templates], nonbatched_args=[bias],
+        low_memory=self.config.subbatch_size is not None)
+    embedding = jnp.reshape(embedding, [num_res, num_res, query_num_channels])
+    # no gradient when there is no template at all
+    embedding *= (jnp.sum(template_mask) > 0.).astype(embedding.dtype)
+    return embedding
 
 
 class TemplateEmbedding(hk.Module):

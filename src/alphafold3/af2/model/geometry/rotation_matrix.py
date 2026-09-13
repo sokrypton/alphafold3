@@ -16,9 +16,9 @@
 from __future__ import annotations
 import dataclasses
 
-from alphafold3.af2.model.geometry import struct_of_array
-from alphafold3.af2.model.geometry import utils
-from alphafold3.af2.model.geometry import vector
+from . import struct_of_array
+from . import utils
+from . import vector
 import jax
 import jax.numpy as jnp
 import numpy as np

@@ -16,7 +16,7 @@
 from typing import Any, Mapping, Optional, Union
 
 from absl import logging
-from alphafold3.af2.model import modules
+from . import modules
 
 import haiku as hk
 import jax

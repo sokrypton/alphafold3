@@ -17,7 +17,7 @@
 import jax.numpy as jnp
 import jax
 import numpy as np
-from alphafold3.af2.common import residue_constants
+from . import residue_constants
 import scipy.special
 
 def compute_tol(prev_pos, current_pos, mask, use_jnp=False):

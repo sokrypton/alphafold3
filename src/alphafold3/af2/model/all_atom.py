@@ -15,9 +15,11 @@
 
 from typing import Dict, Text
 
-from alphafold3.af2.common import residue_constants
-from alphafold3.af2.model import geometry
-from alphafold3.af2.model import utils
+from ..common import residue_constants
+from . import geometry
+# r3 is used by the vendored atom37_to_torsion_angles below
+from . import r3
+from . import utils
 
 import jax
 import jax.numpy as jnp
@@ -365,6 +367,186 @@ def atom37_to_frames(
           residx_rigidgroup_is_ambiguous,  # (..., 8)
       'rigidgroups_alt_gt_frames': alt_gt_frames,  # Rigid (..., 8)
   }
+
+
+# Vendored back from ColabDesign v1 when MONOMER TEMPLATES were re-enabled: the
+# monomer 1-D template features are aatype(22) + torsion sin/cos(14) + alt(14) +
+# mask(7) = the 57 channels `template_single_embedding` expects, and this is
+# what builds them. It went missing here when the monomer graph was retired.
+def atom37_to_torsion_angles(
+    aatype: jnp.ndarray,  # (B, N)
+    all_atom_pos: jnp.ndarray,  # (B, N, 37, 3)
+    all_atom_mask: jnp.ndarray,  # (B, N, 37)
+    placeholder_for_undefined=False,
+) -> Dict[str, jnp.ndarray]:
+  """Computes the 7 torsion angles (in sin, cos encoding) for each residue.
+
+  The 7 torsion angles are in the order
+  '[pre_omega, phi, psi, chi_1, chi_2, chi_3, chi_4]',
+  here pre_omega denotes the omega torsion angle between the given amino acid
+  and the previous amino acid.
+
+  Args:
+    aatype: Amino acid type, given as array with integers.
+    all_atom_pos: atom37 representation of all atom coordinates.
+    all_atom_mask: atom37 representation of mask on all atom coordinates.
+    placeholder_for_undefined: flag denoting whether to set masked torsion
+      angles to zero.
+  Returns:
+    Dict containing:
+      * 'torsion_angles_sin_cos': Array with shape (B, N, 7, 2) where the final
+        2 dimensions denote sin and cos respectively
+      * 'alt_torsion_angles_sin_cos': same as 'torsion_angles_sin_cos', but
+        with the angle shifted by pi for all chi angles affected by the naming
+        ambiguities.
+      * 'torsion_angles_mask': Mask for which chi angles are present.
+  """
+
+  # Map aatype > 20 to 'Unknown' (20).
+  aatype = jnp.minimum(aatype, 20)
+
+  # Compute the backbone angles.
+  num_batch, num_res = aatype.shape
+
+  pad = jnp.zeros([num_batch, 1, 37, 3], jnp.float32)
+  prev_all_atom_pos = jnp.concatenate([pad, all_atom_pos[:, :-1, :, :]], axis=1)
+
+  pad = jnp.zeros([num_batch, 1, 37], jnp.float32)
+  prev_all_atom_mask = jnp.concatenate([pad, all_atom_mask[:, :-1, :]], axis=1)
+
+  # For each torsion angle collect the 4 atom positions that define this angle.
+  # shape (B, N, atoms=4, xyz=3)
+  pre_omega_atom_pos = jnp.concatenate(
+      [prev_all_atom_pos[:, :, 1:3, :],  # prev CA, C
+       all_atom_pos[:, :, 0:2, :]  # this N, CA
+      ], axis=-2)
+  phi_atom_pos = jnp.concatenate(
+      [prev_all_atom_pos[:, :, 2:3, :],  # prev C
+       all_atom_pos[:, :, 0:3, :]  # this N, CA, C
+      ], axis=-2)
+  psi_atom_pos = jnp.concatenate(
+      [all_atom_pos[:, :, 0:3, :],  # this N, CA, C
+       all_atom_pos[:, :, 4:5, :]  # this O
+      ], axis=-2)
+
+  # Collect the masks from these atoms.
+  # Shape [batch, num_res]
+  pre_omega_mask = (
+      jnp.prod(prev_all_atom_mask[:, :, 1:3], axis=-1)  # prev CA, C
+      * jnp.prod(all_atom_mask[:, :, 0:2], axis=-1))  # this N, CA
+  phi_mask = (
+      prev_all_atom_mask[:, :, 2]  # prev C
+      * jnp.prod(all_atom_mask[:, :, 0:3], axis=-1))  # this N, CA, C
+  psi_mask = (
+      jnp.prod(all_atom_mask[:, :, 0:3], axis=-1) *  # this N, CA, C
+      all_atom_mask[:, :, 4])  # this O
+
+  # Collect the atoms for the chi-angles.
+  # Compute the table of chi angle indices. Shape: [restypes, chis=4, atoms=4].
+  chi_atom_indices = get_chi_atom_indices()
+  # Select atoms to compute chis. Shape: [batch, num_res, chis=4, atoms=4].
+  atom_indices = utils.batched_gather(
+      params=chi_atom_indices, indices=aatype, axis=0, batch_dims=0)
+  # Gather atom positions. Shape: [batch, num_res, chis=4, atoms=4, xyz=3].
+  chis_atom_pos = utils.batched_gather(
+      params=all_atom_pos, indices=atom_indices, axis=-2,
+      batch_dims=2)
+
+  # Copy the chi angle mask, add the UNKNOWN residue. Shape: [restypes, 4].
+  chi_angles_mask = list(residue_constants.chi_angles_mask)
+  chi_angles_mask.append([0.0, 0.0, 0.0, 0.0])
+  chi_angles_mask = jnp.asarray(chi_angles_mask)
+
+  # Compute the chi angle mask. I.e. which chis angles exist according to the
+  # aatype. Shape [batch, num_res, chis=4].
+  chis_mask = utils.batched_gather(params=chi_angles_mask, indices=aatype,
+                                   axis=0, batch_dims=0)
+
+  # Constrain the chis_mask to those chis, where the ground truth coordinates of
+  # all defining four atoms are available.
+  # Gather the chi angle atoms mask. Shape: [batch, num_res, chis=4, atoms=4].
+  chi_angle_atoms_mask = utils.batched_gather(
+      params=all_atom_mask, indices=atom_indices, axis=-1,
+      batch_dims=2)
+  # Check if all 4 chi angle atoms were set. Shape: [batch, num_res, chis=4].
+  chi_angle_atoms_mask = jnp.prod(chi_angle_atoms_mask, axis=[-1])
+  chis_mask = chis_mask * (chi_angle_atoms_mask).astype(jnp.float32)
+
+  # Stack all torsion angle atom positions.
+  # Shape (B, N, torsions=7, atoms=4, xyz=3)
+  torsions_atom_pos = jnp.concatenate(
+      [pre_omega_atom_pos[:, :, None, :, :],
+       phi_atom_pos[:, :, None, :, :],
+       psi_atom_pos[:, :, None, :, :],
+       chis_atom_pos
+      ], axis=2)
+
+  # Stack up masks for all torsion angles.
+  # shape (B, N, torsions=7)
+  torsion_angles_mask = jnp.concatenate(
+      [pre_omega_mask[:, :, None],
+       phi_mask[:, :, None],
+       psi_mask[:, :, None],
+       chis_mask
+      ], axis=2)
+
+  # Create a frame from the first three atoms:
+  # First atom: point on x-y-plane
+  # Second atom: point on negative x-axis
+  # Third atom: origin
+  # r3.Rigids (B, N, torsions=7)
+  torsion_frames = r3.rigids_from_3_points(
+      point_on_neg_x_axis=r3.vecs_from_tensor(torsions_atom_pos[:, :, :, 1, :]),
+      origin=r3.vecs_from_tensor(torsions_atom_pos[:, :, :, 2, :]),
+      point_on_xy_plane=r3.vecs_from_tensor(torsions_atom_pos[:, :, :, 0, :]))
+
+  # Compute the position of the forth atom in this frame (y and z coordinate
+  # define the chi angle)
+  # r3.Vecs (B, N, torsions=7)
+  forth_atom_rel_pos = r3.rigids_mul_vecs(
+      r3.invert_rigids(torsion_frames),
+      r3.vecs_from_tensor(torsions_atom_pos[:, :, :, 3, :]))
+
+  # Normalize to have the sin and cos of the torsion angle.
+  # jnp.ndarray (B, N, torsions=7, sincos=2)
+  torsion_angles_sin_cos = jnp.stack(
+      [forth_atom_rel_pos.z, forth_atom_rel_pos.y], axis=-1)
+  torsion_angles_sin_cos /= jnp.sqrt(
+      jnp.sum(jnp.square(torsion_angles_sin_cos), axis=-1, keepdims=True)
+      + 1e-8)
+
+  # Mirror psi, because we computed it from the Oxygen-atom.
+  torsion_angles_sin_cos *= jnp.asarray(
+      [1., 1., -1., 1., 1., 1., 1.])[None, None, :, None]
+
+  # Create alternative angles for ambiguous atom names.
+  chi_is_ambiguous = utils.batched_gather(
+      jnp.asarray(residue_constants.chi_pi_periodic), aatype)
+  mirror_torsion_angles = jnp.concatenate(
+      [jnp.ones([num_batch, num_res, 3]),
+       1.0 - 2.0 * chi_is_ambiguous], axis=-1)
+  alt_torsion_angles_sin_cos = (
+      torsion_angles_sin_cos * mirror_torsion_angles[:, :, :, None])
+
+  if placeholder_for_undefined:
+    # Add placeholder torsions in place of undefined torsion angles
+    # (e.g. N-terminus pre-omega)
+    placeholder_torsions = jnp.stack([
+        jnp.ones(torsion_angles_sin_cos.shape[:-1]),
+        jnp.zeros(torsion_angles_sin_cos.shape[:-1])
+    ], axis=-1)
+    torsion_angles_sin_cos = torsion_angles_sin_cos * torsion_angles_mask[
+        ..., None] + placeholder_torsions * (1 - torsion_angles_mask[..., None])
+    alt_torsion_angles_sin_cos = alt_torsion_angles_sin_cos * torsion_angles_mask[
+        ..., None] + placeholder_torsions * (1 - torsion_angles_mask[..., None])
+
+  return {
+      'torsion_angles_sin_cos': torsion_angles_sin_cos,  # (B, N, 7, 2)
+      'alt_torsion_angles_sin_cos': alt_torsion_angles_sin_cos,  # (B, N, 7, 2)
+      'torsion_angles_mask': torsion_angles_mask  # (B, N, 7)
+  }
+
+
 
 
 def torsion_angles_to_frames(
