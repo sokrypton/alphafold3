@@ -282,16 +282,181 @@ def template_1d_gate(n=24, seed=0):
   return 0 if ok else 1
 
 
+def evoformer_gate(n=24, n_seq=8, seed=0, extra=False):
+  """One EvoformerIteration -- the trunk block, and most of the parameters.
+
+  Run on the MONOMER config and parameters: our graph runs the multimer
+  structure with converted weights, so this asks whether one block of it still
+  computes what DeepMind's does.
+  """
+  import haiku as hk
+  import jax
+  import jax.numpy as jnp
+
+  sys.path.insert(0, AF2_ORIGINAL)
+  from alphafold.model import config as o_config
+  from alphafold.model import modules as o_modules
+
+  from alphafold3.af2.model import modules as our_modules
+  from alphafold3.af2.model import config as our_config
+  from alphafold3.af2.runner import load_params
+
+  scope = 'extra_msa_stack' if extra else 'evoformer_iteration'
+  params = np.load(PARAMS, allow_pickle=True)
+  p_orig = _subtree(params, scope)
+  if not p_orig:
+    raise SystemExit('no %s params in %s' % (scope, PARAMS))
+  # the checkpoint stacks the blocks; take the first
+  p_orig = {k.replace('__layer_stack_no_state/', ''):
+            {kk: vv[0] for kk, vv in v.items()}
+            for k, v in p_orig.items()}
+
+  loaded = load_params([os.path.basename(PARAMS)[len('params_'):-len('.npz')]],
+                       os.path.dirname(PARAMS), use_templates=True)[0]
+  pre = 'alphafold/alphafold_iteration/evoformer/'
+  # Both sides take BLOCK 0 of the stack: the checkpoint stores the 48 trunk
+  # blocks stacked on axis 0, and one block is the unit being compared.
+  p_ours = {k[len(pre):].replace('__layer_stack_no_state/', ''):
+            {a: b[0] for a, b in v.items()}
+            for k, v in loaded.items() if k.startswith(pre + scope)}
+  rng = np.random.default_rng(seed)
+  o_cfg = o_config.model_config('model_1_ptm')
+  c_m = (o_cfg.model.embeddings_and_evoformer.extra_msa_channel if extra
+         else o_cfg.model.embeddings_and_evoformer.msa_channel)
+  c_z = o_cfg.model.embeddings_and_evoformer.pair_channel
+  act = {'msa': (rng.normal(size=(n_seq, n, c_m)) * 0.5).astype(np.float32),
+         'pair': (rng.normal(size=(n, n, c_z)) * 0.5).astype(np.float32)}
+  masks = {'msa': np.ones((n_seq, n), np.float32),
+           'pair': np.ones((n, n), np.float32)}
+  o_ecfg = o_cfg.model.embeddings_and_evoformer.evoformer
+  o_gc = o_cfg.model.global_config
+
+  def o_fwd():
+    return o_modules.EvoformerIteration(o_ecfg, o_gc, is_extra_msa=extra,
+                                        name=scope)(
+        {k: jnp.asarray(v) for k, v in act.items()},
+        {k: jnp.asarray(v) for k, v in masks.items()},
+        is_training=False)
+
+  ref = jax.tree.map(np.asarray,
+                     hk.transform(o_fwd).apply(p_orig, jax.random.PRNGKey(0)))
+
+  u_cfg = our_config.model_config('model_1_ptm')
+  u_ecfg = u_cfg.model.embeddings_and_evoformer.evoformer
+  u_gc = u_cfg.model.global_config
+
+  def u_fwd():
+    return our_modules.EvoformerIteration(u_ecfg, u_gc, is_extra_msa=extra,
+                                          name=scope)(
+        {k: jnp.asarray(v) for k, v in act.items()},
+        {k: jnp.asarray(v) for k, v in masks.items()} |
+        {'opm_first': jnp.float32(0.0)},
+        use_dropout=False)
+
+  got = jax.tree.map(np.asarray,
+                     hk.transform(u_fwd).apply(p_ours, jax.random.PRNGKey(0)))
+  print('%s, %d residues x %d sequences:'
+        % ('extra_msa_stack' if extra else 'evoformer_iteration', n, n_seq))
+  ok = _cmp('msa', got['msa'], ref['msa'])
+  ok &= _cmp('pair', got['pair'], ref['pair'])
+  return 0 if ok else 1
+
+
+def ipa_gate(n=24, seed=0):
+  """InvariantPointAttention -- the structure module's core.
+
+  Compared against folding_multimer's, because that is the one this package
+  runs: the monomer structure module was retired with the monomer graph and its
+  weights are converted (convert.py splits the fused q/kv scalar and point
+  projections), so this asks whether the split is faithful.
+  """
+  import haiku as hk
+  import jax
+  import jax.numpy as jnp
+
+  sys.path.insert(0, AF2_ORIGINAL)
+  from alphafold.model import config as o_config
+  from alphafold.model import folding_multimer as o_folding
+  from alphafold.model import geometry as o_geometry
+
+  from alphafold3.af2.model import folding as our_folding
+  from alphafold3.af2.model import geometry as our_geometry
+  from alphafold3.af2.model import config as our_config
+  from alphafold3.af2.runner import load_params
+
+  ckpt = os.path.expanduser(
+      os.environ.get('AF2_MULTIMER_PARAMS',
+                     '~/params/params_model_1_multimer_v3.npz'))
+  raw = np.load(ckpt, allow_pickle=True)
+  pre = 'alphafold/alphafold_iteration/structure_module/fold_iteration/'
+  p = {}
+  for k in raw.files:
+    if not k.startswith(pre + 'invariant_point_attention'):
+      continue
+    mod, leaf = k.rsplit('//', 1)
+    p.setdefault(mod[len(pre):], {})[leaf] = np.asarray(raw[k])
+  if not p:
+    raise SystemExit('no invariant_point_attention params in %s' % ckpt)
+  # OUR scalar projections always carry a bias so one graph serves monomer and
+  # multimer; native multimer has none, and the loader supplies zeros (adding 0
+  # is a no-op). So each side gets the parameters its own graph declares --
+  # the same arrangement as the template gate.
+  loaded = load_params([os.path.basename(ckpt)[len('params_'):-len('.npz')]],
+                       os.path.dirname(ckpt), use_multimer=True)[0]
+  p_ours = {k[len(pre):]: v for k, v in loaded.items()
+            if k.startswith(pre + 'invariant_point_attention')}
+
+  rng = np.random.default_rng(seed)
+  o_cfg = o_config.model_config('model_1_multimer_v3')
+  c_s = o_cfg.model.heads.structure_module.num_channel
+  c_z = o_cfg.model.embeddings_and_evoformer.pair_channel
+  s1d = (rng.normal(size=(n, c_s)) * 0.5).astype(np.float32)
+  s2d = (rng.normal(size=(n, n, c_z)) * 0.5).astype(np.float32)
+  mask = np.ones((n, 1), np.float32)
+  trans = (rng.normal(size=(n, 3)) * 5).astype(np.float32)
+  rot = np.tile(np.eye(3, dtype=np.float32), (n, 1, 1))
+
+  def mk(geo):
+    r = geo.Rot3Array.from_array(jnp.asarray(rot))
+    t = geo.Vec3Array.from_array(jnp.asarray(trans))
+    return geo.Rigid3Array(r, t)
+
+  def o_fwd():
+    return o_folding.InvariantPointAttention(
+        o_cfg.model.heads.structure_module, o_cfg.model.global_config)(
+            jnp.asarray(s1d), jnp.asarray(s2d), jnp.asarray(mask),
+            mk(o_geometry))
+
+  ref = np.asarray(hk.transform(o_fwd).apply(p, jax.random.PRNGKey(0)))
+
+  u_cfg = our_config.model_config('model_1_multimer_v3')
+
+  def u_fwd():
+    return our_folding.InvariantPointAttention(
+        u_cfg.model.heads.structure_module, u_cfg.model.global_config)(
+            jnp.asarray(s1d), jnp.asarray(s2d), jnp.asarray(mask),
+            mk(our_geometry))
+
+  got = np.asarray(hk.transform(u_fwd).apply(p_ours, jax.random.PRNGKey(0)))
+  print('invariant point attention, %d residues:' % n)
+  return 0 if _cmp('ipa', got, ref) else 1
+
+
 def main(argv=None):
   ap = argparse.ArgumentParser()
   ap.add_argument('module', nargs='?', default='template',
-                  choices=('template', 'template_multimer', 'template_1d'))
+                  choices=('template', 'template_multimer', 'template_1d',
+                           'evoformer', 'extra_msa', 'ipa'))
   ap.add_argument('--tokens', type=int, default=24)
   args = ap.parse_args(argv)
   if not os.path.isdir(AF2_ORIGINAL):
     raise SystemExit('clone the original first: git clone '
                      'https://github.com/google-deepmind/alphafold %s'
                      % AF2_ORIGINAL)
+  if args.module == 'ipa':
+    return ipa_gate(n=args.tokens)
+  if args.module in ('evoformer', 'extra_msa'):
+    return evoformer_gate(n=args.tokens, extra=(args.module == 'extra_msa'))
   if args.module == 'template_1d':
     return template_1d_gate(n=args.tokens)
   if args.module == 'template_multimer':

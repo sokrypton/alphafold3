@@ -410,7 +410,7 @@ if want L5af2; then
   # against DEEPMIND'S OWN CODE, not our lineage -- everything else here
   # compares us to colabdesign2, which is the same port one generation back.
   if [ -d "${AF2_ORIGINAL:-/home/ubuntu/af2_original}" ]; then
-    for _mod in template template_multimer template_1d; do
+    for _mod in template template_multimer template_1d evoformer extra_msa ipa; do
       PYTHONPATH_EXTRA=${AF2_ORIGINAL:-/home/ubuntu/af2_original} \
         gate "L5af2.native_$_mod" alphafold2_ptm 'corr' \
         dev/oracles/af2_native_parity.py "$_mod"
