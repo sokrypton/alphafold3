@@ -58,7 +58,8 @@ def main(argv=None):
 
   runner = af2_inference.AF2ModelRunner(
       model_registry.get(model), None, os.path.expanduser('~/params'),
-      num_recycles=3, use_bfloat16=False, use_templates=(mode != 'none'))
+      num_recycles=int(os.environ.get('RECYCLES', 3)), use_bfloat16=False,
+      use_templates=(mode != 'none'))
   af2_features.protein_chains(fold_input)
   batch = featurisation.featurise_input(
       fold_input=fold_input, ccd=decoded_ccd.get_ccd(), buckets=None)[0]

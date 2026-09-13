@@ -115,6 +115,9 @@ gate () {
     local overlay; overlay=$(vendor "$model")
     local pp=src:.
     [ -n "$overlay" ] && pp=$pp:$overlay
+    # PYTHONPATH_EXTRA is for a gate that needs a SECOND implementation on the
+    # path -- af2_native_parity imports DeepMind's own alphafold alongside ours.
+    [ -n "${PYTHONPATH_EXTRA:-}" ] && pp=$pp:dev/oracles:$PYTHONPATH_EXTRA
     # LM_CASE is set by the L5/L6 loops; the module gates feed their own inputs
     # and want none of this.
     local lm=; [ -n "${LM_CASE:-}" ] && lm=$(lm_env "$model" "$LM_CASE")
@@ -404,6 +407,13 @@ if want L5af2; then
   echo "== L5af2 AlphaFold 2 (known-answer, and templates)"
   gate L5af2.fold alphafold2_ptm 'CA-RMSD' \
     dev/oracles/af2_fold_check.py alphafold2_ptm
+  # against DEEPMIND'S OWN CODE, not our lineage -- everything else here
+  # compares us to colabdesign2, which is the same port one generation back.
+  if [ -d "${AF2_ORIGINAL:-/home/ubuntu/af2_original}" ]; then
+    PYTHONPATH_EXTRA=${AF2_ORIGINAL:-/home/ubuntu/af2_original} \
+      gate L5af2.native alphafold2_ptm 'corr' \
+      dev/oracles/af2_native_parity.py template
+  fi
   for m in af2_ptm af2_multimer; do
     gate L5af2.template "$m" 'CA-RMSD' dev/oracles/af2_template_check.py "$m"
   done

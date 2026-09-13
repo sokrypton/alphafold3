@@ -1875,7 +1875,14 @@ class MonomerSingleTemplateEmbedding(hk.Module):
     template_dgram = dgram_from_positions(batch['template_pseudo_beta'],
                                           **self.config.dgram_features)
     template_mask_2d = (template_mask_2d * multichain_mask_2d).astype(dtype)
-    template_dgram = (template_dgram * template_mask_2d[..., None]).astype(dtype)
+    # NOT masked. ColabDesign multiplies the distogram by the pseudo-beta mask
+    # here and DeepMind's AlphaFold 2 does not; the two agree wherever a residue
+    # has both a pseudo-beta and a backbone, and differ where it has a backbone
+    # but no CB -- which is an ordinary unresolved side chain in a real
+    # template. Measured against the original at corr 0.792 with mixed masks and
+    # 0.99999998 with full ones, which is what identified this line
+    # (dev/oracles/af2_native_parity.py).
+    template_dgram = template_dgram.astype(dtype)
     to_concat = [template_dgram, template_mask_2d[:, :, None]]
 
     aatype = jax.nn.one_hot(batch['template_aatype'], 22, axis=-1, dtype=dtype)
