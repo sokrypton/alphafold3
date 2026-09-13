@@ -612,7 +612,7 @@ def heads_gate(variant='monomer', n=24, seed=0):
   return 0 if ok else 1
 
 
-def msa_gate(n=20, n_seq=32, max_seq=8, seed=0):
+def msa_gate(n=20, n_seq=32, max_seq=8, seed=0, variant='multimer'):
   """The MSA feature pipeline: SUBSAMPLING, the msa/extra split, and the BERT
   masking that mutates residues.
 
@@ -677,11 +677,32 @@ def msa_gate(n=20, n_seq=32, max_seq=8, seed=0):
              np.asarray(o_out['extra_deletion_matrix']))
 
   # --- MASKING / MUTATING
-  cfg = ml_collections.ConfigDict(dict(
-      replace_fraction=0.15, uniform_prob=0.1, profile_prob=0.1, same_prob=0.1))
+  # EACH PATH'S OWN MASKING CONFIG. The multimer keeps it in the MODEL config;
+  # the monomer keeps it in `data.common.masked_msa` with the fraction in
+  # `data.eval`, because there it is applied by the TensorFlow data pipeline
+  # rather than in the model. The values happen to agree (0.1/0.1/0.1, 0.15),
+  # which is worth having checked rather than assumed.
+  from alphafold.model import config as o_config
+  oc = o_config.model_config(_variant(variant)[1])
+  if variant == 'multimer':
+    mcfg = oc.model.embeddings_and_evoformer.masked_msa
+    cfg = ml_collections.ConfigDict(dict(
+        replace_fraction=mcfg.replace_fraction, uniform_prob=mcfg.uniform_prob,
+        profile_prob=mcfg.profile_prob, same_prob=mcfg.same_prob))
+  else:
+    mcfg = oc.data.common.masked_msa
+    cfg = ml_collections.ConfigDict(dict(
+        replace_fraction=oc.data.eval.masked_msa_replace_fraction,
+        uniform_prob=mcfg.uniform_prob, profile_prob=mcfg.profile_prob,
+        same_prob=mcfg.same_prob))
+  print('  masking config [%s]: replace %.2f uniform %.2f profile %.2f same %.2f'
+        % (variant, cfg.replace_fraction, cfg.uniform_prob, cfg.profile_prob,
+           cfg.same_prob))
   ob, ub = o_batch(), u_batch()
   o_out = o_mm.make_masked_msa(ob, o_prng.SafeKey(key), cfg)
-  our_msa.make_masked_msa(key, ub)
+  our_msa.make_masked_msa(key, ub, dict(
+      replace_fraction=cfg.replace_fraction, uniform_prob=cfg.uniform_prob,
+      profile_prob=cfg.profile_prob, same_prob=cfg.same_prob))
   ok &= _cmp('bert_mask', np.asarray(ub['bert_mask']),
              np.asarray(o_out['bert_mask']))
   ok &= _cmp('masked msa', np.asarray(ub['msa']).argmax(-1),
@@ -718,7 +739,7 @@ def main(argv=None):
                      'https://github.com/google-deepmind/alphafold %s'
                      % AF2_ORIGINAL)
   if args.module == 'msa':
-    return msa_gate()
+    return msa_gate(variant=args.variant)
   if args.module == 'heads':
     return heads_gate(variant=args.variant, n=args.tokens)
   if args.module == 'ipa':
