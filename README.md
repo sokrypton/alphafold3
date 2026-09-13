@@ -113,8 +113,18 @@ DeepMind's own AlphaFold 2 parameters, read from `--model_dir` as
 multimer run on ONE graph: a monomer checkpoint is converted onto the multimer
 network at load. **Protein only** — a fold input carrying a ligand, a nucleotide
 or an inter-chain bond raises rather than silently folding the protein subset.
-MSAs come from the AF3 data pipeline, chain pairing included. Templates are not
-wired up yet.
+MSAs come from the AF3 data pipeline, chain pairing included, and the MSA
+pipeline is the model's own: subsampling, the cluster/extra split, BERT masking
+and clustering all run inside JAX under `--seed`, as they do upstream.
+
+**Templates work on both paths.** A fold input carrying a template switches on
+the template embedder and the template-trained parameter sets — no flag, the
+input decides. Monomer templates exist only in `model_1` and `model_2`
+upstream, and only those two are used when templates are requested. Template
+residue types use AF2's `restype` alphabet, not the HHBLITS order the search
+tools emit; feeding the wrong one is silent and costs about 1.2 Å.
+
+`--num_recycles` and `--dropout` reach AF2 exactly as they reach AF3.
 
 AF2 is measured single-seed at float32 with zero recycles, not best-of-5 at
 config defaults like the AF3 lineage, so read the two AF2 numbers in
@@ -138,6 +148,7 @@ Parity is measured level by level, from the weights inwards to the fold:
 | **L3** | one full denoise step |
 | **L4** | the confidence head: PAE, PDE, pLDDT, resolved |
 | **L5** | an end-to-end fold, scored against an experimental structure |
+| **L5af2** | AlphaFold 2, module by module, against DeepMind's own repository |
 | **L6** | modality: RNA, DNA, ligands, complexes, modified residues |
 
 ### Current numbers (2026-09-13)
@@ -154,6 +165,16 @@ The one SKIP is a real hole: `boltz2` has no in-process L3 adapter, so its
 denoise step is gated by injection (`L3.denoise_inject`) instead. N/A means the
 model does not have that module at all — `gate_applies.py` decides, from the
 registry, so an empty cell can never quietly mean "not run".
+
+AlphaFold 2 is graded separately, because none of L0-L4 applies to a sibling
+network with no converter and no shared modules. **L5af2 is 16 gates, all
+green**, and eleven of them compare us to DeepMind's own repository rather than
+to the port we inherited — trunk, extra-MSA, IPA, all five heads, all three
+template paths and the MSA pipeline, on the monomer path and the multimer path
+both. That oracle found three real divergences that comparing against a sibling
+copy never could: a masked template distogram, BERT masking that was
+implemented and never called (so the seed did nothing on a shallow MSA), and —
+on the AF3 side — a confidence pairformer that never received the dropout flag.
 
 `bash dev/oracles/run_all_parity.sh all` re-runs everything;
 `dev/oracles/parity_audit.py <logdir>` grades it and
@@ -246,6 +267,12 @@ Tracked in `dev/oracles/HOLES.md` with the next measurement named for each:
   the uniform cell for 13 of 14 models; `real_trunk_parity.py` exists and the
   driver never runs it; `boltz2`'s template module is V2 upstream and we
   implement V1 (inert on one chain, live on a complex).
+* **AlphaFold 2 against DeepMind**: `FoldIteration`/`StructureModule` as wholes
+  and `EmbeddingsAndEvoformer` end-to-end have no cell; the monomer's TensorFlow
+  row selection cannot be compared here (no tensorflow — we use multimer's
+  gumbel argsort on both paths). Two deliberate differences, not unknowns: MSA
+  sizes 512/1024 on both paths where stock is 512/5120 and 508/2048, and 11
+  trunk passes where of3/boltz2 run 4.
 
 ### Getting the weights
 

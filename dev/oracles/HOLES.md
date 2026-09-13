@@ -16,6 +16,22 @@ TWO categories, and the second was invisible until `parity_audit.py` existed:
 | -- | -- | NONE. Every gate now has an adapter for every model the cell applies to. |
 | `L4.confidence` | esmfold2, esmfold2_fast | NO LONGER A HOLE -- the cell RUNS, dump-driven, and its numbers are a finding rather than a gap. See below. |
 
+## AlphaFold 2 (L5af2) -- three cells, all named
+
+L5af2 is 16 gates and all 16 pass; eleven compare against DeepMind's own
+repository (`AF2_ORIGINAL=~/af2_original`) rather than the port we inherited.
+What that level does NOT cover, with the measurement each needs:
+
+| uncovered | next measurement |
+|---|---|
+| `FoldIteration` / `StructureModule` as wholes | the IPA cell is exact on both paths; extend `af2_native_parity.py` with a `structure` module that runs one full iteration on native's own `representations` + `batch` |
+| `EmbeddingsAndEvoformer` end to end | every piece inside it is gated; the whole needs native's `batch` fed to both graphs in one call, which is the same shape as the `evoformer` cell with the embedder in front |
+| the monomer's TensorFlow row selection (`shuffle`) | NOT MEASURABLE HERE -- no tensorflow in the venv. We use multimer's gumbel argsort on both paths, which is a deliberate substitution, not drift |
+
+Two AF2 differences are deliberate and should be read as decisions, not holes:
+MSA sizes are 512/1024 on both paths where stock is 512/5120 (monomer) and
+508/2048 (multimer), and we take 11 trunk passes where of3/boltz2 take 4.
+
 Everything else is covered: L0, L1.trunk, L1i.trunk_init, L1t.template,
 L2.conditioning, L2.atom_encoder, L2.atom_decoder, L2.diffusion, L3.denoise all
 have an adapter for every model the cell applies to. (`alphafold3` is the

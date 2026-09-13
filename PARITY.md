@@ -1,3 +1,93 @@
+# STATE OF PLAY -- AlphaFold 2, against DEEPMIND'S OWN CODE (2026-09-13)
+
+    dev/oracles/parity_runs/2026-09-13-af2native/   L5af2, 16 gates, 16 OK
+
+    bash dev/oracles/run_all_parity.sh L5af2
+
+Every other gate in this repository compares AF2 to colabdesign2, which is the
+same port one generation back: a port of a port of a port (DeepMind ->
+ColabDesign v1 -> colabdesign2 -> here). Agreement there proves the copy
+survived the move and nothing else. `dev/oracles/af2_native_parity.py` imports
+DeepMind's `alphafold` alongside ours (`AF2_ORIGINAL=~/af2_original`, put on the
+path by `PYTHONPATH_EXTRA`) and compares module against module.
+
+Eleven of the sixteen are that oracle, and they cover both paths:
+
+| gate | monomer | multimer |
+|---|---|---|
+| `native_evoformer`  | corr 1.00000000, max\|d\| 8.7e-03 / rms 103.8 | 2.1e-04 / 17.8 |
+| `native_extra_msa`  | 1.1e-04 / 24.3 | 1.4e-04 / 22.4 |
+| `native_ipa`        | 9.9e-05 / 32.6 | 0.0 / 60.2 |
+| `native_heads`      | 0.0 / 0.064 | 0.0 / 1.18 |
+| `native_msa`        | 0.0 / 1.42 | 0.0 / 1.42 |
+| `native_template`   | 6.0e-07 / 0.144 (monomer embedder) | — |
+| `native_template_multimer` | — | 3.8e-06 / 1.75 |
+| `native_template_1d` | 0.0 / 0.456 | — |
+
+The five remaining: `L5af2.fold` (the known-answer fold, 1.7120 Å) and
+`L5af2.template` on both models (`af2_ptm` 0.266 Å, `af2_multimer` 1.475 Å
+self-template, against 12.10 Å with no template — which is how a template that
+is accepted and then quietly ignored gets caught).
+
+### What the native oracle found that a sibling-copy oracle could not
+
+1. **The monomer template distogram was masked and should not be.** ColabDesign
+   multiplies the template distogram by the pseudo-beta mask; DeepMind does not.
+   The two agree everywhere a residue has a CB and differ wherever a template
+   has a backbone but an unresolved side chain -- i.e. on real templates.
+2. **`make_masked_msa` was implemented and never called.** BERT masking is on in
+   stock AF2 prediction. Ours skipped it, which also meant the seed did nothing
+   on a shallow MSA: identical output for every seed. Both paths now run it, and
+   `AF2_MLM` overrides for the design path, which wants it off.
+3. **The confidence head's pairformer never received the dropout flag** (AF3
+   side, found while auditing dropout sites against OpenFold3, boltz-2 and
+   protenix).
+
+### Method, worth keeping
+
+* **Give each side the parameters ITS OWN graph declares.** Our
+  TriangleMultiplication is fused where DeepMind's is not; our IPA scalar
+  projections always carry a bias (zeros for multimer). Forcing one layout onto
+  both measures the reshape, not the model.
+* Three harness faults looked like findings first: the fused-vs-unfused params
+  above; a multimer Evoformer corr of 0.01 from hand-rolled block slicing (every
+  sub-module inside it was exact, which is what proved the gate wrong); and
+  `masked_msa_head` 22 vs 23 channels, which is `convert.py` truncating for the
+  multimer graph on a training-only head. `template_all_atom_mask(s)` plural is
+  AF2's own monomer/multimer inconsistency, not lineage drift.
+
+### Templates, now live on both paths
+
+The monomer template embedder was vendored back from ColabDesign v1
+(`MonomerSingleTemplateEmbedding`, 88 pair channels; the 1-D path builds 57) and
+is selected by the config, so a monomer checkpoint running on the multimer graph
+still gets the monomer template path. Monomer templates exist only in `model_1`
+and `model_2` upstream and only those are used.
+
+**The template alphabet is not the target/MSA alphabet.** hhsearch emits HHBLITS
+order; `fix_templates_aatype` converts to restype before the model. 17 of 22
+positions differ, and choosing wrong is silent: 1.48 A instead of 0.26 A on a
+self-template.
+
+### Still uncovered against DeepMind
+
+`FoldIteration`/`StructureModule` as wholes, `EmbeddingsAndEvoformer`
+end-to-end, and the monomer's TensorFlow row selection (no tensorflow here; we
+use multimer's gumbel argsort on both paths). Two open decisions, both
+deliberate rather than unknown: our MSA sizes are 512/1024 on both paths where
+stock is 512/5120 (monomer) and 508/2048 (multimer), and we run 11 trunk passes
+where of3/boltz2 run 4 and chai 3.
+
+### Dropout, on every model
+
+`--dropout` now reaches both engines. The AF3 rates are the paper's (SI Alg
+8/16/17, section 5.5): 0.25 in the pair stacks, 0.15 in the MSA module --
+stripped from the released inference code and reconstructed here, cross-checked
+against OpenFold3, boltz-2 and protenix. `jnp.where(use_dropout, rate, 0)` makes
+OFF an exact identity with no recompile; verified bit-identical. ESMFold2's
+`lm_dropout` is deliberately excluded -- it is an always-on correctness
+requirement there, ~18 A if disabled.
+
 # STATE OF PLAY -- 2026-09-13
 
     dev/oracles/parity_runs/2026-09-13-full/     L0-L6 including the new L1x
