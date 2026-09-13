@@ -1,3 +1,92 @@
+# STATE OF PLAY -- the last two confidence residuals (2026-09-13)
+
+Both were "characterised residuals, not gaps". Both are now attributed, and the
+standing explanation for one of them was WRONG.
+
+## 1. The protenix lineage: it is `torch.cdist`, and it is entirely the reference
+
+HOLES said the residual was "probably the reference's own float32", marked
+CONSISTENT WITH, NOT ESTABLISHED, and named the settling test: native's whole
+head in fp32 against itself in fp64, on the same pae expectation. It had been
+attempted and died on plumbing.
+
+**The plumbing, for whoever needs it again.** Two hardcoded downcasts:
+`confidence.py:278` does `x_pred_rep_coords.to(torch.float32)` inside an
+autocast-disabled block, and `model/utils.py:192`'s `one_hot()` ends `.float()`.
+Rewriting float32 -> float64 on `torch.Tensor.to` and `.float()` for the
+duration runs the same code path at two precisions.
+
+**And the answer is NO.** Native's own fp32-vs-fp64 difference on the graded
+quantity:
+
+    protenix2   pae exp max|d|/rms 2.45e-06     protenix1   1.14e-05
+    protenix1   pde exp max|d|/rms 1.24e-05
+
+against a gate reading 2.30e-02. Three to four orders out. The residual is real
+and it is not generic float32 noise.
+
+**What it IS.** Tapping the pair ENTERING the confidence pairformer -- the cell
+HOLES asked for and nothing made -- reads max|d|/rms 3.13e-03 with a p99.9
+fifteen times smaller: small, broad, with a few large entries. Zeroing
+`s_inputs` on both sides leaves it EXACTLY unchanged, so it is the distance
+path, not the target-feat projections. And the distance path has two terms, one
+binned and one not.
+
+`torch.cdist` expands `||a-b||^2` as `||a||^2 + ||b||^2 - 2a.b`. In float32
+that cancellation costs up to **1.6e-02 A** on coordinates of this scale
+(measured: 50 draws of 256 points). It flips no distogram bin -- 0 of 1.3e8
+one-hot entries, the bins are 1.25 A wide -- but protenix also feeds the RAW
+distance to `linear_no_bias_d_wo_onehot`, and there the error goes straight
+through.
+
+Give native an exact float32 distance (`EXACT_CDIST=1`, a diagnostic that
+changes nothing in our code) and the whole thing collapses:
+
+| cell | as shipped | exact cdist |
+|---|---|---|
+| protenix2 pae | 2.30e-02 | **2.26e-04** |
+| protenix2 pde | 1.72e-02 | **7.70e-05** |
+| protenix1 pae | 5.39e-03 | **4.92e-05** |
+| protenix1 pde | 6.76e-03 | **1.76e-05** |
+| opendde pae | 9.80e-03 | **7.47e-05** |
+| opendde pde | 1.58e-02 | **1.26e-04** |
+| protenix2 embedded pair | 3.13e-03 | **4.04e-06** |
+
+corr 0.999985 -> 1.000000. openfold3, openbind0 and boltz2 are bit-unchanged by
+the same diagnostic, which is the control: only the heads with an unbinned
+distance term move. **All six CLOSE and three LOOSE protenix rows are the
+reference's own `cdist`.** We do not adopt cdist's error; the cells stay as
+they are, with the cause named.
+
+## 2. chai1: the cell had no floor, and it turns out it can have one
+
+README and HOLES both said chai's confidence is "reachable only by injection
+because its modules ship as TorchScript with no callable forward". Half right:
+`forward` is undefined, but the BUCKETED entry points are not --
+`forward_256` .. `forward_1024` are all present on `confidence_head.pt`. So
+native can be re-run, and `FLOOR=1` now does.
+
+**The head runs in bfloat16.** The TorchScript does `torch.to(x, 15)` (dtype 15
+is bf16) on the trunk representations and casts every Linear weight to bf16.
+Coordinates stay float32, and the archive proves it: the forward calls
+`torch.cdist`, which has no bf16 kernel.
+
+    our gate            pae 4.73e-02   pde 2.64e-02
+    native re-run vs its own capture   1.62e-02        1.12e-02
+    native after a half-ulp shift      2.03e-02        1.12e-02
+
+So the cell resolves to about 1.6e-02 - 2.0e-02, and our rows sit 2x-3x that.
+**Not below the floor, so not dismissed** -- but they are the same order as the
+reference's own device-to-device spread on identical inputs, which is a far
+tighter statement than the two rows had before. Running OUR head in bf16
+(`BF16=all`) moves them barely (4.87e-02 / 2.52e-02): our rounding is not
+theirs, so matching the dtype does not match the arithmetic.
+
+`EXACT_CDIST` was tried here too and changes NOTHING -- exactly 0.000e+00. chai
+bins its distances with `searchsorted` and has no unbinned term, so the error
+that accounts for the whole protenix residual cannot reach these logits. That
+is the control that keeps the protenix finding from being a universal excuse.
+
 # STATE OF PLAY -- boltz2's denoise is CLOSED (2026-09-13)
 
 It was the first item on README's open list and the largest single residual in

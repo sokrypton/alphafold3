@@ -1,10 +1,15 @@
 """L4 for chai-1, by INJECTION from chai's own captured ConfidenceHead I/O.
 
-chai ships TorchScript and its confidence head IS callable (`forward_256`), but
-it was captured verbatim during the port -- nine input tensors and three output
-LOGIT tensors -- so this gate needs no torch, no trunk, no diffusion and no
-featurisation agreement. Feed our converted head chai's inputs and compare the
-logits it produces.
+chai ships TorchScript and its confidence head IS callable -- `forward` is
+undefined, but the BUCKETED entry points `forward_256` .. `forward_1024` are
+all there. It was captured verbatim during the port -- nine input tensors and
+three output LOGIT tensors -- so the DEFAULT path here needs no torch, no
+trunk, no diffusion and no featurisation agreement: feed our converted head
+chai's inputs and compare the logits it produces.
+
+FLOOR=1 re-runs the archive instead of reading the capture, which is the only
+way to know what this cell can resolve. Do it before reading the two numbers
+below as a port difference -- the head runs in BFLOAT16.
 
   JAX_DEFAULT_MATMUL_PRECISION=highest PYTHONPATH=src:. \
     python dev/oracles/chai1_confidence_parity.py
@@ -31,6 +36,71 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from confidence_parity import _cmp                          # noqa: E402
 
 CAP = os.path.expanduser('~/chai_6mrr/conf_seam.npz')
+
+
+def _chai_floor(z, ref_pae, ref_pde, L):
+  """NATIVE against ITSELF: reproduce the capture, then shift the inputs.
+
+  Two numbers, and the first is the surprising one:
+
+    * REPRODUCTION -- the same archive, the same captured inputs, run here on
+      the CPU against outputs captured on a GPU. That is not zero, because the
+      head runs in BFLOAT16: the TorchScript does `torch.to(x, 15)` on the
+      trunk representations and casts every Linear weight to bf16. Coordinates
+      stay float32 -- proved by the archive itself, since `torch.cdist` has no
+      bf16 kernel and the forward calls it.
+    * a half-ulp input shift (2^-9 relative), which is the same order.
+
+  Both bound what this cell can resolve. `EXACT_CDIST` was also tried here and
+  changes NOTHING (0.000e+00): chai bins its distances with `searchsorted` and
+  has no unbinned distance term, so the float32 cdist error that accounts for
+  the whole protenix residual cannot reach these logits.
+  """
+  import torch
+
+  path = os.path.expanduser('~/chai1_weights/models_v2/confidence_head.pt')
+  if not os.path.exists(path):
+    print('  FLOOR UNAVAILABLE: no %s' % path)
+    return
+  m = torch.jit.load(path, map_location='cpu')
+  m.eval()
+  fwd = m._c._get_method('forward_256')
+  order = ['token_single_input_repr', 'token_single_trunk_repr',
+           'token_pair_trunk_repr', 'token_single_mask', 'atom_single_mask',
+           'atom_coords', 'token_reference_atom_index', 'atom_token_index',
+           'atom_within_token_index']
+  base = {k: np.asarray(z['in|' + k]) for k in order}
+
+  def run(f):
+    args = []
+    for k in order:
+      v = f[k]
+      if k in ('token_single_mask', 'atom_single_mask'):
+        args.append(torch.from_numpy(v).bool())
+      elif k.endswith('_index'):
+        args.append(torch.from_numpy(v).long())
+      elif k == 'atom_coords':
+        args.append(torch.from_numpy(v.astype(np.float32)))
+      else:
+        args.append(torch.from_numpy(v.astype(np.float32)).to(torch.bfloat16))
+    with torch.no_grad():
+      return [np.asarray(o.float()) for o in fwd(*args)]
+
+  out = run(base)
+  print('  FLOOR, native re-run (bf16, as the archive declares):')
+  _cmp('  repro_pae', out[0][0, :L, :L], ref_pae)
+  _cmp('  repro_pde', out[1][0, :L, :L], ref_pde)
+  rng = np.random.default_rng(1234)
+  eps = float(os.environ.get('EPS', 2 ** -9))
+  pert = dict(base)
+  for k in ('token_single_input_repr', 'token_single_trunk_repr',
+            'token_pair_trunk_repr'):
+    v = base[k].astype(np.float32)
+    pert[k] = (v * (1 + eps * rng.normal(size=v.shape))).astype(np.float32)
+  outp = run(pert)
+  print('  FLOOR, native after a %.3g relative input shift:' % eps)
+  _cmp('  floor_pae', outp[0][0, :L, :L], out[0][0, :L, :L])
+  _cmp('  floor_pde', outp[1][0, :L, :L], out[1][0, :L, :L])
 
 
 def main(argv=None):
@@ -142,6 +212,17 @@ def main(argv=None):
   got_pde = got_pde + np.swapaxes(got_pde, 0, 1)
   print('  shapes: pae ours %s native %s | pde ours %s native %s'
         % (got_pae.shape, ref_pae.shape, got_pde.shape, ref_pde.shape))
+  # FLOOR=1 RE-RUNS NATIVE. This file's docstring used to say chai's modules
+  # have "no callable forward", and `forward` really is undefined -- but the
+  # BUCKETED entry points are not: `forward_256` .. `forward_1024` are all
+  # present on confidence_head.pt. So the cell does have a floor after all, and
+  # without one its two rows were being read as a port difference with nothing
+  # to compare them to.
+  #
+  # Needs torch, which the default path deliberately does not, so it is opt-in.
+  if os.environ.get('FLOOR'):
+    _chai_floor(z, ref_pae, ref_pde, L)
+
   _cmp('pae_logits', got_pae, ref_pae)
   if got_pde.shape == ref_pde.shape:
     _cmp('pde_logits', got_pde, ref_pde)

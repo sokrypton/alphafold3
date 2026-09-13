@@ -146,6 +146,14 @@ def native_protenix(model, batch, pos, rng, n, max_atoms):
   print('  s_inputs: %d native columns, %d ours, zeroing %d dropped %s'
         % (c_s_inputs, len(idx), len(drop), drop.tolist()))
   s_inputs[:, drop] = 0.0
+  # EMBED_ABLATE isolates ONE term of the embedding path, which is otherwise
+  # three terms summed into one tensor: the left/right target-feat projections,
+  # the binned distance, and the unbinned distance. Zeroing s_inputs on BOTH
+  # sides leaves only the two distance terms; a difference that survives is in
+  # the geometry path, one that vanishes is in the target-feat path.
+  if os.environ.get('EMBED_ABLATE') == 's_inputs':
+    print('  EMBED_ABLATE=s_inputs: both sides get a ZERO s_inputs')
+    s_inputs[:] = 0.0
   s_inputs_ours = s_inputs[:, idx]
   s = (rng.normal(size=(n, c_s)) * 0.5).astype(np.float32)
   z = (rng.normal(size=(n, n, c_z)) * 0.5).astype(np.float32)
@@ -181,6 +189,21 @@ def native_protenix(model, batch, pos, rng, n, max_atoms):
   # points at the confidence stack's own config, not the pairformer).
   _truncate(net.pairformer_stack)
   net.eval()
+  # EMBED=1 captures the pair ENTERING the pairformer stack -- the output of
+  # the `_embed_features` path and nothing else. HOLES named this as the next
+  # measurement for the protenix L4 residual and no cell made it: every other
+  # comparison here is downstream of an exact stack that AMPLIFIES its input
+  # 6.9x-8.8x, so the four head numbers cannot say how much of the difference
+  # was already there before the stack ran.
+  _embedded = {}
+  if os.environ.get('EMBED'):
+    _stack_fwd = net.pairformer_stack.forward
+
+    def _cap(s_trunk, z_pair, *a, **kw):
+      _embedded['z'] = np.asarray(z_pair.detach())
+      return _stack_fwd(s_trunk, z_pair, *a, **kw)
+
+    net.pairformer_stack.forward = _cap
   feats = {
       'distogram_rep_atom_mask': torch.tensor(rep_mask),
       'atom_to_token_idx': torch.tensor(a2t),
@@ -193,6 +216,8 @@ def native_protenix(model, batch, pos, rng, n, max_atoms):
         torch.tensor(pos.reshape(-1, 3))[None, None])
   out = {'plddt': plddt[0, 0].numpy(), 'pae': pae[0, 0].numpy(),
          'pde': pde[0, 0].numpy(), 'resolved': resolved[0, 0].numpy()}
+  if 'z' in _embedded:
+    out['embedded_pair'] = _embedded['z'][0]
   return out, s_inputs_ours, s, z, pos.reshape(-1, 3)[rep_mask]
 
 
@@ -915,6 +940,18 @@ def ours(model, cfg, model_dir, batch, pos, s_inputs, s, z):
     cfg.heads.confidence.pairformer.num_layer = nb
   full = afp.get_model_haiku_params(model_dir=model_dir)
 
+  # EMBED=1: the same tap on our side. `_embed_features` returns the DELTA and
+  # `pair_act` is the input z at that point (the protenix branch above it
+  # touches only the single), so embedded = z + delta.
+  _embedded = {}
+  _orig_embed = confidence_head.ConfidenceHead._embed_features
+  if os.environ.get('EMBED'):
+    def _cap(self, *a, **kw):
+      d = _orig_embed(self, *a, **kw)
+      _embedded['d'] = d
+      return d
+    confidence_head.ConfidenceHead._embed_features = _cap
+
   def fwd():
     return confidence_head.ConfidenceHead(
         cfg.heads.confidence, cfg.global_config)(
@@ -951,7 +988,50 @@ def ours(model, cfg, model_dir, batch, pos, s_inputs, s, z):
   print('  ours: %d scopes, %d unmapped %s'
         % (len(init), len(unmapped), unmapped[:3]))
   assert not unmapped, 'our head is partly at init -- comparison is noise'
-  return f.apply(params, jax.random.PRNGKey(0))
+  try:
+    out = f.apply(params, jax.random.PRNGKey(0))
+  finally:
+    confidence_head.ConfidenceHead._embed_features = _orig_embed
+  if 'd' in _embedded:
+    out = dict(out)
+    out['embedded_pair'] = (np.asarray(_embedded['d'], np.float64)
+                            + np.asarray(z, np.float64))
+  return out
+
+
+class exact_cdist:
+  """EXACT_CDIST=1: give NATIVE an accurate float32 distance.
+
+  `torch.cdist` expands ||a-b||^2 as ||a||^2 + ||b||^2 - 2a.b. In float32 that
+  cancellation costs up to **1.6e-02 A** on coordinates of this scale (measured
+  directly, 50 draws of 256 points). It flips no distogram bin -- 0 of 1.3e8
+  one-hot entries, the bins are 1.25 A wide -- but every AF3-lineage confidence
+  head ALSO feeds the raw distance to an unbinned linear, and there the error
+  goes straight through.
+
+  This is a DIAGNOSTIC, not a fix: nothing in our code changes, and the point is
+  to attribute a residual. If a number collapses under it, the difference was
+  the reference's own arithmetic.
+  """
+
+  def __enter__(self):
+    self.on = bool(os.environ.get('EXACT_CDIST'))
+    if not self.on:
+      return
+    import torch
+    self._cdist = torch.cdist
+
+    def accurate(a, b, *ar, **kw):
+      d = a.double()[..., :, None, :] - b.double()[..., None, :, :]
+      return d.pow(2).sum(-1).clamp_min(0).sqrt().to(a.dtype)
+
+    torch.cdist = accurate
+    print('  EXACT_CDIST: native runs an exact float32 distance')
+
+  def __exit__(self, *e):
+    if self.on:
+      import torch
+      torch.cdist = self._cdist
 
 
 def main(argv=None):
@@ -973,8 +1053,9 @@ def main(argv=None):
   print('%s confidence head, %d tokens:' % (args.model, len(seq)))
   batch, cfg, model_dir, pos, rng, n, max_atoms = our_inputs(
       args.model, seq, args.model_dir)
-  ref, s_inputs, s, z, rep_native = NATIVES[args.model](
-      args.model, batch, pos, rng, n, max_atoms)
+  with exact_cdist():
+    ref, s_inputs, s, z, rep_native = NATIVES[args.model](
+        args.model, batch, pos, rng, n, max_atoms)
   # An adapter may REPLACE the positions: the esmfold2 cell is dump-driven, so
   # both sides have to embed native's own sampled coordinates rather than this
   # harness's synthetic ones.
@@ -1067,6 +1148,15 @@ def main(argv=None):
       _cmp('full_pae_floor', out_p['full_pae'], out['full_pae'])
       _cmp('full_pde_floor', out_p['full_pde'], out['full_pde'])
       _OVERRIDE['floor_out'] = out_p
+
+  # THE EMBEDDED PAIR, before the stack that amplifies it. Printed first
+  # because everything below is this number times a gain of 6.9x-8.8x.
+  if 'embedded_pair' in out and 'embedded_pair' in ref:
+    _cmp('embedded_pair', out['embedded_pair'], ref['embedded_pair'])
+  elif os.environ.get('EMBED'):
+    print('  EMBED=1 but one side has no tap (%s ours, %s native) -- this '
+          'model has no embedded-pair cell'
+          % ('embedded_pair' in out, 'embedded_pair' in ref))
 
   _cmp('full_pae', out['full_pae'], pae_ref)
   _cmp('full_pde', out['full_pde'], pde_ref)

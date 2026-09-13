@@ -261,12 +261,21 @@ Tracked in `dev/oracles/HOLES.md` with the next measurement named for each:
   of masking it, and the hole it had been leaving in the flat atom axis was
   what shifted every attention window. Now 0.0003 Å/atom at the highest-noise
   step and 0.0000 Å at the last one — both ends of the schedule are gated.
-* **`chai1`'s confidence**, two LOOSE rows, reachable only by injection because
-  its modules ship as TorchScript with no callable `forward`.
-* **the protenix lineage's confidence**, 6 CLOSE + 3 LOOSE, most likely native's
-  own float32 — its stack is exact and amplifies 7×, and native's fp32-vs-fp64
-  noise through the embedding is the same order as the whole gap. Consistent
-  with, not established.
+* **the protenix lineage's confidence** — **attributed 2026-09-13**, and not to
+  what the last note guessed. It is `torch.cdist`: protenix feeds the raw
+  distance to an unbinned linear, and cdist's float32 expansion of
+  `||a-b||²` costs up to 1.6e-02 Å on these coordinates. Give native an exact
+  distance and all six CLOSE and three LOOSE rows collapse — protenix2 pae
+  2.30e-02 → 2.26e-04, opendde pde 1.58e-02 → 1.26e-04 — while `openfold3`,
+  `openbind0` and `boltz2` are bit-unchanged. The earlier "native's own float32"
+  story was tested directly (fp32 vs fp64 through the whole head) and is wrong
+  by three orders.
+* **`chai1`'s confidence**, two LOOSE rows — now has a **floor**, which the
+  previous note said was impossible: `forward` is undefined on the TorchScript
+  archive but `forward_256`…`forward_1024` are not, so native can be re-run.
+  The head runs in **bfloat16** with float32 geometry. Native against its own
+  capture reads 1.62e-02 (pae) where our gate reads 4.73e-02 — 2–3× the cell's
+  own resolution, so bounded rather than explained.
 * ~~three things no cell covers~~ — **closed 2026-09-13.**
   `L1b.msa_nonuniform` reached one adapter of fourteen and duplicated the
   uniform cell for the rest; given a mask that is actually non-uniform the

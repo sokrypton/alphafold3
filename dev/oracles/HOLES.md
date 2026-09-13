@@ -405,7 +405,34 @@ first"). The test is two dumps from ~/venv_esm and the spread between them.
 Until that exists, these four rows are UNEXPLAINED, not characterised, and
 PARITY.md should not call them a bf16 floor.
 
-## protenix's L4 gap: an exact stack amplifying a 3e-03 embedding difference
+## protenix's L4 gap -- CLOSED 2026-09-13: it is `torch.cdist`
+
+`EXACT_CDIST=1` (confidence_parity) gives native an accurate float32 distance
+and nothing else. Every protenix-lineage row collapses; every non-protenix row
+is bit-unchanged:
+
+    protenix2 pae 2.30e-02 -> 2.26e-04     protenix1 pae 5.39e-03 -> 4.92e-05
+    protenix2 pde 1.72e-02 -> 7.70e-05     protenix1 pde 6.76e-03 -> 1.76e-05
+    opendde   pae 9.80e-03 -> 7.47e-05     openfold3/openbind0/boltz2 unchanged
+    opendde   pde 1.58e-02 -> 1.26e-04
+
+`torch.cdist` expands ||a-b||^2 as ||a||^2 + ||b||^2 - 2a.b; in float32 that
+costs up to 1.6e-02 A here. It flips NO distogram bin (0 of 1.3e8 one-hot
+entries), but protenix feeds the RAW distance to `linear_no_bias_d_wo_onehot`
+and there it goes straight through.
+
+Two things this corrects in the section below:
+
+  * "probably the reference's own float32" is WRONG, and it was testable. The
+    settling test it names -- native's head in fp32 against itself in fp64 --
+    now runs (the plumbing was two hardcoded downcasts, `confidence.py:278`
+    and `one_hot()`'s `.float()`) and reads 2.45e-06 on the pae expectation
+    against a gate reading 2.30e-02. Three to four orders out.
+  * the embedded-pair cell it asks for now exists (`EMBED=1`): 3.13e-03,
+    unchanged by zeroing s_inputs, so the distance path -- which is what
+    pointed at cdist.
+
+## (superseded) protenix's L4 gap: an exact stack amplifying a 3e-03 embedding difference
 
 `L4.confidence` leaves the protenix lineage not at parity -- protenix2 pae
 2.30e-02 / pde 1.72e-02, protenix1 5.4e-03 / 6.8e-03, opendde pae 9.8e-03 / pde
