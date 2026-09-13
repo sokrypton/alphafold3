@@ -612,11 +612,103 @@ def heads_gate(variant='monomer', n=24, seed=0):
   return 0 if ok else 1
 
 
+def msa_gate(n=20, n_seq=32, max_seq=8, seed=0):
+  """The MSA feature pipeline: SUBSAMPLING, the msa/extra split, and the BERT
+  masking that mutates residues.
+
+  This is not the network -- it is where AlphaFold 2's stochasticity lives, and
+  it decides which sequences the trunk ever sees. Multimer moved it INSIDE the
+  jax model (modules_multimer), which is the version this package runs, so it
+  can be compared directly rather than through the monomer's TensorFlow
+  data_transforms.
+
+  One real difference has to be held in mind: ours carries the MSA as a ONE-HOT
+  so a soft, designed MSA can carry gradients; the original carries integer
+  ids. So the comparison is on what each SELECTS and PRODUCES -- row order, mask
+  positions, resulting residues -- not on dtype.
+  """
+  import haiku as hk
+  import jax
+  import jax.numpy as jnp
+
+  sys.path.insert(0, AF2_ORIGINAL)
+  from alphafold.model import modules_multimer as o_mm
+  from alphafold.model import prng as o_prng
+  import ml_collections
+
+  from alphafold3.af2.model import msa as our_msa
+
+  rng = np.random.default_rng(seed)
+  msa_i = rng.integers(0, 21, size=(n_seq, n)).astype(np.int32)
+  msa_mask = (rng.random((n_seq, n)) > 0.1).astype(np.float32)
+  deletion = (rng.random((n_seq, n)) * 3).astype(np.float32)
+  key = jax.random.PRNGKey(seed)
+
+  def o_batch():
+    b = {'msa': jnp.asarray(msa_i), 'msa_mask': jnp.asarray(msa_mask),
+         'deletion_matrix': jnp.asarray(deletion)}
+    b['msa_profile'] = o_mm.make_msa_profile(b)
+    return b
+
+  def u_batch():
+    b = {'msa': jax.nn.one_hot(jnp.asarray(msa_i), 22),
+         'msa_mask': jnp.asarray(msa_mask),
+         'deletion_matrix': jnp.asarray(deletion)}
+    our_msa.make_msa_profile(b)
+    return b
+
+  print('msa pipeline, %d sequences x %d residues, sampling %d:'
+        % (n_seq, n, max_seq))
+  ok = True
+
+  # --- the profile both sides build from the same alignment
+  ok &= _cmp('msa_profile', np.asarray(u_batch()['msa_profile']),
+             np.asarray(o_batch()['msa_profile']))
+
+  # --- SUBSAMPLING: which rows become msa, which become extra
+  ob, ub = o_batch(), u_batch()
+  o_out = o_mm.sample_msa(o_prng.SafeKey(key), ob, max_seq)
+  our_msa.sample_msa(key, ub, max_seq)
+  ok &= _cmp('sampled msa rows', np.asarray(ub['msa']).argmax(-1),
+             np.asarray(o_out['msa']))
+  ok &= _cmp('extra msa rows', np.asarray(ub['extra_msa']).argmax(-1),
+             np.asarray(o_out['extra_msa']))
+  ok &= _cmp('extra deletion', np.asarray(ub['extra_deletion_matrix']),
+             np.asarray(o_out['extra_deletion_matrix']))
+
+  # --- MASKING / MUTATING
+  cfg = ml_collections.ConfigDict(dict(
+      replace_fraction=0.15, uniform_prob=0.1, profile_prob=0.1, same_prob=0.1))
+  ob, ub = o_batch(), u_batch()
+  o_out = o_mm.make_masked_msa(ob, o_prng.SafeKey(key), cfg)
+  our_msa.make_masked_msa(key, ub)
+  ok &= _cmp('bert_mask', np.asarray(ub['bert_mask']),
+             np.asarray(o_out['bert_mask']))
+  ok &= _cmp('masked msa', np.asarray(ub['msa']).argmax(-1),
+             np.asarray(o_out['msa']))
+
+  # --- CLUSTERING of the extra sequences onto the sampled ones
+  ob, ub = o_batch(), u_batch()
+  o_out = o_mm.sample_msa(o_prng.SafeKey(key), ob, max_seq)
+  our_msa.sample_msa(key, ub, max_seq)
+  # PIPELINE ORDER: ours pads the alphabet to 23 (the BERT mask column) before
+  # clustering, which make_msa_feats does between the two steps.
+  our_msa.pad_msa_A(ub)
+  # the original RETURNS the two arrays; ours writes them into the batch
+  o_prof, o_del = o_mm.nearest_neighbor_clusters(o_out)
+  our_msa.nearest_neighbor_clusters(ub)
+  ok &= _cmp('cluster_profile', np.asarray(ub['cluster_profile']),
+             np.asarray(o_prof))
+  ok &= _cmp('cluster_deletion_mean', np.asarray(ub['cluster_deletion_mean']),
+             np.asarray(o_del))
+  return 0 if ok else 1
+
+
 def main(argv=None):
   ap = argparse.ArgumentParser()
   ap.add_argument('module', nargs='?', default='template',
                   choices=('template', 'template_multimer', 'template_1d',
-                           'evoformer', 'extra_msa', 'ipa', 'heads'))
+                           'evoformer', 'extra_msa', 'ipa', 'heads', 'msa'))
   ap.add_argument('--tokens', type=int, default=24)
   ap.add_argument('--variant', default='monomer',
                   choices=('monomer', 'multimer'))
@@ -625,6 +717,8 @@ def main(argv=None):
     raise SystemExit('clone the original first: git clone '
                      'https://github.com/google-deepmind/alphafold %s'
                      % AF2_ORIGINAL)
+  if args.module == 'msa':
+    return msa_gate()
   if args.module == 'heads':
     return heads_gate(variant=args.variant, n=args.tokens)
   if args.module == 'ipa':

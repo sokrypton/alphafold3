@@ -525,7 +525,13 @@ class AF2Runner:
       inputs = make_msa_feats(
           inputs, key if key is not None else jax.random.PRNGKey(0),
           num_msa=self.num_msa, num_extra_msa=self.num_extra_msa,
-          use_mlm=False, mlm_opt=opt.get('mlm'),
+          # AF2_MLM=1 applies the BERT masking stock AlphaFold 2 applies at
+          # INFERENCE too (modules_multimer calls make_masked_msa
+          # unconditionally, replace_fraction 0.15). It is off by default here
+          # because this runner also serves DESIGN, where mutating the sequence
+          # under optimisation is not wanted -- but a prediction without it is
+          # not what AlphaFold 2 does.
+          use_mlm=bool(os.environ.get('AF2_MLM')), mlm_opt=opt.get('mlm'),
           use_cluster_profile=self.use_cluster_profile)
     else:
       inputs.update(self.update_seq(seq, inputs, pssm=pssm))
