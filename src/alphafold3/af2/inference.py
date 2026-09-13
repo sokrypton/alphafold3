@@ -34,7 +34,7 @@ class AF2ModelRunner:
   def __init__(self, spec, device, model_dir, *, num_recycles=3,
                use_bfloat16=True, num_msa=512, num_extra_msa=1024,
                model_names=None, use_cluster_profile=True,
-               use_templates=False):
+               use_templates=False, use_mlm=True):
     self._spec = spec
     self._device = device
     self._model_dir = str(model_dir)
@@ -44,6 +44,10 @@ class AF2ModelRunner:
     self._num_extra_msa = num_extra_msa
     self._model_names = model_names
     self._use_cluster_profile = use_cluster_profile
+    # ON for prediction: stock AlphaFold 2 masks 15% of the MSA at inference,
+    # and it is what makes two seeds give two answers. The design path (which
+    # drives AF2Runner directly) leaves it off.
+    self._use_mlm = use_mlm
     # TEMPLATES ARE NOT JUST A FEATURE HERE. `use_templates` picks a
     # template-enabled config (model_1_ptm rather than model_3_ptm), KEEPS the
     # template weights (they are dropped by `rm_templates` otherwise), and
@@ -75,6 +79,7 @@ class AF2ModelRunner:
         num_msa=self._num_msa,
         num_extra_msa=self._num_extra_msa,
         use_cluster_profile=self._use_cluster_profile,
+        use_mlm=self._use_mlm,
     )
 
   @functools.cached_property

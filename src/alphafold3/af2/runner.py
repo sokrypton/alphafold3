@@ -198,6 +198,7 @@ class AF2Runner:
                data_dir='.', model_names=None, num_seq=1, copies=1,
                block_diag=None, shuffle_first=True, num_recycle=0,
                num_msa=512, num_extra_msa=1024, use_cluster_profile=False,
+               use_mlm=False,
                use_remat=True, use_bfloat16=True, use_dgram=False,
                use_dgram_pred=False,
                model_params=None, cfg=None, wt_aatype=None, seq_fixed=None,
@@ -216,6 +217,9 @@ class AF2Runner:
     self.num_msa = num_msa
     self.num_extra_msa = num_extra_msa
     self.use_cluster_profile = use_cluster_profile
+    # False here because this runner's other caller is DESIGN; the prediction
+    # entry point (af2.inference.AF2ModelRunner) turns it on.
+    self.use_mlm = use_mlm
     self.wt_aatype = wt_aatype
     self.seq_fixed = seq_fixed
 
@@ -525,13 +529,15 @@ class AF2Runner:
       inputs = make_msa_feats(
           inputs, key if key is not None else jax.random.PRNGKey(0),
           num_msa=self.num_msa, num_extra_msa=self.num_extra_msa,
-          # AF2_MLM=1 applies the BERT masking stock AlphaFold 2 applies at
-          # INFERENCE too (modules_multimer calls make_masked_msa
-          # unconditionally, replace_fraction 0.15). It is off by default here
-          # because this runner also serves DESIGN, where mutating the sequence
-          # under optimisation is not wanted -- but a prediction without it is
-          # not what AlphaFold 2 does.
-          use_mlm=bool(os.environ.get('AF2_MLM')), mlm_opt=opt.get('mlm'),
+          # BERT MASKING. Stock AlphaFold 2 applies it at INFERENCE too
+          # (modules_multimer calls make_masked_msa unconditionally,
+          # replace_fraction 0.15), so PREDICTION sets this True -- and it is
+          # what makes a prediction depend on its seed, because the masking and
+          # the subsampling are both drawn from `key`. DESIGN leaves it False:
+          # mutating the sequence under optimisation is a different thing.
+          use_mlm=(bool(os.environ['AF2_MLM'])
+                   if os.environ.get('AF2_MLM') is not None else self.use_mlm),
+          mlm_opt=opt.get('mlm'),
           use_cluster_profile=self.use_cluster_profile)
     else:
       inputs.update(self.update_seq(seq, inputs, pssm=pssm))
