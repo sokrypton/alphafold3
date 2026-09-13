@@ -148,16 +148,154 @@ def template_gate(n=24, seed=0):
   return 0 if _cmp('template_embed', got, ref) else 1
 
 
+def template_multimer_gate(n=24, seed=0):
+  """The MULTIMER template embedder, against modules_multimer's own."""
+  import haiku as hk
+  import jax
+  import jax.numpy as jnp
+
+  sys.path.insert(0, AF2_ORIGINAL)
+  from alphafold.model import config as o_config
+  from alphafold.model import modules_multimer as o_mm
+
+  from alphafold3.af2.model import modules as our_modules
+  from alphafold3.af2.model import config as our_config
+  from alphafold3.af2.runner import load_params
+
+  ckpt = os.path.expanduser(
+      os.environ.get('AF2_MULTIMER_PARAMS',
+                     '~/params/params_model_1_multimer_v3.npz'))
+  params = np.load(ckpt, allow_pickle=True)
+  p_orig = _subtree(params, 'template_embedding')
+  if not p_orig:
+    raise SystemExit('no template_embedding params in %s' % ckpt)
+  loaded = load_params([os.path.basename(ckpt)[len('params_'):-len('.npz')]],
+                       os.path.dirname(ckpt), use_templates=True,
+                       use_multimer=True)[0]
+  pre = 'alphafold/alphafold_iteration/evoformer/'
+  p_ours = {k[len(pre):]: v for k, v in loaded.items()
+            if k.startswith(pre + 'template_embedding')}
+
+  rng = np.random.default_rng(seed)
+  c_z = 128
+  query = (rng.normal(size=(n, n, c_z)) * 0.5).astype(np.float32)
+  pad2d = np.ones((n, n), np.float32)
+  # two chains, so the multichain mask is not trivially all ones
+  asym = np.concatenate([np.zeros(n // 2), np.ones(n - n // 2)])
+  multichain = (asym[:, None] == asym[None, :]).astype(np.float32)
+  batch = {
+      'template_aatype': rng.integers(0, 20, size=(2, n)).astype(np.int32),
+      'template_all_atom_positions': (rng.normal(size=(2, n, 37, 3)) * 5
+                                      ).astype(np.float32),
+      'template_all_atom_mask': (rng.random((2, n, 37)) > 0.3).astype(np.float32),
+      'template_mask': np.ones(2, np.float32),
+  }
+  if os.environ.get('FULLMASK'):
+    batch['template_all_atom_mask'] = np.ones_like(
+        batch['template_all_atom_mask'])
+
+  o_cfg = o_config.model_config('model_1_multimer_v3')
+  o_tcfg = o_cfg.model.embeddings_and_evoformer.template
+  o_gc = o_cfg.model.global_config
+
+  def o_fwd():
+    return o_mm.TemplateEmbedding(o_tcfg, o_gc)(
+        query_embedding=jnp.asarray(query),
+        template_batch={k: jnp.asarray(v) for k, v in batch.items()},
+        padding_mask_2d=jnp.asarray(pad2d),
+        multichain_mask_2d=jnp.asarray(multichain),
+        is_training=False)
+
+  o_f = hk.transform(o_fwd)
+  ref = np.asarray(o_f.apply(p_orig, jax.random.PRNGKey(0)))
+
+  u_cfg = our_config.model_config('model_1_multimer_v3')
+  u_tcfg = u_cfg.model.embeddings_and_evoformer.template
+  u_gc = u_cfg.model.global_config
+
+  def u_fwd():
+    return our_modules.TemplateEmbedding(u_tcfg, u_gc)(
+        query_embedding=jnp.asarray(query),
+        template_batch={k: jnp.asarray(v) for k, v in batch.items()},
+        padding_mask_2d=jnp.asarray(pad2d),
+        multichain_mask_2d=jnp.asarray(multichain),
+        use_dropout=False)
+
+  u_f = hk.transform(u_fwd)
+  got = np.asarray(u_f.apply(p_ours, jax.random.PRNGKey(0)))
+  print('multimer template embedder, %d residues (2 chains), 2 templates:' % n)
+  return 0 if _cmp('template_embed', got, ref) else 1
+
+
+def template_1d_gate(n=24, seed=0):
+  """`template_embedding_1d` -- the MULTIMER 1-D features appended to the MSA.
+
+  A plain function rather than a module, but it is the other half of the
+  multimer template path and it reads `template_aatype` through a chi-angle
+  table, so a relabelled alphabet would show here and nowhere else.
+  """
+  import haiku as hk
+  import jax
+  import jax.numpy as jnp
+
+  sys.path.insert(0, AF2_ORIGINAL)
+  from alphafold.model import config as o_config
+  from alphafold.model import modules_multimer as o_mm
+
+  from alphafold3.af2.model import modules as our_modules
+  from alphafold3.af2.model import config as our_config
+
+  rng = np.random.default_rng(seed)
+  batch = {
+      'template_aatype': rng.integers(0, 20, size=(2, n)).astype(np.int32),
+      'template_all_atom_positions': (rng.normal(size=(2, n, 37, 3)) * 5
+                                      ).astype(np.float32),
+      'template_all_atom_mask': (rng.random((2, n, 37)) > 0.3).astype(np.float32),
+  }
+  o_gc = o_config.model_config('model_1_multimer_v3').model.global_config
+  u_gc = our_config.model_config('model_1_multimer_v3').model.global_config
+
+  # it builds its own two Linears, so it needs their weights
+  ckpt = os.path.expanduser(
+      os.environ.get('AF2_MULTIMER_PARAMS',
+                     '~/params/params_model_1_multimer_v3.npz'))
+  raw = np.load(ckpt, allow_pickle=True)
+  p1d = {}
+  for scope in ('template_single_embedding', 'template_projection'):
+    p1d.update(_subtree(raw, scope))
+  if not p1d:
+    raise SystemExit('no 1-D template params in %s' % ckpt)
+
+  def run(fn, gc):
+    def fwd():
+      f, m = fn(batch={k: jnp.asarray(v) for k, v in batch.items()},
+                num_channel=256, global_config=gc)
+      return f, m
+    t = hk.transform(fwd)
+    return jax.tree.map(np.asarray, t.apply(p1d, jax.random.PRNGKey(0)))
+
+  ref_f, ref_m = run(o_mm.template_embedding_1d, o_gc)
+  got_f, got_m = run(our_modules.template_embedding_1d, u_gc)
+  print('multimer template_embedding_1d, %d residues, 2 templates:' % n)
+  ok = _cmp('features', got_f, ref_f)
+  ok &= _cmp('mask', got_m, ref_m)
+  return 0 if ok else 1
+
+
 def main(argv=None):
   ap = argparse.ArgumentParser()
   ap.add_argument('module', nargs='?', default='template',
-                  choices=('template',))
+                  choices=('template', 'template_multimer', 'template_1d'))
   ap.add_argument('--tokens', type=int, default=24)
   args = ap.parse_args(argv)
   if not os.path.isdir(AF2_ORIGINAL):
     raise SystemExit('clone the original first: git clone '
                      'https://github.com/google-deepmind/alphafold %s'
                      % AF2_ORIGINAL)
+  if args.module == 'template_1d':
+    return template_1d_gate(n=args.tokens)
+  if args.module == 'template_multimer':
+    return template_multimer_gate(n=args.tokens)
   return template_gate(n=args.tokens)
 
 
