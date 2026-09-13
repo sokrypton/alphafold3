@@ -34,7 +34,7 @@ class AF2ModelRunner:
   def __init__(self, spec, device, model_dir, *, num_recycles=3,
                use_bfloat16=True, num_msa=512, num_extra_msa=1024,
                model_names=None, use_cluster_profile=True,
-               use_templates=False, use_mlm=True):
+               use_templates=False, use_mlm=True, use_dropout=False):
     self._spec = spec
     self._device = device
     self._model_dir = str(model_dir)
@@ -48,6 +48,7 @@ class AF2ModelRunner:
     # and it is what makes two seeds give two answers. The design path (which
     # drives AF2Runner directly) leaves it off.
     self._use_mlm = use_mlm
+    self._use_dropout = use_dropout
     # TEMPLATES ARE NOT JUST A FEATURE HERE. `use_templates` picks a
     # template-enabled config (model_1_ptm rather than model_3_ptm), KEEPS the
     # template weights (they are dropped by `rm_templates` otherwise), and
@@ -149,7 +150,12 @@ class AF2ModelRunner:
     # temp are then irrelevant but pinned so a caller's opt cannot reintroduce a
     # schedule by accident.
     full_opt = {'alpha': 1.0, 'temp': 1.0, 'soft': 0.0, 'hard': 0.0,
-                'weights': {}}
+                'weights': {},
+                # AlphaFold 2's own dropout (the structure module's and the
+                # Evoformer's), off unless asked for -- `runner.features` reads
+                # it as `opt['dropout']`. The af3-family models reach the same
+                # switch through Model(..., use_dropout=); --dropout drives both.
+                'dropout': self._use_dropout}
     if opt:
       full_opt.update(opt)
     if key is None:

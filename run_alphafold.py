@@ -419,6 +419,18 @@ _NUM_RECYCLES = flags.DEFINE_integer(
     'Number of recycles to use during inference.',
     lower_bound=1,
 )
+_DROPOUT = flags.DEFINE_bool(
+    'dropout',
+    False,
+    'Run the network WITH the dropout it was trained with, instead of the'
+    ' deterministic inference path. AlphaFold 3 was trained with 0.25 dropout'
+    ' in the pair stacks and 0.15 in the MSA module (SI Algorithms 8/16/17,'
+    ' section 5.5); the released inference code strips it, and this package'
+    ' carries it so a run can use it as a stochastic regulariser -- which makes'
+    ' repeated seeds explore rather than repeat. Applies to every af3-family'
+    ' model, since they share the graph. Off by default: prediction is meant to'
+    ' be deterministic.',
+)
 _NUM_DIFFUSION_SAMPLES = flags.DEFINE_integer(
     'num_diffusion_samples',
     5,
@@ -610,10 +622,15 @@ class ModelRunner:
       config: model.Model.Config,
       device: jax.Device,
       model_dir: epath.PathLike,
+      use_dropout: bool = False,
   ):
     self._model_config = config
     self._device = device
     self._model_dir = epath.Path(model_dir)
+    # Traced, not baked: `_pair_dropout` computes its rate as
+    # jnp.where(use_dropout, rate, 0), so OFF is an exact identity
+    # (bernoulli(keep=1) is all-ones) and toggling costs no recompile.
+    self._use_dropout = use_dropout
     self._autotune_result = self._load_autotune_cache()
 
   @property
@@ -693,7 +710,8 @@ class ModelRunner:
 
     @hk.transform
     def forward_fn(batch):
-      return model.Model(self._model_config)(batch)
+      return model.Model(self._model_config)(batch,
+                                             use_dropout=self._use_dropout)
 
     apply_fn = forward_fn.apply
     if not _NOJIT.value:
@@ -1532,6 +1550,7 @@ def main(_):
           spec, device=device, model_dir=model_dir,
           num_recycles=_NUM_RECYCLES.value,
           use_templates=af2_templates,
+          use_dropout=_DROPOUT.value,
       )
     else:
       # Idempotent after the first run: a directory that already holds a blob is
@@ -1555,6 +1574,7 @@ def main(_):
           ),
           device=device,
           model_dir=model_dir,
+          use_dropout=_DROPOUT.value,
       )
     # Check we can load the model parameters before launching anything.
     print('Checking that model parameters can be loaded...')

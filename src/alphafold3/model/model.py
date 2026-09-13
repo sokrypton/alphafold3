@@ -934,6 +934,7 @@ class Model(hk.Module):
               # chai gathers its pLDDT logits by ATOM37 slot, which is not our
               # dense slot order; the names are how we recover the permutation.
               atom_name_chars=diff_batch.ref_structure.atom_name_chars,
+              use_dropout=use_dropout,
           ),
           in_axes=0,
       )(samples['atom_positions'])

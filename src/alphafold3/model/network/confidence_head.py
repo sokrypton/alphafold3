@@ -324,6 +324,7 @@ class ConfidenceHead(hk.Module):
       bond_matrix: jnp.ndarray | None = None,
       bond_type_matrix: jnp.ndarray | None = None,
       atom_name_chars: jnp.ndarray | None = None,
+      use_dropout=False,
   ) -> dict[str, jnp.ndarray]:
     """Builds ConfidenceHead module.
 
@@ -421,6 +422,11 @@ class ConfidenceHead(hk.Module):
             single_act=single_act,
             pair_mask=pair_mask,
             seq_mask=seq_mask,
+            # The confidence head has its OWN pairformer and it was trained with
+            # the same 0.25 pair dropout as the trunk's -- OpenFold3 carries it
+            # under `pairformer_embedding.pairformer.pair_dropout`. It was the
+            # one stack here that never received the flag.
+            use_dropout=use_dropout,
         )
 
       pairformer_stack = hk.experimental.layer_stack(
