@@ -17,8 +17,10 @@ your own copy.
 
 from __future__ import annotations
 
+import glob
 import os
 import sys
+import tarfile
 import urllib.request
 
 from alphafold3.model import model_config
@@ -125,4 +127,45 @@ def ensure_weights(model_name: str, model_dir=None, *, download=True,
                                file=spec.companion_path(extra)), dst, log=log)
     except Exception as err:  # pylint: disable=broad-except
       log(f'note: could not fetch {extra} for {spec.name} ({err})')
+  return model_dir
+
+
+# AlphaFold 2's parameters are DeepMind's own release under CC BY 4.0 -- open
+# for commercial and non-commercial use -- so they are FETCHED FROM SOURCE
+# rather than republished here. One tar holds every model: the five monomer
+# sets, their _ptm variants and the multimer ones.
+AF2_PARAMS_URL = ('https://storage.googleapis.com/alphafold/'
+                  'alphafold_params_2022-12-06.tar')
+
+
+def ensure_af2_params(model_dir: str, download: bool = True, log=print) -> str:
+  """-> a directory holding `params_model_*.npz`, downloading them if needed.
+
+  AF2 reads its parameters by filename, so this only has to guarantee the files
+  exist; nothing is converted. `model_dir` may already be a user's own params
+  directory, in which case it is left alone.
+  """
+  model_dir = os.path.expanduser(model_dir)
+  if glob.glob(os.path.join(model_dir, 'params_model_*.npz')):
+    return model_dir
+  # AF2's own layout puts them in a `params/` subdirectory; accept either.
+  nested = os.path.join(model_dir, 'params')
+  if glob.glob(os.path.join(nested, 'params_model_*.npz')):
+    return nested
+  if not download:
+    raise FileNotFoundError(
+        f'no params_model_*.npz in {model_dir}; re-run with downloading '
+        f'enabled to fetch them from {AF2_PARAMS_URL}')
+  os.makedirs(model_dir, exist_ok=True)
+  tar_path = os.path.join(model_dir, 'alphafold_params.tar')
+  _download(AF2_PARAMS_URL, tar_path, log=log)
+  log(f'extracting {tar_path}')
+  with tarfile.open(tar_path) as tar:
+    # filter='data' refuses absolute paths and traversal; it is the default from
+    # Python 3.14 and is spelled out here so the behaviour does not depend on it
+    tar.extractall(model_dir, filter='data')
+  os.remove(tar_path)
+  if not glob.glob(os.path.join(model_dir, 'params_model_*.npz')):
+    raise FileNotFoundError(
+        f'{AF2_PARAMS_URL} did not yield params_model_*.npz in {model_dir}')
   return model_dir

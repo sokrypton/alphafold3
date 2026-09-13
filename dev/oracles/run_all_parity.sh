@@ -199,7 +199,7 @@ want () {  # is this level selected?
   case " $LEVELS " in *" all "*|*" $lvl "*) return 0 ;; *) return 1 ;; esac
 }
 
-LEVELS=${*:-L0 L1 L1b L1t L1x L1d L2 L3 L4}
+LEVELS=${*:-L0 L1 L1b L1t L1x L1d L2 L3 L4 L5af2}
 echo "levels: $LEVELS"
 echo "models: $MODELS"
 echo "logs:   $LOGDIR"
@@ -391,6 +391,22 @@ if want L4; then
   # assumption about chai's bin centres enters it.
   gate L4.confidence_inject chai1 '_logits' \
     dev/oracles/chai1_confidence_parity.py
+fi
+
+# --- L5af2: AlphaFold 2. Not in MODELS -- it is a SIBLING NETWORK, not an
+#     af3-family port, so none of L0-L4 applies to it (no converter, no shared
+#     modules). Its two gates live here so they are actually run: af2_fold_check
+#     is a known-answer test against the same code and parameters in
+#     colabdesign2, and af2_template_check folds a target given its OWN
+#     structure, which is the only cheap way to catch a template that is
+#     accepted and then quietly ignored.
+if want L5af2; then
+  echo "== L5af2 AlphaFold 2 (known-answer, and templates)"
+  gate L5af2.fold alphafold2_ptm 'CA-RMSD' \
+    dev/oracles/af2_fold_check.py alphafold2_ptm
+  for m in af2_ptm af2_multimer; do
+    gate L5af2.template "$m" 'CA-RMSD' dev/oracles/af2_template_check.py "$m"
+  done
 fi
 
 # --- L5 / L6: folds. Much slower, and opt-in for that reason -------------

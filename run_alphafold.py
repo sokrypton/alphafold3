@@ -1358,6 +1358,12 @@ def main(_):
     raise AssertionError(
         'Exactly one of --json_path or --input_dir must be specified.'
     )
+  # MATERIALISED so the inputs can be inspected before the model is built:
+  # AlphaFold 2 has to know whether any input carries a template, because that
+  # decides the graph (template embedder on) and the parameter sets (the
+  # template-trained 1 and 2 rather than 1-5). Fold inputs are JSON specs, so
+  # this holds specs, not features.
+  fold_inputs = list(fold_inputs)
 
   if _OUTPUT_DIR.value is None:
     raise ValueError('Output directory must be specified with --output_dir.')
@@ -1510,15 +1516,22 @@ def main(_):
 
     spec = model_registry.get(model_name)
     if spec.engine == 'af2':
-      # AlphaFold 2's parameters are DeepMind's own release, read from
-      # --model_dir; there is no converted blob to fetch, and they are not ours
-      # to redistribute.
+      # AlphaFold 2's parameters are DeepMind's own release under CC BY 4.0, so
+      # they are fetched FROM SOURCE rather than republished here -- point
+      # --model_dir at your own copy and this is a no-op.
       from alphafold3.af2 import inference as af2_inference
 
+      model_dir = weights.ensure_af2_params(
+          model_dir, download=_DOWNLOAD_WEIGHTS.value)
+      # Templates need the template-trained parameter sets and the template
+      # embedder switched on, so this is decided by the INPUT rather than a flag.
+      af2_templates = any(getattr(c, 'templates', None)
+                          for fi in fold_inputs for c in fi.chains)
       print('Building AlphaFold 2 from scratch...')
       model_runner = af2_inference.AF2ModelRunner(
           spec, device=device, model_dir=model_dir,
           num_recycles=_NUM_RECYCLES.value,
+          use_templates=af2_templates,
       )
     else:
       # Idempotent after the first run: a directory that already holds a blob is
