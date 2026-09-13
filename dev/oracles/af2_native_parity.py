@@ -29,6 +29,72 @@ PARAMS = os.path.expanduser(os.environ.get('AF2_PARAMS',
                                            '~/params/params_model_1_ptm.npz'))
 PREFIX = 'alphafold/alphafold_iteration/evoformer/'
 
+# The two paths. `params` is what each side's checkpoint is called, `config` the
+# config name, and the original's modules live in different files -- monomer in
+# modules.py/folding.py, multimer in modules_multimer.py/folding_multimer.py.
+# THIS PACKAGE HAS ONE GRAPH for both (the multimer structure, with monomer
+# weights converted at load), so for the monomer variant the comparison is
+# genuinely cross-architecture and is exactly what tests convert.py.
+VARIANTS = {
+    'monomer': dict(params='~/params/params_model_1_ptm.npz',
+                    config='model_1_ptm'),
+    'multimer': dict(params='~/params/params_model_1_multimer_v3.npz',
+                     config='model_1_multimer_v3'),
+}
+
+
+def _variant(name):
+  v = VARIANTS[name]
+  return os.path.expanduser(v['params']), v['config']
+
+
+def _load_ours(ckpt, use_templates=True):
+  """params as THIS PACKAGE's loader produces them (fused, bias-normalised)."""
+  from alphafold3.af2.runner import load_params
+  p = load_params([os.path.basename(ckpt)[len('params_'):-len('.npz')]],
+                  os.path.dirname(ckpt), use_templates=use_templates,
+                  use_multimer=('multimer' in ckpt))[0]
+  if 'multimer' not in ckpt:
+    # AND CONVERTED, as the runner does before using them: this package has one
+    # graph (the multimer one) and a monomer checkpoint is remapped onto it at
+    # load -- fused q/kv scalar and point projections split, pair_activiations
+    # and the single-side linears regrouped. Comparing without this step asks
+    # our graph for parameters that only exist after it.
+    from alphafold3.af2.convert import convert_monomer_params
+    p = convert_monomer_params(p)
+  return p
+
+
+def _scope(params, prefix, scope, unstack=False):
+  """arrays under prefix+scope -> a haiku param dict for a bare module.
+
+  Takes either an .npz (keys are 'module//leaf') or this package's loader output
+  (already {module: {leaf: array}}). An .npz also exposes `.items()`, so the two
+  are told apart by `.files`, not by duck typing.
+  """
+  out = {}
+  if hasattr(params, 'files'):
+    for k in params.files:
+      if not k.startswith(prefix + scope):
+        continue
+      mod, leaf = k.rsplit('//', 1)
+      # the layer_stack prefix is part of the scope and is only removed when a
+      # single block is being pulled OUT of the stack
+      key = mod[len(prefix):]
+      if unstack:
+        key = key.replace('__layer_stack_no_state/', '')
+      arr = np.asarray(params[k])
+      out.setdefault(key, {})[leaf] = arr[0] if unstack else arr
+  else:
+    for k, v in params.items():
+      if not k.startswith(prefix + scope):
+        continue
+      key = k[len(prefix):]
+      if unstack:
+        key = key.replace('__layer_stack_no_state/', '')
+      out[key] = {a: (b[0] if unstack else b) for a, b in v.items()}
+  return out
+
 
 def _cmp(tag, got, ref):
   got, ref = np.asarray(got, np.float64), np.asarray(ref, np.float64)
@@ -74,16 +140,10 @@ def template_gate(n=24, seed=0):
   # feeding each side the parameters it expects is the comparison -- and whether
   # the regrouping is faithful is precisely what has never been checked.
   params = np.load(PARAMS, allow_pickle=True)
-  p_orig = _subtree(params, 'template_embedding')
+  p_orig = _scope(params, PREFIX, 'template_embedding')
   if not p_orig:
     raise SystemExit('no template_embedding params in %s' % PARAMS)
-
-  from alphafold3.af2.runner import load_params
-  loaded = load_params([os.path.basename(PARAMS)[len('params_'):-len('.npz')]],
-                       os.path.dirname(PARAMS), use_templates=True)[0]
-  pre = 'alphafold/alphafold_iteration/evoformer/'
-  p_ours = {k[len(pre):]: v for k, v in loaded.items()
-            if k.startswith(pre + 'template_embedding')}
+  p_ours = _scope(_load_ours(PARAMS), PREFIX, 'template_embedding')
 
   rng = np.random.default_rng(seed)
   c_z = 128
@@ -282,7 +342,7 @@ def template_1d_gate(n=24, seed=0):
   return 0 if ok else 1
 
 
-def evoformer_gate(n=24, n_seq=8, seed=0, extra=False):
+def evoformer_gate(n=24, n_seq=8, seed=0, extra=False, variant='monomer'):
   """One EvoformerIteration -- the trunk block, and most of the parameters.
 
   Run on the MONOMER config and parameters: our graph runs the multimer
@@ -302,25 +362,18 @@ def evoformer_gate(n=24, n_seq=8, seed=0, extra=False):
   from alphafold3.af2.runner import load_params
 
   scope = 'extra_msa_stack' if extra else 'evoformer_iteration'
-  params = np.load(PARAMS, allow_pickle=True)
-  p_orig = _subtree(params, scope)
+  ckpt, cfg_name = _variant(variant)
+  raw = np.load(ckpt, allow_pickle=True)
+  # BLOCK 0 of the stack on both sides, through the same helper -- an earlier
+  # hand-rolled slice here disagreed with it and made the multimer block read
+  # corr 0.01, which was the gate and not the port.
+  p_orig = _scope(raw, PREFIX, scope, unstack=True)
+  p_ours = _scope(_load_ours(ckpt), PREFIX, scope, unstack=True)
   if not p_orig:
-    raise SystemExit('no %s params in %s' % (scope, PARAMS))
-  # the checkpoint stacks the blocks; take the first
-  p_orig = {k.replace('__layer_stack_no_state/', ''):
-            {kk: vv[0] for kk, vv in v.items()}
-            for k, v in p_orig.items()}
+    raise SystemExit('no %s params in %s' % (scope, ckpt))
 
-  loaded = load_params([os.path.basename(PARAMS)[len('params_'):-len('.npz')]],
-                       os.path.dirname(PARAMS), use_templates=True)[0]
-  pre = 'alphafold/alphafold_iteration/evoformer/'
-  # Both sides take BLOCK 0 of the stack: the checkpoint stores the 48 trunk
-  # blocks stacked on axis 0, and one block is the unit being compared.
-  p_ours = {k[len(pre):].replace('__layer_stack_no_state/', ''):
-            {a: b[0] for a, b in v.items()}
-            for k, v in loaded.items() if k.startswith(pre + scope)}
   rng = np.random.default_rng(seed)
-  o_cfg = o_config.model_config('model_1_ptm')
+  o_cfg = o_config.model_config(cfg_name)
   c_m = (o_cfg.model.embeddings_and_evoformer.extra_msa_channel if extra
          else o_cfg.model.embeddings_and_evoformer.msa_channel)
   c_z = o_cfg.model.embeddings_and_evoformer.pair_channel
@@ -341,7 +394,7 @@ def evoformer_gate(n=24, n_seq=8, seed=0, extra=False):
   ref = jax.tree.map(np.asarray,
                      hk.transform(o_fwd).apply(p_orig, jax.random.PRNGKey(0)))
 
-  u_cfg = our_config.model_config('model_1_ptm')
+  u_cfg = our_config.model_config(cfg_name)
   u_ecfg = u_cfg.model.embeddings_and_evoformer.evoformer
   u_gc = u_cfg.model.global_config
 
@@ -350,19 +403,25 @@ def evoformer_gate(n=24, n_seq=8, seed=0, extra=False):
                                           name=scope)(
         {k: jnp.asarray(v) for k, v in act.items()},
         {k: jnp.asarray(v) for k, v in masks.items()} |
-        {'opm_first': jnp.float32(0.0)},
+        # OPM ORDER IS A REGIME, NOT A CONSTANT. This package injects it as a
+        # runtime scalar (the monomer runs the outer-product-mean AFTER the row
+        # /column attention, native multimer runs it FIRST), so it has to come
+        # from the config being compared -- hardcoding the monomer value made
+        # the multimer Evoformer read corr 0.01 and look like a broken port.
+        {'opm_first': jnp.float32(
+            bool(o_ecfg.outer_product_mean.get('first', False)))},
         use_dropout=False)
 
   got = jax.tree.map(np.asarray,
                      hk.transform(u_fwd).apply(p_ours, jax.random.PRNGKey(0)))
-  print('%s, %d residues x %d sequences:'
-        % ('extra_msa_stack' if extra else 'evoformer_iteration', n, n_seq))
+  print('%s [%s], %d residues x %d sequences:'
+        % (scope, variant, n, n_seq))
   ok = _cmp('msa', got['msa'], ref['msa'])
   ok &= _cmp('pair', got['pair'], ref['pair'])
   return 0 if ok else 1
 
 
-def ipa_gate(n=24, seed=0):
+def ipa_gate(n=24, seed=0, variant='multimer'):
   """InvariantPointAttention -- the structure module's core.
 
   Compared against folding_multimer's, because that is the one this package
@@ -376,7 +435,13 @@ def ipa_gate(n=24, seed=0):
 
   sys.path.insert(0, AF2_ORIGINAL)
   from alphafold.model import config as o_config
-  from alphafold.model import folding_multimer as o_folding
+  # the ORIGINAL has two structure modules; this package has one (the multimer
+  # one), so on the monomer variant this compares across architectures -- which
+  # is precisely what convert.py's fused q/kv split has to get right.
+  if variant == 'multimer':
+    from alphafold.model import folding_multimer as o_folding
+  else:
+    from alphafold.model import folding as o_folding
   from alphafold.model import geometry as o_geometry
 
   from alphafold3.af2.model import folding as our_folding
@@ -384,9 +449,7 @@ def ipa_gate(n=24, seed=0):
   from alphafold3.af2.model import config as our_config
   from alphafold3.af2.runner import load_params
 
-  ckpt = os.path.expanduser(
-      os.environ.get('AF2_MULTIMER_PARAMS',
-                     '~/params/params_model_1_multimer_v3.npz'))
+  ckpt, cfg_name = _variant(variant)
   raw = np.load(ckpt, allow_pickle=True)
   pre = 'alphafold/alphafold_iteration/structure_module/fold_iteration/'
   p = {}
@@ -401,13 +464,12 @@ def ipa_gate(n=24, seed=0):
   # multimer; native multimer has none, and the loader supplies zeros (adding 0
   # is a no-op). So each side gets the parameters its own graph declares --
   # the same arrangement as the template gate.
-  loaded = load_params([os.path.basename(ckpt)[len('params_'):-len('.npz')]],
-                       os.path.dirname(ckpt), use_multimer=True)[0]
+  loaded = _load_ours(ckpt)
   p_ours = {k[len(pre):]: v for k, v in loaded.items()
             if k.startswith(pre + 'invariant_point_attention')}
 
   rng = np.random.default_rng(seed)
-  o_cfg = o_config.model_config('model_1_multimer_v3')
+  o_cfg = o_config.model_config(cfg_name)
   c_s = o_cfg.model.heads.structure_module.num_channel
   c_z = o_cfg.model.embeddings_and_evoformer.pair_channel
   s1d = (rng.normal(size=(n, c_s)) * 0.5).astype(np.float32)
@@ -422,14 +484,27 @@ def ipa_gate(n=24, seed=0):
     return geo.Rigid3Array(r, t)
 
   def o_fwd():
+    if variant == 'multimer':
+      rigid = mk(o_geometry)
+    else:
+      # THE MONOMER ORIGINAL TAKES A QuatAffine, not a Rigid3Array -- a
+      # different geometry API for the same transform. Built here from the same
+      # rotation and translation so the two sides are posed identically; this
+      # is the bridge that lets convert.py's fused q/kv split be compared at all.
+      from alphafold.model import quat_affine as o_quat
+      rigid = o_quat.QuatAffine(
+          quaternion=o_quat.rot_to_quat(jnp.asarray(rot), unstack_inputs=True),
+          translation=[jnp.asarray(trans[:, i]) for i in range(3)],
+          rotation=[[jnp.asarray(rot[:, i, j]) for j in range(3)]
+                    for i in range(3)],
+          unstack_inputs=False)
     return o_folding.InvariantPointAttention(
         o_cfg.model.heads.structure_module, o_cfg.model.global_config)(
-            jnp.asarray(s1d), jnp.asarray(s2d), jnp.asarray(mask),
-            mk(o_geometry))
+            jnp.asarray(s1d), jnp.asarray(s2d), jnp.asarray(mask), rigid)
 
   ref = np.asarray(hk.transform(o_fwd).apply(p, jax.random.PRNGKey(0)))
 
-  u_cfg = our_config.model_config('model_1_multimer_v3')
+  u_cfg = our_config.model_config(cfg_name)
 
   def u_fwd():
     return our_folding.InvariantPointAttention(
@@ -438,25 +513,125 @@ def ipa_gate(n=24, seed=0):
             mk(our_geometry))
 
   got = np.asarray(hk.transform(u_fwd).apply(p_ours, jax.random.PRNGKey(0)))
-  print('invariant point attention, %d residues:' % n)
+  print('invariant point attention [%s], %d residues:' % (variant, n))
   return 0 if _cmp('ipa', got, ref) else 1
+
+
+def heads_gate(variant='monomer', n=24, seed=0):
+  """The five output heads. They live in modules.py on BOTH paths -- multimer
+  reuses them -- so the variant only changes the checkpoint and the config."""
+  import haiku as hk
+  import jax
+  import jax.numpy as jnp
+
+  sys.path.insert(0, AF2_ORIGINAL)
+  from alphafold.model import config as o_config
+  from alphafold.model import modules as o_modules
+
+  from alphafold3.af2.model import modules as our_modules
+  from alphafold3.af2.model import config as our_config
+
+  ckpt, cfg_name = _variant(variant)
+  raw = np.load(ckpt, allow_pickle=True)
+  # RAW ON BOTH SIDES. The heads are not transformed by convert.py -- with one
+  # exception, `masked_msa_head`, whose 23 columns it truncates to 22 to fit the
+  # multimer graph's alphabet. That head is TRAINING-ONLY and inference never
+  # builds it, so converting here would compare a head the runtime never uses
+  # against parameters reshaped for a graph it never reaches.
+  ours_p = raw
+  o_cfg = o_config.model_config(cfg_name)
+  u_cfg = our_config.model_config(cfg_name)
+  o_gc, u_gc = o_cfg.model.global_config, u_cfg.model.global_config
+
+  rng = np.random.default_rng(seed)
+  c_s = o_cfg.model.embeddings_and_evoformer.seq_channel
+  c_z = o_cfg.model.embeddings_and_evoformer.pair_channel
+  c_m = o_cfg.model.embeddings_and_evoformer.msa_channel
+  reps = {
+      'single': (rng.normal(size=(n, c_s)) * 0.5).astype(np.float32),
+      'pair': (rng.normal(size=(n, n, c_z)) * 0.5).astype(np.float32),
+      'msa': (rng.normal(size=(4, n, c_m)) * 0.5).astype(np.float32),
+      'structure_module': (rng.normal(size=(n, 384)) * 0.5).astype(np.float32),
+  }
+  batch = {'aatype': rng.integers(0, 20, size=(n,)).astype(np.int32),
+           'seq_mask': np.ones(n, np.float32)}
+
+  # The checkpoint scope is `<name>_head`, which is also the haiku module name
+  # AlphaFoldIteration gives it -- so the module has to be built under that name
+  # or its parameters are not found.
+  HEADS = [
+      ('distogram_head', 'DistogramHead', o_cfg.model.heads.distogram),
+      ('predicted_lddt_head', 'PredictedLDDTHead',
+       o_cfg.model.heads.predicted_lddt),
+      ('experimentally_resolved_head', 'ExperimentallyResolvedHead',
+       o_cfg.model.heads.experimentally_resolved),
+      ('masked_msa_head', 'MaskedMsaHead', o_cfg.model.heads.masked_msa),
+  ]
+  if 'predicted_aligned_error' in o_cfg.model.heads:
+    HEADS.append(('predicted_aligned_error_head', 'PredictedAlignedErrorHead',
+                  o_cfg.model.heads.predicted_aligned_error))
+
+  print('heads [%s], %d residues:' % (variant, n))
+  ok = True
+  prefix = 'alphafold/alphafold_iteration/'
+  for scope, cls_name, hcfg in HEADS:
+    p_orig = _scope(raw, prefix, scope)
+    p_ours = _scope(ours_p, prefix, scope)
+    if not p_orig:
+      print('  %-24s (not in this checkpoint)' % scope)
+      continue
+
+    def mk(mod_src, cfg, gc, cls=cls_name, sc=scope):
+      def fwd():
+        head = getattr(mod_src, cls)(cfg, gc, name=sc)
+        return head({k: jnp.asarray(v) for k, v in reps.items()},
+                    {k: jnp.asarray(v) for k, v in batch.items()},
+                    is_training=False)
+      return fwd
+
+    # OURS TAKES NO `is_training`: the heads have no dropout, so this package
+    # dropped the argument. Same computation, different signature.
+    try:
+      ref = hk.transform(mk(o_modules, hcfg, o_gc)).apply(
+          p_orig, jax.random.PRNGKey(0))
+    except Exception as e:                                   # noqa: BLE001
+      print('  %-24s original raised: %s' % (scope, str(e)[:70]))
+      ok = False
+      continue
+
+    def mk_ours(cfg=hcfg, cls=cls_name, sc=scope):
+      def fwd():
+        head = getattr(our_modules, cls)(cfg, u_gc, name=sc)
+        return head({k: jnp.asarray(v) for k, v in reps.items()},
+                    {k: jnp.asarray(v) for k, v in batch.items()})
+      return fwd
+
+    got = hk.transform(mk_ours()).apply(p_ours, jax.random.PRNGKey(0))
+    key = 'logits' if 'logits' in ref else sorted(ref)[0]
+    ok &= _cmp(scope, got[key], ref[key])
+  return 0 if ok else 1
 
 
 def main(argv=None):
   ap = argparse.ArgumentParser()
   ap.add_argument('module', nargs='?', default='template',
                   choices=('template', 'template_multimer', 'template_1d',
-                           'evoformer', 'extra_msa', 'ipa'))
+                           'evoformer', 'extra_msa', 'ipa', 'heads'))
   ap.add_argument('--tokens', type=int, default=24)
+  ap.add_argument('--variant', default='monomer',
+                  choices=('monomer', 'multimer'))
   args = ap.parse_args(argv)
   if not os.path.isdir(AF2_ORIGINAL):
     raise SystemExit('clone the original first: git clone '
                      'https://github.com/google-deepmind/alphafold %s'
                      % AF2_ORIGINAL)
+  if args.module == 'heads':
+    return heads_gate(variant=args.variant, n=args.tokens)
   if args.module == 'ipa':
-    return ipa_gate(n=args.tokens)
+    return ipa_gate(n=args.tokens, variant=args.variant)
   if args.module in ('evoformer', 'extra_msa'):
-    return evoformer_gate(n=args.tokens, extra=(args.module == 'extra_msa'))
+    return evoformer_gate(n=args.tokens, variant=args.variant,
+                          extra=(args.module == 'extra_msa'))
   if args.module == 'template_1d':
     return template_1d_gate(n=args.tokens)
   if args.module == 'template_multimer':
