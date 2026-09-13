@@ -1,3 +1,38 @@
+# STATE OF PLAY -- boltz2's denoise is CLOSED (2026-09-13)
+
+It was the first item on README's open list and the largest single residual in
+the repository: 0.207 A/atom in the README, 0.3248 A in HOLES, resolvable
+(4.22e-06 floor) and therefore real. It now reads:
+
+    diff_dump       times  1.4158 -> sigma 4608.0   mean 0.0003 A   max 0.0009 A
+    diff_dump_last  times -2.3026 -> sigma 0.0016   mean 0.0000 A   max 0.0000 A
+
+corr 1.000000 at both ends, max|d|/rms 8.58e-05 and 3.50e-06.
+
+**What closed it was not work aimed at it.** HOLES had already ruled the OXT
+out as the cause ("NOT the extra C-terminal atom ... this profile is FLAT"),
+and that reasoning was wrong in a way worth keeping: the error profile was flat
+because a HOLE in the flat atom axis shifts every attention window after it,
+which is a global effect, not the rising-toward-the-C-terminus profile the
+ESMFold2 OXT failure produced. The terminal-atom drop fix
+(`_remove_dropped_atoms_from_layouts`, the regression caught by diffing audit
+classifications between runs) removed the atom instead of masking it, and the
+gate header now reads `ours 573, boltz 573` where the two used to disagree.
+
+So the lesson is the one this file keeps relearning from the other side: an
+elimination argued from the SHAPE of an error profile is a hypothesis, not a
+measurement. The right disqualifier would have been the atom count in the
+header, which was printed the whole time.
+
+### The schedule now has two cells, not one
+
+HOLES named the next measurement as "a re-dump at a mid-schedule sigma" because
+the only dump was the highest-noise step -- c_in 2.2e-04, c_out 16.0, almost
+pure network output with the coordinates barely entering. `diff_dump_last.npz`
+already existed and nothing read it: times -2.3026, sigma 0.0016, c_skip 1.0,
+the exact opposite operating point. `L3.denoise_inject_last` runs it, so a
+scaling difference that hides at one end of the schedule cannot hide at both.
+
 # STATE OF PLAY -- the AF2 WHOLES, against DeepMind (2026-09-13)
 
     dev/oracles/parity_runs/2026-09-13-af2wholes/   L5af2, 18 gates, 18 OK

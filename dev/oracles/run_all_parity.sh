@@ -394,6 +394,15 @@ if want L3; then
   # boltz2 has no standalone-constructible diffusion module; its L3 is by
   # injection from a captured native run (~/boltz2_6mrr/diff_dump.npz).
   gate L3.denoise_inject boltz2 'corr|per-atom' dev/oracles/boltz2_denoise_parity.py
+  # BOTH ENDS OF THE SCHEDULE. The default dump is a single step at
+  # times 1.4157 -> sigma 4608, where c_in is 2.2e-04 and c_out is 16: almost
+  # pure network output, with the coordinates barely entering. The last step
+  # (times -2.3026 -> sigma 0.0016, c_skip 1.0) is the opposite operating
+  # point, and a scaling difference that hides at one end shows at the other.
+  if [ -f "$HOME/boltz2_6mrr/diff_dump_last.npz" ]; then
+    gate L3.denoise_inject_last boltz2 'corr|per-atom' \
+      dev/oracles/boltz2_denoise_parity.py --dump "$HOME/boltz2_6mrr/diff_dump_last.npz"
+  fi
   # ESMFold2's denoise step against the reference -- see the L1 note above.
   for m in $MODELS; do
     case $m in esmfold2*)

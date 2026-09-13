@@ -256,9 +256,11 @@ which is what the design path needs.
 
 Tracked in `dev/oracles/HOLES.md` with the next measurement named for each:
 
-* **`boltz2`'s denoise step**, 0.207 Å/atom against a 4e-06 noise floor, so
-  real. Its gate's dump holds a single sampler step at the highest-noise end of
-  the schedule.
+* ~~**`boltz2`'s denoise step**, 0.207 Å/atom~~ — **closed 2026-09-13**, and
+  not by work aimed at it: the terminal-atom drop fix removed the atom instead
+  of masking it, and the hole it had been leaving in the flat atom axis was
+  what shifted every attention window. Now 0.0003 Å/atom at the highest-noise
+  step and 0.0000 Å at the last one — both ends of the schedule are gated.
 * **`chai1`'s confidence**, two LOOSE rows, reachable only by injection because
   its modules ship as TorchScript with no callable `forward`.
 * **the protenix lineage's confidence**, 6 CLOSE + 3 LOOSE, most likely native's

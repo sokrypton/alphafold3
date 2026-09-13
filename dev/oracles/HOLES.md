@@ -284,7 +284,24 @@ blocks x 10 recycles amplify float differences, and on 6MRR -- where our fold
 matches native at 0.70 A -- the pair still only correlates 0.960. That mistake
 already cost most of a session once.
 
-## boltz2's denoise: every part at parity, the whole at 0.32 A/atom (2026-09-10)
+## boltz2's denoise -- CLOSED 2026-09-13 (read the postmortem below)
+
+    diff_dump       sigma 4608.0   mean 0.0003 A   max 0.0009 A   corr 1.000000
+    diff_dump_last  sigma 0.0016   mean 0.0000 A   max 0.0000 A   corr 1.000000
+
+Closed by the terminal-atom drop fix, which MASKED an atom where boltz REMOVES
+it -- a hole in the flat atom axis that shifted every attention window after
+it. The section below ruled that out and the reasoning was wrong: it argued
+from the error profile being FLAT rather than rising toward the C-terminus.
+A hole shifts every window, so flat is exactly what it produces. The
+disqualifier that would have worked was printed in the gate header the whole
+time -- the atom count, `ours 574` against `boltz 573`.
+
+`L3.denoise_inject_last` now runs the opposite end of the schedule
+(`diff_dump_last.npz`, which already existed and nothing read), so the
+"re-dump at a different sigma" this section asked for is done.
+
+## (superseded) boltz2's denoise: every part at parity, the whole at 0.32 A/atom (2026-09-10)
 
 L3 closed for seven models (7.65e-06 to 8.63e-04 on x_denoised) and all four
 ESMFold2 releases (exact, 0.00e+00 against the reference). boltz2 is the
