@@ -1,3 +1,77 @@
+# STATE OF PLAY -- the AF2 WHOLES, against DeepMind (2026-09-13)
+
+    dev/oracles/parity_runs/2026-09-13-af2wholes/   L5af2, 18 gates, 18 OK
+
+Two of the three AF2 cells HOLES.md named are now built, and both pass.
+
+### `native_trunk` -- EmbeddingsAndEvoformer end to end
+
+    single 1.00000000   pair 1.00000000   msa_first_row 1.00000000  (max|d| 4.6e-05)
+
+The only cell that reaches the INPUT EMBEDDER and the RECYCLING adds. Module
+gates cover the blocks; nothing covered the wiring -- `preprocess_1d` /
+`preprocess_msa`, `left_single` / `right_single`, the relative-position
+encoding, `prev_pos_linear` / `prev_msa_first_row_norm` / `prev_pair_norm`,
+`extra_msa_activations`, and the order the four stacks run in.
+
+**One structural difference had to be bridged, and it is a design choice, not
+drift.** The original builds `msa_feat` and `extra_msa_feat` INSIDE the module
+from `aatype` and the raw alignment; this package takes them precomputed,
+because a designed MSA has to arrive as a soft one-hot that can carry
+gradients. So native's own `create_msa_feat` and `create_extra_msa_feature` are
+WRAPPED and captured as they run, and ours starts from those exact tensors.
+That is legitimate only because the pipeline producing them is itself gated --
+by the `msa` cell, on both variants. Rebuilding them outside would have meant
+reproducing native's key split by hand, which is the assumption this file has
+been burned by five times.
+
+Templates are off in this cell (three cells of their own), and both stacks are
+truncated to 2 blocks on BOTH sides -- the question is the wiring, and 48
+blocks only amplify.
+
+### `native_structure` -- StructureModule as eight FoldIterations
+
+    traj[7] corr 0.99998938   floor 0.99998653   verdict: BELOW the floor at every iteration
+
+The `ipa` cell is exact on both paths, but a stack of eight iterations is more
+than its attention: each one also runs the backbone update, the transition, the
+sidechain torsion net, and carries a RIGID forward. A term that is wrong only
+after an update cannot be seen by a single-module gate.
+
+**Read the floor line, not the correlation.** Perturb NATIVE's own single by
+1e-6 and run NATIVE again, and that is what the cell can resolve. The assertion
+is that our mean|d| stays below it at every one of the eight iterations.
+
+Two traps on the way, both worth keeping:
+
+  * **The first floor control read max\|d\| 0.000e+00 at every iteration** and
+    looked like proof of infinite resolution. The perturbation was a CONSTANT
+    +1e-6, and `single` goes straight into a LayerNorm, which subtracts the
+    mean -- the one perturbation an LN removes exactly. Random noise instead.
+  * **Run outside the driver, this cell reads corr 0.92.** That is TF32:
+    `JAX_DEFAULT_MATMUL_PRECISION=highest` (which the driver sets and a bare
+    shell does not) takes the same comparison to 0.99998938. An eight-step
+    recurrence is exactly where 10-bit mantissas show up, and the number would
+    have been reported as a finding.
+
+### The third cell is NOT buildable here, and says so
+
+The monomer's TensorFlow row selection needs tensorflow, which is not in this
+venv and is not going to be. We use multimer's gumbel argsort on both paths --
+a deliberate substitution, recorded as one.
+
+Both new cells refuse the `monomer` variant rather than printing a number: a
+monomer checkpoint runs on the MULTIMER graph here, so an end-to-end monomer
+comparison would be two different module trees, not a port. The per-module
+cells cross that boundary one piece at a time, which is what `ipa` is for.
+
+### One more piece of harness rot, fixed
+
+DeepMind's 2021 code calls `jnp.clip(x, a_min=, a_max=)`, which current JAX has
+removed, so `_relative_encoding` died on import-and-run. `_jax_compat()`
+translates the two retired keyword names and nothing else; our side never
+passes them, so it is transparent to the comparison.
+
 # STATE OF PLAY -- the three cells that covered nothing (2026-09-13)
 
 README and HOLES both listed the same three items as "no cell covers this".

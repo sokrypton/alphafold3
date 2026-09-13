@@ -168,9 +168,10 @@ model does not have that module at all — `gate_applies.py` decides, from the
 registry, so an empty cell can never quietly mean "not run".
 
 AlphaFold 2 is graded separately, because none of L0-L4 applies to a sibling
-network with no converter and no shared modules. **L5af2 is 16 gates, all
-green**, and eleven of them compare us to DeepMind's own repository rather than
-to the port we inherited — trunk, extra-MSA, IPA, all five heads, all three
+network with no converter and no shared modules. **L5af2 is 18 gates, all
+green**, and thirteen of them compare us to DeepMind's own repository rather
+than to the port we inherited — the trunk end to end, the structure module as a
+stack of eight fold iterations, extra-MSA, IPA, all five heads, all three
 template paths and the MSA pipeline, on the monomer path and the multimer path
 both. That oracle found three real divergences that comparing against a sibling
 copy never could: a masked template distogram, BERT masking that was
@@ -274,12 +275,12 @@ Tracked in `dev/oracles/HOLES.md` with the next measurement named for each:
   `real_trunk_parity.py` is now the `L1r` level: the input embedder, the trunk
   on a real featurisation, and recycling. `boltz2`'s template V2 was closed on
   2026-09-12 and the bullet was stale.
-* **AlphaFold 2 against DeepMind**: `FoldIteration`/`StructureModule` as wholes
-  and `EmbeddingsAndEvoformer` end-to-end have no cell; the monomer's TensorFlow
-  row selection cannot be compared here (no tensorflow — we use multimer's
-  gumbel argsort on both paths). Two deliberate differences, not unknowns: MSA
-  sizes 512/1024 on both paths where stock is 512/5120 and 508/2048, and 11
-  trunk passes where of3/boltz2 run 4.
+* **AlphaFold 2 against DeepMind**: the two whole-module cells are now built
+  and green (`native_trunk`, `native_structure`); what remains is the monomer's
+  TensorFlow row selection, which cannot be compared here (no tensorflow — we
+  use multimer's gumbel argsort on both paths). Two deliberate differences, not
+  unknowns: MSA sizes 512/1024 on both paths where stock is 512/5120 and
+  508/2048, and 11 trunk passes where of3/boltz2 run 4.
 
 ### Getting the weights
 

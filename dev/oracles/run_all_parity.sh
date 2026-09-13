@@ -434,7 +434,17 @@ if want L5af2; then
   # against DEEPMIND'S OWN CODE, not our lineage -- everything else here
   # compares us to colabdesign2, which is the same port one generation back.
   if [ -d "${AF2_ORIGINAL:-/home/ubuntu/af2_original}" ]; then
-    # the monomer-only and multimer-only pieces
+    # the WHOLES, not just the pieces: the trunk end to end (input embedder,
+    # relative position, the three recycle adds, four stacks in order) and the
+    # structure module as a stack of eight fold iterations. Multimer only --
+    # a monomer checkpoint runs on the multimer graph here, so the monomer
+    # variant of either would compare two module trees rather than the port,
+    # and the gate says N/A rather than printing a number.
+    for _mod in trunk structure; do
+      PYTHONPATH_EXTRA=${AF2_ORIGINAL:-/home/ubuntu/af2_original} \
+        gate "L5af2.native_$_mod" alphafold2_ptm 'corr' \
+        dev/oracles/af2_native_parity.py "$_mod" --variant multimer
+    done
     for _mod in template template_multimer template_1d; do
       PYTHONPATH_EXTRA=${AF2_ORIGINAL:-/home/ubuntu/af2_original} \
         gate "L5af2.native_$_mod" alphafold2_ptm 'corr' \

@@ -30,15 +30,27 @@ Thirteen adapters ignored it and every one of them reported a pass.
 
 ## AlphaFold 2 (L5af2) -- three cells, all named
 
-L5af2 is 16 gates and all 16 pass; eleven compare against DeepMind's own
+L5af2 is 18 gates and all 18 pass; thirteen compare against DeepMind's own
 repository (`AF2_ORIGINAL=~/af2_original`) rather than the port we inherited.
-What that level does NOT cover, with the measurement each needs:
 
-| uncovered | next measurement |
+| was uncovered | now |
 |---|---|
-| `FoldIteration` / `StructureModule` as wholes | the IPA cell is exact on both paths; extend `af2_native_parity.py` with a `structure` module that runs one full iteration on native's own `representations` + `batch` |
-| `EmbeddingsAndEvoformer` end to end | every piece inside it is gated; the whole needs native's `batch` fed to both graphs in one call, which is the same shape as the `evoformer` cell with the embedder in front |
-| the monomer's TensorFlow row selection (`shuffle`) | NOT MEASURABLE HERE -- no tensorflow in the venv. We use multimer's gumbel argsort on both paths, which is a deliberate substitution, not drift |
+| `FoldIteration` / `StructureModule` as wholes | **`native_structure`**, eight iterations, asserted against a 1e-6 floor rather than a correlation: our mean\|d\| below the floor at every iteration, traj[7] corr 0.99998938 vs a floor of 0.99998653. |
+| `EmbeddingsAndEvoformer` end to end | **`native_trunk`**, corr 1.00000000 on single, pair and msa_first_row. Reaches the input embedder, the relative-position encoding and all three recycle adds. Bridged by capturing native's own `create_msa_feat` / `create_extra_msa_feature` -- legitimate because the `msa` cell gates that pipeline on both variants. |
+| the monomer's TensorFlow row selection (`shuffle`) | STILL NOT MEASURABLE HERE -- no tensorflow in the venv. We use multimer's gumbel argsort on both paths, which is a deliberate substitution, not drift. |
+
+Both new cells REFUSE the `monomer` variant: a monomer checkpoint runs on the
+multimer graph here, so an end-to-end monomer comparison would be two module
+trees rather than a port. `ipa` is the cell that crosses that boundary.
+
+Two traps the structure cell turned up, both general:
+
+  * a CONSTANT floor perturbation is removed exactly by the LayerNorm it enters
+    -- the first control read max|d| 0.000e+00 everywhere and looked like proof
+    of infinite resolution. Perturb with noise.
+  * outside the driver the same cell reads corr 0.92, because a bare shell has
+    no `JAX_DEFAULT_MATMUL_PRECISION=highest`. An eight-step recurrence is
+    exactly where TF32's 10-bit mantissa shows up.
 
 Two AF2 differences are deliberate and should be read as decisions, not holes:
 MSA sizes are 512/1024 on both paths where stock is 512/5120 (monomer) and
