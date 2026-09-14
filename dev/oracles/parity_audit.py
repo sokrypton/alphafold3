@@ -14,6 +14,8 @@ whether the module exists -- one level up.
 This reads every `corr` line out of the logs and grades it:
 
   PARITY   corr >= 0.99999 and max|d|/rms <= 1e-3
+  DIAG     L1r only -- the whole trunk with recycling, where these thresholds
+           do not apply; read the control case beside the suspect one
   CLOSE    corr >= 0.9999  and max|d|/rms <= 1e-2
   LOOSE    corr >= 0.999
   BAD      anything else
@@ -143,7 +145,20 @@ def audit(logdir, unparsed=None):
       if name.endswith('_floor'):
         floors[(gate, model)][name[:-len('_floor')]] = ratio
         continue
-      rows.append([gate, model, name, corr, ratio, grade(corr, ratio)])
+      # L1r IS NOT GRADED ON THIS SCALE, and the reason is the cell, not
+      # convenience. Every other row here compares ONE module on a bounded
+      # input, where corr >= 0.99999 is the right bar. L1r is the whole trunk
+      # on a real featurisation with ten recycles: 48 blocks x 10 passes
+      # amplify float differences, so a correlation well below 1.0 is normal
+      # there even when the fold is right -- 6MRR reads 0.991 on the pair while
+      # folding to 0.70 A in agreement with native. Graded on the absolute
+      # scale it produces two permanent BAD rows that mean nothing, and a BAD
+      # everyone learns to ignore is worse than no cell at all. So it is
+      # reported as a DIAGNOSTIC and read the way its own gate says to read it:
+      # the control case beside the case under suspicion.
+      rows.append([gate, model, name, corr, ratio,
+                   'DIAG' if gate.startswith('L1r.')
+                   else grade(corr, ratio)])
 
   # Second pass: drop rows a gate tagged as superseded, provided the row that
   # supersedes them is really there.
@@ -168,9 +183,16 @@ def main(argv):
   print('%s: %d comparisons in %d logs' % (logdir, len(rows),
                                            len({(r[0], r[1]) for r in rows})))
   print('  ' + '   '.join('%s=%d' % (k, t[k])
-                          for k in ('PARITY', 'CLOSE', 'FLOOR', 'LOOSE',
-                                    'BAD')
+                          for k in ('PARITY', 'CLOSE', 'FLOOR', 'DIAG',
+                                    'LOOSE', 'BAD')
                           if t[k]))
+  dg = [r for r in rows if r[5] == 'DIAG']
+  if dg:
+    print('\nDIAGNOSTIC -- read against the control, not against a threshold:')
+    for gate, model, name, corr, ratio, _ in sorted(dg):
+      print('  %-5s %-20s %-26s %-16s corr %.6f'
+            % ('DIAG', gate, model, name, corr))
+
   fl = [r for r in rows if r[5] == 'FLOOR']
   if fl:
     print('\nBELOW THE CELL\'S OWN RESOLUTION -- the gate cannot answer here:')

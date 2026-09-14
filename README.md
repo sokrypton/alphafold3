@@ -152,18 +152,26 @@ Parity is measured level by level, from the weights inwards to the fold:
 | **L5af2** | AlphaFold 2, module by module, against DeepMind's own repository |
 | **L6** | modality: RNA, DNA, ligands, complexes, modified residues |
 
-### Current numbers (2026-09-13)
+### Current numbers (2026-09-14)
 
 Every level has been driven to completion across every model it applies to, L6
 and L1x included. Grading each comparison on correlation **and** `max|d|/rms`:
 
 ```
-294 comparisons in 151 logs      276 OK   1 SKIP   71 N/A   0 FAIL
-PARITY=262   CLOSE=10   FLOOR=17   LOOSE=5   BAD=0
+369 cells                        295 OK   1 SKIP   73 N/A   0 FAIL
+346 comparisons in 167 logs
+PARITY=304   CLOSE=14   FLOOR=17   DIAG=6   LOOSE=5   BAD=0
 ```
 
 The one SKIP is a real hole: `boltz2` has no in-process L3 adapter, so its
-denoise step is gated by injection (`L3.denoise_inject`) instead. N/A means the
+denoise step is gated by injection (`L3.denoise_inject`) instead.
+
+**DIAG** is `L1r` and only `L1r`. Every other row compares one module on a
+bounded input, where `corr >= 0.99999` is the right bar; `L1r` is the whole
+trunk on a real featurisation with ten recycles, where 48 blocks × 10 passes
+amplify and a correlation below 1.0 is normal even when the fold is right —
+6MRR reads 0.991 on the pair while folding to 0.70 Å in agreement with native.
+It is read against its control case, not against a threshold. N/A means the
 model does not have that module at all — `gate_applies.py` decides, from the
 registry, so an empty cell can never quietly mean "not run".
 

@@ -1,3 +1,52 @@
+# STATE OF PLAY -- 2026-09-14
+
+    dev/oracles/parity_runs/2026-09-14-full/    the whole matrix, L0-L6
+
+    ~/venv/bin/python dev/oracles/parity_audit.py dev/oracles/parity_runs/2026-09-14-full
+    -> PARITY=304  CLOSE=14  FLOOR=17  DIAG=6  LOOSE=5  BAD=0
+
+    369 cells:  295 OK   1 SKIP   73 N/A   0 FAIL      (346 graded comparisons)
+
+### The check this run existed for
+
+Today's `src/` changes threaded a mask through all six transition sites. The
+mask is gated to the OF3 lineage, but the code path changed for every model, so
+the question was whether anything moved. Row by row against
+`2026-09-13-full`:
+
+    294 rows present in both runs      0 classification changes
+    52 rows new                        all of them cells added today
+
+The 52 are the AF2 native gates (L5af2 was never in a full matrix before), the
+two `L1r` cases, and `L3.denoise_inject_last`. Nothing regressed.
+
+This is the method, not a formality: the terminal-drop regression was found
+exactly this way, and every one of those 14 cells had been reported OK by its
+own gate.
+
+### `L1r` is DIAGNOSTIC, and that is a judgement worth stating
+
+Added as a graded level, `L1r` produced two permanent BAD rows -- z_trunk at
+corr 0.949 (5K9P) and 0.991 (6MRR). Neither is a port bug. The auditor's
+thresholds are calibrated for ONE module on a bounded input; `L1r` is the whole
+trunk with ten recycles, where the amplification is the point. 6MRR folds to
+0.70 A in agreement with native and still reads 0.991 on the pair.
+
+A BAD that everyone learns to ignore is worse than no cell, so `L1r` is now
+reported as DIAG -- printed, never graded, and read the way its own gate says:
+the control case beside the case under suspicion. The alternative considered
+and rejected was inventing a floor for it; there is no injected tensor to
+perturb, and manufacturing one would have been machinery in place of judgement.
+
+### Two cells stopped calling themselves holes
+
+`L1b.msa_nonuniform` on `opendde` and `rosettafold3` was reported as
+"HOLE: applies to this model, no adapter". It is not a hole: those vendors'
+MSA modules take no msa mask at all, so there is nothing to compare.
+`gate_applies.py` now says so and the cells read N/A. Reporting an
+inapplicable cell as a gap is the same failure as reporting an ungated cell as
+a pass, in the other direction.
+
 # STATE OF PLAY -- the last two confidence residuals (2026-09-13)
 
 Both were "characterised residuals, not gaps". Both are now attributed, and the

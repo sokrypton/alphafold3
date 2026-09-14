@@ -985,6 +985,24 @@ class EvoformerIteration(hk.Module):
       pair_act += _opm()
       msa_act = _msa_update(msa_act)
 
+    # LOCALFOLD ORACLE TAP (env-gated, no effect unless AF3_ESM_TRUNK_TAPS):
+    # the pair after the MSA update and the outer product, before the pair
+    # track. Splits an EvoformerIteration in two so a whole-block residual can
+    # be attributed.
+    # 🔴 io_callback, NOT a direct record: inside layer_stack the value is a
+    # TRACER and numpy conversion raises TracerArrayConversionError.
+    import os as _os
+    if _os.environ.get("AF3_MSA_BLOCK_TAPS"):
+      import jax as _jax, numpy as _np
+      from .evoformer import ESM_TRUNK_TAPS as _T
+      def _rec(name):
+        def _f(v):
+          _T.setdefault(name, []).append(_np.asarray(v))
+          return None
+        return _f
+      for _n, _v in (("msa_block_post_opm", pair_act), ("msa_block_msa_act", msa_act)):
+        _jax.experimental.io_callback(_rec(_n), None, _v, ordered=False)
+
     def _tri_mul_out(z):
       return _pair_dropout(TriangleMultiplication(
           self.config.triangle_multiplication_outgoing,

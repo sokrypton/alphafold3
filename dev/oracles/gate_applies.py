@@ -68,6 +68,15 @@ def reason(gate, model):
   # covered by L1b.prot.
   if gate.startswith('L1b.msa') and model in mc.PROTENIX_FAMILY:
     return 'protenix\'s MSA module is gated by L1b.prot, not L1b.msa'
+  # The NON-UNIFORM cell needs a native module that ACCEPTS an msa mask. rf3's
+  # `MSAModule.forward(f, Z_II, S_inputs_I)` and opendde's
+  # `forward(feats, z, s, pair_mask)` take none -- their forward assumes every
+  # row covers every token -- so there is nothing to compare and the cell is
+  # not applicable. It is NOT a hole: reporting it as one is how a cell that
+  # cannot distinguish anything gets mistaken for one that was never run.
+  if gate == 'L1b.msa_nonuniform' and model in ('rosettafold3', 'opendde'):
+    return ('%s\'s native MSA module takes no msa mask, so a non-uniform one '
+            'cannot be given to it' % model)
 
   ref_covered = {'L1.trunk': 'L1.trunk_ref',
                  'L1.trunk1': 'L1.trunk_ref',
