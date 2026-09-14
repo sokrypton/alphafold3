@@ -202,7 +202,21 @@ want () {  # is this level selected?
   case " $LEVELS " in *" all "*|*" $lvl "*) return 0 ;; *) return 1 ;; esac
 }
 
-LEVELS=${*:-L0 L1 L1b L1r L1t L1x L1d L2 L3 L4 L5af2}
+LEVELS=${*:-L0 L1 L1b L1r L1t L1x L1d L2 L3 L4 L5af2 L7 Lg}
+# The README's model tables drift: it claimed 18 model types while listing 16,
+# because the test that used to keep the two in step was deleted and nothing
+# noticed. The driver already knows the real list, so it checks -- cheaper than
+# a test file, and it runs every time anyone runs the matrix.
+_readme=$ROOT/README.md
+if [ -f "$_readme" ]; then
+  _listed=$(sed -n '/^### AlphaFold 3 lineage/,/^## Parity status/p' "$_readme" \
+    | grep -oE '^\| `[a-z0-9_]+`' | tr -d '|` ' | sort -u | wc -l)
+  _have=$($PY -c 'import sys; sys.path.insert(0,"src")
+from alphafold3.model import model_config as c
+print(len(set(c.MODELS) | set(c.AF2_MODELS)))')
+  [ "$_listed" = "$_have" ] || echo "WARNING: README lists $_listed models, the registry has $_have"
+fi
+
 echo "levels: $LEVELS"
 echo "models: $MODELS"
 echo "logs:   $LOGDIR"
@@ -470,6 +484,31 @@ if want L5af2; then
   fi
   for m in af2_ptm af2_multimer; do
     gate L5af2.template "$m" 'CA-RMSD' dev/oracles/af2_template_check.py "$m"
+  done
+fi
+
+# --- L7: the OUTPUT side. Everything above stops at a coordinate array; this
+#     folds, WRITES the mmCIF, parses it back and compares it to the batch that
+#     produced it. It is the only cell that can see an atom written at the
+#     origin -- model.py logs a warning for an atom it cannot gather and writes
+#     (0,0,0) -- or a pLDDT column on the wrong scale.
+#     It existed and nothing ran it, which is the same rot L1r had: PARITY.md
+#     quotes "the output gate 14/14" off a script with no runner.
+if want L7; then
+  echo "== L7 output side (fold -> write -> parse back)"
+  for m in $MODELS; do
+    gate L7.output "$m" 'OK|FAIL' dev/oracles/output_parity.py "$m"
+  done
+fi
+
+# --- Lg: is the model differentiable in the SEQUENCE? The design path needs
+#     d(loss)/d(soft_seq), and README states "24/24" off this script, which
+#     nothing ran either. Both engines: the af3 graph and AlphaFold 2.
+if want Lg; then
+  echo "== Lg gradient through the sequence"
+  for m in $MODELS af2_ptm af2_multimer; do
+    gate Lg.grad "$m" 'GATE (OK|PASS|FAIL)|differentiable' \
+      dev/oracles/grad_check.py "$m"
   done
 fi
 

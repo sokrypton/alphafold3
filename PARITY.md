@@ -1,3 +1,55 @@
+# STATE OF PLAY -- two more gates that existed and never ran (2026-09-14)
+
+    bash dev/oracles/run_all_parity.sh L7 Lg
+
+    L7.output   42/42 cases   14 models x monomer / ligand / dimer
+    Lg.grad     16/16         14 on the af3 graph + af2_ptm + af2_multimer
+
+Sweeping `dev/oracles/*.py` for scripts the driver never invokes turns up about
+sixty names. Most are exactly what they should be -- dumps, ablations,
+benchmarks, localisers, written for one question and kept for the next. Two
+were not: they are GATES with assertions, and the documentation quoted their
+results.
+
+  * **`output_parity.py` -> `L7`.** The only cell that sees what a USER gets.
+    Everything above it stops at a coordinate array; between that array and the
+    file sit two conversions nothing gated -- the gather into the flat mmCIF
+    layout, which writes (0,0,0) for an atom it cannot find and only LOGS a
+    warning, and the pLDDT column, whose scale is a per-vendor convention.
+    PARITY.md was quoting "the output gate 14/14" off a script with no runner.
+  * **`grad_check.py` -> `Lg`.** README stated "24/24 differentiable" off the
+    same kind of orphan. It is 16/16 -- the 24 counted a model list that lost
+    four protenix variants on 2026-09-08.
+
+### The README claimed 18 model types and listed 16
+
+Found while checking the 24. `fcc0793` added a test to keep the README's model
+tables in step with the registry; that test no longer exists, and the count
+drifted the moment it went. Rather than restore a test file, the DRIVER now
+derives the number from `MODELS + AF2_MODELS` and warns when the README
+disagrees -- five lines, and it runs whenever anyone runs the matrix.
+
+### Three of these in one day, which is the actual finding
+
+`real_trunk_parity` invoked by nothing; `L1b.msa_nonuniform` reaching one
+adapter of fourteen and duplicating the uniform cell for the rest;
+`output_parity` and `grad_check` quoted but unrun; the README's count guard
+deleted. Every one is the same shape -- **a claim of record with nothing
+standing behind it** -- and none of them fails loudly. The matrix being green
+says the gates that run are passing; it says nothing about whether a gate still
+runs, or still measures what its name says. That question needs asking on a
+schedule, and the cheapest version is the sweep at the top of this section.
+
+### A self-inflicted one, recorded because the rule already existed
+
+The first `L7 Lg` run died mid-Lg with `esmfold2_lm300m: command not found` and
+a syntax error. Not a bug: the driver was EDITED while it was running it. Bash
+reads a script incrementally by byte offset, so inserting fifteen lines near
+the top shifted everything below and the running shell resumed inside a token.
+The standing rule -- do not edit an oracle while the matrix runs -- exists for
+exactly this, and L7's results survived only because the gate scripts do the
+work and the driver merely launches them.
+
 # STATE OF PLAY -- 2026-09-14
 
     dev/oracles/parity_runs/2026-09-14-full/    the whole matrix, L0-L6

@@ -33,7 +33,7 @@ https://storage.googleapis.com/alphafold3/af3.bin.zst. Use is subject to these
 
 ## The models this fork runs
 
-**18 model types**, and one `--model` flag decides which forward branches,
+**16 model types**, and one `--model` flag decides which forward branches,
 config shapes, sampler constants and input conventions are used. The same input
 JSON drives all of them.
 
@@ -132,7 +132,7 @@ config defaults like the AF3 lineage, so read the two AF2 numbers in
 
 ## Parity status
 
-This fork runs **18 model types**, and the question for every one is whether it
+This fork runs **16 model types**, and the question for every one is whether it
 reproduces its own vendor's implementation rather than merely producing a
 plausible structure. `PARITY.md` is the full record and `dev/oracles/HOLES.md`
 tracks what is still open; this is the current state.
@@ -151,6 +151,8 @@ Parity is measured level by level, from the weights inwards to the fold:
 | **L5** | an end-to-end fold, scored against an experimental structure |
 | **L5af2** | AlphaFold 2, module by module, against DeepMind's own repository |
 | **L6** | modality: RNA, DNA, ligands, complexes, modified residues |
+| **L7** | the OUTPUT side: fold, write the mmCIF, parse it back, compare |
+| **Lg** | is the model differentiable in the sequence? (the design path) |
 
 ### Current numbers (2026-09-14)
 
@@ -257,8 +259,10 @@ against native.
 however plausible its mean looks. All seven predict error.
 `esmfold2_lm600m` and `esmfold2_lm300m` ship no confidence head by design.
 
-Every model is differentiable in the sequence (24/24, `dev/oracles/grad_check.py`),
-which is what the design path needs.
+Every model is differentiable in the sequence — **16/16**, both engines, the
+`Lg` level (`dev/oracles/grad_check.py`), which is what the design path needs.
+The 24/24 this line used to claim counted a model list that has since lost the
+four extra protenix variants; nothing ran the script, so nothing noticed.
 
 ### What is still open
 
