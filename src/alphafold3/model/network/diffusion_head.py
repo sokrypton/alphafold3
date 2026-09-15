@@ -123,6 +123,8 @@ class SampleConfig(base_config.BaseConfig):
   noise_scale: float = 1.003
   step_scale: float = 1.5
   num_samples: int = 1
+  # Keep every denoising step, not just the last one.
+  return_trajectory: bool = False
   # EDM schedule shape. AF3 hardcoded these as noise_schedule()'s defaults, which
   # silently applied AF3's sampler to every ported family; they are config fields
   # so each model can carry the constants it was trained with (boltz2 wants rho 8,
@@ -737,9 +739,12 @@ def sample(
   # compile tracked the step count in a way that looked inexplicable.
   # (Below `unroll` steps jax's _scan_impl emits no loop at all -- num_trips==1 and
   # remainder==0 -- which is the 3.5s case, not something to design around.)
-  result, _ = hk.scan(apply_denoising_step, init, noise_levels[1:], unroll=1)
+  result, trajectory = hk.scan(apply_denoising_step, init, noise_levels[1:], unroll=1)
   _, positions_out, _ = result
 
   final_dense_atom_mask = jnp.tile(mask[None], (num_samples, 1, 1))
 
-  return {'atom_positions': positions_out, 'mask': final_dense_atom_mask}
+  out = {'atom_positions': positions_out, 'mask': final_dense_atom_mask}
+  if config.return_trajectory:
+    out['trajectory'] = trajectory
+  return out
