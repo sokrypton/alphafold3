@@ -1,3 +1,73 @@
+# STATE OF PLAY -- the published weights were six days behind (2026-09-16)
+
+A user reported "the opendde weights are broken". They were, and so were four
+others. Reproducing the USER path -- download from HF, fold -- against the
+published int8 blobs (the CLI default):
+
+    before   5 FAIL   opendde  boltz2  chai1  esmfold2  esmfold2_fast
+    after    0 FAIL   13/13 fresh download + fold
+
+Each failure was a graph change the upload never followed:
+
+    opendde        single_cond_initial_norm  831 -> 833   (fdb2c91, 2026-09-10)
+    boltz2         gained boltz2_cyclic_conditioning
+    chai1          gained chai1_single_proj_in_structure
+    esmfold2/_fast confidence re-embed s_inputs_norm  447 -> 451
+
+All five folded correctly from the current local blobs, so the code was right
+and only the upload was stale.
+
+### THE MATRIX CANNOT SEE THIS, and that is structural
+
+Every gate resolves weights to `~/ported/<model>` -- hand-converted local blobs.
+Nothing in L0-L7 downloads what a user downloads. `L0.audit` compares the
+CONVERTER against the VENDOR CHECKPOINT; "does the blob on HF match today's
+graph" is a different question with no cell, and it cannot cheaply have one --
+27 GB per run.
+
+So "the matrix is green" and "what a user gets works" are separate claims, and
+this week they were separately true and false.
+
+### The guard existed, and it was DEAD
+
+`dev/audit_published.py`'s decisive check is `applies`: does the blob supply
+exactly what the graph asks for. It imported `converters.shapes`, deleted when
+the shape manifests were purged -- and `shape-manifests-purged` even recorded
+"the stale-blob publish guard went with them". From that commit it raised
+ImportError before doing anything, and nothing invoked it, so nobody saw.
+
+Repaired: manifest columns dropped, `applies` rebuilt on
+`fold_check._fold_setup`, and a run without `--apply` now PRINTS that the
+decisive check did not run rather than a clean verdict that checked nothing.
+
+    PYTHONPATH=src:.:dev/oracles python dev/audit_published.py --apply
+
+### What was published
+
+All 13 models at fp32, fp16 and int8, 43 files, plus the four esmfold2
+`.lm.npz` companions. Verified 39/39 through the real CLI, one blob per
+directory, before the fresh-download sweep above.
+
+**fp16 was never real.** `--weights_precision fp16` has been an accepted flag
+with nothing behind it -- a 404 for all thirteen models. Those blobs had never
+been executed by anything until this verification.
+
+### Two self-inflicted faults, kept because both are cheap to repeat
+
+  * Staging the quantised blobs into `~/ported/<model>/` broke `L7` for two
+    models: the loader picks a blob by FILENAME, so three candidates for one
+    slot is ambiguous. I nearly attributed it to an incoming commit. Stage
+    outside the tree the gates read.
+  * Killing the quantiser left a half-written fp16 blob that looked like a
+    finished one. Staging now writes `.part` and renames.
+
+### The fifth orphaned guard this week
+
+`real_trunk_parity` unrun; `L1b.msa_nonuniform` reaching one adapter of
+fourteen; `output_parity` and `grad_check` quoted but unrun; the README count
+test deleted; and now `audit_published` dead since the manifests went. Four
+were invisible. This one reached a user.
+
 # STATE OF PLAY -- two more gates that existed and never ran (2026-09-14)
 
     bash dev/oracles/run_all_parity.sh L7 Lg
