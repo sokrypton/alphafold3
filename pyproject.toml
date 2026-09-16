@@ -60,7 +60,17 @@ wheel.exclude = [
     "**.cc",
     "**.h",
     "**_test.py",
-    "share/**",
+    # `share/**` IS NOT EXCLUDED HERE, deliberately. libcifpp keeps
+    # components.cif under share/libcifpp, and `alphafold3.cpp` refuses to
+    # import without it ("Could not find the libcifpp components.cif file"), so
+    # excluding it makes a from-source install -- and therefore CI's
+    # `uv run build_data` -- fail before any test runs.
+    #
+    # The exclusion is a PyPI concern, not a packaging one: with the data the
+    # wheel is ~250 MB against PyPI's 100 MB per-file limit. So the RELEASE
+    # workflow adds `share/**` back for the PyPI build and leaves it out for
+    # the fat GitHub-release build. A source install is complete by default,
+    # which is what a source install should be.
     "var/**",
     "lib/**",
     "include/**",

@@ -43,26 +43,36 @@ jobs:
         with:
           fetch-depth: 0
 
-      # The slim wheel excludes share/**, which is where libcifpp keeps
-      # components.cif -- and `alphafold3.cpp` refuses to import without it.
-      # Lifting the exclusion here rather than in pyproject keeps the default
-      # (PyPI) build slim.
-      - name: Bundle libcifpp data
-        if: inputs.bundle_data
-        # python, not `sed -i`: BSD sed on the macOS runner takes the next
-        # argument as a backup suffix, so `sed -i '/pat/d' f` misparses there
-        # while working fine on the Linux runners. That is exactly how this
-        # step failed on macos-arm64 and nowhere else.
+      # SLIM FOR PyPI. `pyproject.toml` deliberately ships the libcifpp data
+      # so a source install (and CI's `uv run build_data`) works; with it the
+      # wheel is ~250 MB and PyPI's per-file limit is 100 MB. So the exclusion
+      # lives here, on the PyPI path only, and the fat build below skips it.
+      #
+      # python, not `sed -i`: BSD sed on the macOS runner takes the next
+      # argument as a backup suffix, so `sed -i` misparses there while working
+      # on the Linux runners -- which is how the first fat build failed on
+      # macos-arm64 and nowhere else.
+      - name: Slim the wheel for PyPI
+        if: ${{ !inputs.bundle_data }}
         run: |
           python - <<'EOF'
           import pathlib
           p = pathlib.Path('pyproject.toml')
-          lines = p.read_text().splitlines(keepends=True)
-          kept = [l for l in lines if '"share/**",' not in l]
-          assert len(kept) == len(lines) - 1, 'expected exactly one share/** line'
-          p.write_text(''.join(kept))
-          print('lifted the share/** exclusion')
+          t = p.read_text()
+          anchor = '    "var/**",'
+          assert anchor in t, 'exclude block not in the expected shape'
+          assert '"share/**",' not in t, 'share/** already excluded'
+          p.write_text(t.replace(anchor, '    "share/**",\n' + anchor, 1))
+          print('excluded share/** for the PyPI build')
           EOF
+
+      # FAT, for environments that cannot provision components.cif themselves
+      # (the Colab notebook). Built as <version>+data so the filename says
+      # which wheel it is -- a fat and a slim wheel with identical names would
+      # be a trap worth more than the eight characters it costs to avoid.
+      - name: Version the fat wheel
+        if: inputs.bundle_data
+        run: |
           v=$(git describe --tags --abbrev=0 | sed 's/^v//')
           echo "SETUPTOOLS_SCM_PRETEND_VERSION=${v}+data" >> "$GITHUB_ENV"
           echo "bundling libcifpp data; version ${v}+data"
