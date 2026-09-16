@@ -59,7 +59,12 @@ wheel.exclude = [
     "**/CMakeLists.txt",
     "**.cc",
     "**.h",
-    "**_test.py"
+    "**_test.py",
+    "share/**",
+    "var/**",
+    "lib/**",
+    "include/**",
+    "etc/**",
 ]
 sdist.include = [
     "LICENSE",
