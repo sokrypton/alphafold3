@@ -4,6 +4,21 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      bundle_data:
+        description: >-
+          Bundle libcifpp's components.cif into the wheel. The slim wheel cannot
+          import without it (`ImportError: Could not find the libcifpp
+          components.cif file`), but bundling takes it from 9 MB to ~250 MB,
+          which is over PyPI's 100 MB per-file limit -- so a fat wheel is a
+          GitHub release asset only. Built as <version>+data so the filename
+          says which one it is.
+        type: boolean
+        default: false
+      release_tag:
+        description: "Attach the fat wheels to this release tag (e.g. v3.1.7)"
+        type: string
+        default: ""
 
 jobs:
   build-wheel:
@@ -27,6 +42,18 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+
+      # The slim wheel excludes share/**, which is where libcifpp keeps
+      # components.cif -- and `alphafold3.cpp` refuses to import without it.
+      # Lifting the exclusion here rather than in pyproject keeps the default
+      # (PyPI) build slim.
+      - name: Bundle libcifpp data
+        if: inputs.bundle_data
+        run: |
+          sed -i '/"share\/\*\*",/d' pyproject.toml
+          v=$(git describe --tags --abbrev=0 | sed 's/^v//')
+          echo "SETUPTOOLS_SCM_PRETEND_VERSION=${v}+data" >> "$GITHUB_ENV"
+          echo "bundling libcifpp data; version ${v}+data"
 
       - name: Build wheels
         uses: pypa/cibuildwheel@v4.2.1
@@ -54,3 +81,29 @@ jobs:
         with: { path: dist, pattern: "wheels-*", merge-multiple: true }
       - uses: pypa/gh-action-pypi-publish@release/v1
         with: { packages-dir: dist }
+
+  github-release:
+    # A fat wheel goes to a GitHub RELEASE, never to PyPI: it is ~250 MB and
+    # PyPI's per-file limit is 100 MB. This is how v3.1.5 was distributed, and
+    # it is what the Colab notebook installs.
+    needs: [build-wheel]
+    if: >-
+      github.event_name == 'workflow_dispatch' && inputs.bundle_data
+      && inputs.release_tag != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with: { path: dist, pattern: "wheels-*", merge-multiple: true }
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ls -la dist
+          gh release view "${{ inputs.release_tag }}" >/dev/null 2>&1 \
+            || gh release create "${{ inputs.release_tag }}" \
+                 --title "${{ inputs.release_tag }}" \
+                 --notes "Wheels with libcifpp's components.cif bundled, for environments that cannot provision it separately (the Colab notebook). The slim wheels of the same version are on PyPI."
+          gh release upload "${{ inputs.release_tag }}" dist/*.whl --clobber
