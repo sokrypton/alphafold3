@@ -37,19 +37,59 @@ _HUB = {
 }
 
 
+# The hub REVISION each converter was written against. This is not belt and
+# braces: on 2026-09-16 biohub published a new ESMFold2 release, it landed in
+# the local hub cache beside the old one, and `checkpoint_dir` returned
+# `sorted(...)[-1]` -- whichever revision hash sorted LAST. `b1324ddf` sorts
+# after `8fc3ff47`, so every esmfold2 gate silently switched to a different
+# upstream model and `derive_dims` died on `KeyError: z_init_1.weight`. Five
+# cells went OK -> SKIP with nothing in our code having changed.
+#
+# The two releases are not variants of one layout: the pinned one is a single
+# `model.safetensors` with flat keys; the new one is six shards, 26 GB, with
+# NESTED keys (`folding_trunk.*`, `esmc.*`, `parcae.*`). Supporting it is a port
+# question, not a path question, so this pins and says so.
+#
+# Only `esmfold2` is exposed to this. The other three variants have directories
+# under ~/esmfold2_variants and never consult the cache -- which is exactly why
+# they stayed green while esmfold2 broke.
+_REVISION = {
+    'esmfold2': '8fc3ff471022fdce52c77030685eb775de0c00a3',
+}
+
+
 def checkpoint_dir(model='esmfold2'):
-  """-> a directory the converter can read, local snapshot or hub cache."""
+  """-> a directory the converter can read, local snapshot or hub cache.
+
+  A pinned revision is preferred; falling back to "whatever is cached" is
+  LOUD, because that fallback is what changed the gate's input underneath it.
+  """
   hub = _HUB[model]
   local = os.path.expanduser('~/esmfold2_variants/%s' % hub)
   if os.path.isdir(local):
     return local
-  hits = sorted(glob.glob(os.path.expanduser(
-      '~/.cache/huggingface/hub/models--biohub--%s/snapshots/*' % hub)))
+  root = os.path.expanduser(
+      '~/.cache/huggingface/hub/models--biohub--%s/snapshots' % hub)
+  want = _REVISION.get(model)
+  if want:
+    pinned = os.path.join(root, want)
+    if os.path.isdir(pinned):
+      return pinned
+  hits = sorted(glob.glob(os.path.join(root, '*')))
   if not hits:
     raise SystemExit(
         'no weights for %s: neither ~/esmfold2_variants/%s nor a hub cache '
         'entry for biohub/%s. Fetch it from ~/venv_esm (which has '
         'huggingface_hub).' % (model, hub, hub))
+  if want:
+    print('WARNING: %s is pinned to revision %s and it is not cached; falling '
+          'back to %s. The cached revisions are %s -- if the keys differ this '
+          'is an UPSTREAM RELEASE CHANGE, not a port bug.'
+          % (model, want[:12], os.path.basename(hits[-1])[:12],
+             [os.path.basename(h)[:12] for h in hits]))
+  elif len(hits) > 1:
+    print('WARNING: %d cached revisions for %s and no pin; using %s'
+          % (len(hits), model, os.path.basename(hits[-1])[:12]))
   return hits[-1]
 
 
