@@ -138,6 +138,39 @@ AF2_PARAMS_URL = ('https://storage.googleapis.com/alphafold/'
                   'alphafold_params_2022-12-06.tar')
 
 
+def _download_parallel(url: str, dst: str, log=print) -> None:
+  """`_download`, but many connections at once where that is possible.
+
+  AF2's parameter tar is 5.3 GB and `urlretrieve` fetches it on ONE connection,
+  which is the bottleneck rather than the link -- it is minutes of a Colab
+  session. ColabFold has used `aria2c -x 16` for this from the start, so prefer
+  it when present and fall back to the single-stream path when it is not.
+
+  Only AF2 needs this. Every converted af3-family blob is 130-350 MB, where the
+  setup cost of a second process is a larger share than the saving.
+  """
+  import shutil
+  import subprocess
+
+  aria = shutil.which('aria2c')
+  if aria:
+    log(f'downloading {url}\n         -> {dst}  (aria2c, 16 connections)')
+    try:
+      subprocess.run(
+          [aria, '-x', '16', '-s', '16', '-k', '1M', '--file-allocation=none',
+           '--summary-interval=10', '--console-log-level=warn',
+           '-d', os.path.dirname(dst) or '.', '-o', os.path.basename(dst), url],
+          check=True)
+      return
+    except (subprocess.CalledProcessError, OSError) as err:
+      # A partial file from a failed run would be resumed as if complete, so
+      # clear it before falling back.
+      log(f'aria2c failed ({err}); falling back to a single connection')
+      if os.path.exists(dst):
+        os.remove(dst)
+  _download(url, dst, log=log)
+
+
 def ensure_af2_params(model_dir: str, download: bool = True, log=print) -> str:
   """-> a directory holding `params_model_*.npz`, downloading them if needed.
 
@@ -158,7 +191,7 @@ def ensure_af2_params(model_dir: str, download: bool = True, log=print) -> str:
         f'enabled to fetch them from {AF2_PARAMS_URL}')
   os.makedirs(model_dir, exist_ok=True)
   tar_path = os.path.join(model_dir, 'alphafold_params.tar')
-  _download(AF2_PARAMS_URL, tar_path, log=log)
+  _download_parallel(AF2_PARAMS_URL, tar_path, log=log)
   log(f'extracting {tar_path}')
   with tarfile.open(tar_path) as tar:
     # filter='data' refuses absolute paths and traversal; it is the default from
