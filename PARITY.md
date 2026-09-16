@@ -1,3 +1,47 @@
+# STATE OF PLAY -- five cells changed with nothing of ours changing (2026-09-16)
+
+The full matrix re-run after the day's fixes read 0 FAIL, and both stale L7
+cells cleared. But six SKIPs where the previous run had three, and five of the
+new ones were esmfold2:
+
+    L1x.zinit  L2.conditioning  L2.atom_encoder  L2.atom_decoder  L3.denoise_ref
+    all OK on 2026-09-14, all SKIP on 2026-09-16
+
+`derive_dims` was dying on `KeyError: z_init_1.weight`. Nothing in our code
+touched esmfold2 that day. **The gate's INPUT changed.**
+
+`esmfold2_dumps.checkpoint_dir` returned `sorted(glob(snapshots/*))[-1]` --
+whichever revision hash sorted LAST in the local hub cache. biohub published a
+new ESMFold2 release at 17:48, it landed beside the old one, and `b1324ddf`
+sorts after `8fc3ff47`, so every esmfold2 gate switched upstream models
+mid-session:
+
+    8fc3ff47  2026-09-08  ONE model.safetensors, flat keys incl. z_init_1.weight
+    b1324ddf  2026-09-16  SIX shards, 26 GB, nested: folding_trunk.* esmc.* parcae.*
+
+Those are not two layouts of one release; the second is a different model line.
+Supporting it is a PORT question, not a path question, so `_REVISION` pins what
+the converter was written against and the fallback is now loud -- it names the
+cached revisions and says outright that differing keys mean an upstream change
+rather than a port bug.
+
+**Only esmfold2 could hit this.** The other three variants have directories
+under `~/esmfold2_variants` and never consult the cache, which is why they
+stayed green -- an accident that localised the cause in one command.
+
+### The class of bug, which is new to this file
+
+Every other harness fault recorded here is ours: a gate that never ran, a knob
+that reached one adapter, a predicate a later convention falsified. This one is
+a DEPENDENCY MOVING. The matrix pins our code and our weights, and pinned
+neither the vendor checkpoints nor their revisions -- so a gate could be
+measuring a different model tomorrow than today and the only symptom was a
+KeyError that reads like a harness bug.
+
+Worth noting what saved it: comparing classifications BETWEEN runs. The cell
+did not fail, it SKIPPED, and a skip is easy to read as "always been that way".
+It was caught because the previous run said OK.
+
 # STATE OF PLAY -- boltz2 tore apart a modified residue: TWO bugs (2026-09-16)
 
 `~/BOLTZ2_PTM.md`, from the LocalFold side, reported boltz2 inflating a
