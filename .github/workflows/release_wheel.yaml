@@ -84,6 +84,13 @@ jobs:
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
           CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
           CIBW_BUILD_VERBOSITY: 1
+          # SETUPTOOLS_SCM_PRETEND_VERSION is exported to $GITHUB_ENV by the
+          # step above, but cibuildwheel builds Linux wheels INSIDE a manylinux
+          # container and the host environment does not follow it in. Without
+          # this the fat wheels came out as 3.1.8.dev4+ge07472ed8 -- setuptools_scm
+          # falling back to `git describe` inside the container -- instead of
+          # 3.1.7+data.
+          CIBW_ENVIRONMENT_PASS_LINUX: SETUPTOOLS_SCM_PRETEND_VERSION
 
       - name: Upload wheels as workflow artifact
         uses: actions/upload-artifact@v4
@@ -109,8 +116,12 @@ jobs:
     # PyPI's per-file limit is 100 MB. This is how v3.1.5 was distributed, and
     # it is what the Colab notebook installs.
     needs: [build-wheel]
+    # `always()`: the first fat build had both Linux legs green and macOS red,
+    # and this job was SKIPPED -- so three good wheels were thrown away over an
+    # unrelated platform. Upload whatever built; the missing platform is
+    # visible from what is attached.
     if: >-
-      github.event_name == 'workflow_dispatch' && inputs.bundle_data
+      always() && github.event_name == 'workflow_dispatch' && inputs.bundle_data
       && inputs.release_tag != ''
     runs-on: ubuntu-latest
     permissions:
