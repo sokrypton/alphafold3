@@ -1,33 +1,56 @@
 name: Build and release wheel
 
 on:
-  release:
-    types: [created]
+  push:
+    tags: ["v*"]
   workflow_dispatch:
 
 jobs:
   build-wheel:
-    name: Build manylinux wheels (cp312, cp313)
-    runs-on: ubuntu-latest
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runs_on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runs_on: ubuntu-latest
+            build: "cp312-manylinux_x86_64 cp313-manylinux_x86_64 cp314-manylinux_x86_64"
+          - name: linux-aarch64
+            runs_on: ubuntu-24.04-arm
+            build: "cp312-manylinux_aarch64 cp313-manylinux_aarch64 cp314-manylinux_aarch64"
+          - name: macos-arm64
+            runs_on: macos-14
+            build: "cp312-macosx_arm64 cp313-macosx_arm64 cp314-macosx_arm64"
 
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Build wheels
-        uses: pypa/cibuildwheel@v2.23.0
+        uses: pypa/cibuildwheel@v4.2.1
         env:
-          CIBW_BUILD: cp312-manylinux_x86_64 cp313-manylinux_x86_64
+          CIBW_BUILD: ${{ matrix.build }}
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+          CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
           CIBW_BUILD_VERBOSITY: 1
 
       - name: Upload wheels as workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wheels
-          path: wheelhouse/alphafold3_open-*.whl
+          name: wheels-${{ matrix.name }}
+          path: wheelhouse/alphafold3_colabfold-*.whl
 
-      - name: Upload wheels to release
-        if: github.event_name == 'release'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release upload ${{ github.ref_name }} wheelhouse/alphafold3_open-*.whl --clobber
+  publish:
+    needs: [build-wheel]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: dist, pattern: "wheels-*", merge-multiple: true }
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with: { packages-dir: dist }

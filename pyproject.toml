@@ -9,24 +9,18 @@ requires = [
 build-backend = "scikit_build_core.build"
 
 [project]
-name = "alphafold3-open"
+name = "alphafold3-colabfold"
 dynamic = ["version"]
 requires-python = ">=3.12"
 readme = "README.md"
 license = {file = "LICENSE"}
 dependencies = [
-    "absl-py>=2.3.1",
-    "dm-haiku==0.0.17",
     # AlphaFold 2's own config objects and tree utilities. Only alphafold3.af2
     # needs these; the AF3-family graph does not touch them.
     "dm-tree",
     "ml_collections",
     "etils[epath]",
-    "jax==0.10.2",
-    "jax[cuda12]==0.10.2; sys_platform != 'darwin'",
     "numpy",
-    "rdkit==2025.9.4",
-    "tokamax==0.0.12",
     "tqdm",
     "zstandard",
 ]
@@ -40,6 +34,14 @@ gcsfs = [
 [dependency-groups]
 dev = [
     "pytest>=6.0",
+]
+runtime = [
+    "absl-py>=2.3.1",
+    "dm-haiku==0.0.17",
+    "jax==0.10.2",
+    "jax[cuda12]==0.10.2; sys_platform != 'darwin'",
+    "rdkit==2025.9.4",
+    "tokamax==0.0.12",
 ]
 
 [tool.uv]
@@ -71,8 +73,9 @@ metadata.version.provider = "scikit_build_core.metadata.setuptools_scm"
 fallback_version = "3.1.5"
 
 [tool.cibuildwheel]
-build = "cp3*-manylinux_x86_64"
+build = "cp3*"
 manylinux-x86_64-image = "manylinux_2_28"
+manylinux-aarch64-image = "manylinux_2_28"
 
 [project.scripts]
 build_data = "alphafold3.build_data:build_data"
