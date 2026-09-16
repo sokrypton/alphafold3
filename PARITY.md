@@ -1,3 +1,67 @@
+# STATE OF PLAY -- boltz2 tore apart a modified residue: TWO bugs (2026-09-16)
+
+`~/BOLTZ2_PTM.md`, from the LocalFold side, reported boltz2 inflating a
+phosphoserine's own bonds 2.7x while genuine Boltz-2 places it correctly.
+Reproduced exactly (mean ratio 2.688, bond rms 2.97 A against the brief's 2.705
+/ 2.99) and it was two independent faults, one in the harness and one real.
+
+    reported            2.688 / 2.97 A
+    harness fixed       0.880 / 0.395 A
+    port bug fixed      0.985 / 0.080 A      genuine Boltz-2: 0.986-1.011 / 0.043-0.076
+
+### 1. The harness featurised boltz2 in AF3's convention (not shipped)
+
+`fold_check` took `flatten_non_standard_residues`'s default (True), so it
+ATOMISED the modified residue -- one token per atom -- and then `model_features`
+marked those tokens UNK + modified. boltz2's tokenizer expects ONE token holding
+every atom, and `ptm-modifications` already recorded that **nothing moves until
+all three agree**: one token, UNK restype, modified flag. Two of three is not
+two thirds of the way there.
+
+`run_alphafold.py` has always passed the knob, so the SHIPPED path was correct
+and this half of the number was the probe measuring a path no user runs. The
+brief said "I only measured -- I have not read the port's code", which was the
+right disclaimer: half the signal was the measurement.
+
+The general defect is worse than this one case. `fold_check` is what every gate
+uses, and it was ignoring a PER-MODEL featurisation knob that the CLI honours --
+so any boltz2 gate touching a modified residue was grading the wrong batch.
+
+### 2. `drop_atoms` removed a real phosphate oxygen (shipped, and the user's bug)
+
+boltz2 declares `drop_atoms=('OXT', 'OP3', 'O3P')`. For phosphoserine **O3P is
+a sidechain atom**, and dropping it leaves the phosphate under-coordinated: P-O1P
+and P-O2P collapse to ~0.5 of ideal. Keeping it reads 0.987.
+
+`_drop_atoms_by_name`'s comment block ALREADY warned about this in those words --
+"**O3P is a sidechain atom of phosphoserine**" -- and guarded it with
+`n_real[t] > 1`, on the reasoning that "an ATOMISED residue is one token per
+atom, so it is identified here by its token holding exactly one real atom".
+
+That guard is correct under AF3's convention and **false under boltz2's**, which
+is the convention `modified_as_one_token` exists to create. One token holding ten
+atoms has `n_real = 10`, so the guard read it as a standard residue and dropped
+the O3P the comment was written to protect. The two knobs were added
+independently and interact.
+
+Now tested on `is_modified` -- set by `_mark_modified_residues`, which apply()
+runs BEFORE the drop -- with the atom count kept as the fallback for models that
+do not set it.
+
+**The lesson is not "remember O3P".** It is that a hazard can be known, written
+down in the right place, and guarded by a predicate that a LATER convention
+falsifies. The comment aged into being wrong while reading as right.
+
+### Checks the brief asked for, all met
+
+    boltz2 SEP           0.985 / 0.0803 A     was 2.688 / 2.97
+    alphafold3 control   0.998 / 0.1397 A     brief: 0.988 / 0.143, unmoved
+    L7 boltz2/of3/chai1  601 / 917 / 1202 atoms, unchanged -- the OXT drop still works
+    L6 ptm_5k9p boltz2   best 2.020 -> 1.510, mean 2.119 -> 1.853
+
+The fold improving is a consequence, not the target: a phosphate that is no
+longer missing an oxygen.
+
 # STATE OF PLAY -- the published weights were six days behind (2026-09-16)
 
 A user reported "the opendde weights are broken". They were, and so were four

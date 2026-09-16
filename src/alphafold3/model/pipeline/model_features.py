@@ -181,10 +181,28 @@ def _drop_atoms_by_name(batch, names):
   # 605 -- we removed the OXT correctly and then removed a phosphate oxygen that
   # native keeps. An ATOMISED residue is one token per atom, so it is identified
   # here by its token holding exactly one real atom.
+  # `n_real > 1` alone identifies an atomised residue ONLY under AF3's
+  # convention, where each of its atoms is its own token. boltz2 keeps a
+  # modified residue as ONE token holding every atom
+  # (`modified_as_one_token`), so that test called phosphoserine a standard
+  # residue and dropped its O3P -- the hazard this comment block already
+  # warned about, reintroduced through the other knob. `is_modified` is set by
+  # `_mark_modified_residues`, which apply() runs BEFORE this, so the flag is
+  # the reliable test and the atom count is the fallback for models that do not
+  # set it.
+  #
+  # Measured on ACSEFGHIKLWY with SEP at 3, boltz2: dropping O3P leaves the
+  # phosphate under-coordinated and collapses P-O1P and P-O2P to ~0.5 of ideal
+  # (mean bond ratio 0.880, rms 0.395 A). Keeping it reads 0.987 at rms 0.080,
+  # which is genuine Boltz-2's own 0.986-1.011 at 0.043-0.076.
   n_real = ref_mask.sum(axis=1)
+  modified = np.asarray(batch.get('is_modified',
+                                  np.zeros(ref_mask.shape[0], bool))
+                        ).astype(bool).reshape(-1)
   drop = {(t, a) for t in range(ref_mask.shape[0])
           for a in range(n_atoms_per_token)
-          if ref_mask[t, a] and decode(chars[t, a]) in names and n_real[t] > 1}
+          if ref_mask[t, a] and decode(chars[t, a]) in names
+          and n_real[t] > 1 and not modified[t]}
   if not drop:
     return 0
   flat = {t * n_atoms_per_token + a for t, a in drop}

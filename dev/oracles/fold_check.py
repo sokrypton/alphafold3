@@ -70,8 +70,25 @@ def _fold_setup(model_name, seq, model_dir=None, templates=None, seed=0,
   # `buckets` is normally None here -- every gate runs the exact token count.
   # Passing one is how a PADDED batch is built, which is what `--buckets` does
   # in every real run and what no L0-L4 cell exercises.
+  #
+  # `flatten_non_standard_residues` IS PER MODEL and this harness used to take
+  # the default. AF3 atomises a modified residue (one token per atom, parent
+  # restype); boltz2's tokenizer instead sends it to a third branch -- ONE token
+  # holding every atom, res_type UNK, modified=True -- and `model_features`
+  # supplies only the second and third of those, because the single token is
+  # produced HERE, at featurisation time. Taking the default therefore built
+  # boltz2 an atomised residue and then marked it UNK+modified: a combination it
+  # never saw in training, and nothing moves until all three agree.
+  #
+  # Measured on ACSEFGHIKLWY with SEP at 3: mean bond ratio 2.688 at bond rms
+  # 2.97 A with the default, ~1.0 with the knob. `run_alphafold.py` has always
+  # passed it, so this was a HARNESS defect and the shipped path was correct --
+  # which is why it surfaced as a bug report against the port.
   featurise = lambda **kw: featurisation.featurise_input(
-      fold_input=fold_input, ccd=ccd, buckets=buckets, **kw)
+      fold_input=fold_input, ccd=ccd, buckets=buckets,
+      flatten_non_standard_residues=not spec.featurise.get(
+          'modified_as_one_token', False),
+      **kw)
   batch = featurise()[0]
   # ESMFold2 folds from ESM-C's hidden states. LM_PAIR names an npz written by
   # converters.esmfold2_lm; without it the model still folds, just without its
