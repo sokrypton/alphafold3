@@ -49,8 +49,20 @@ jobs:
       # (PyPI) build slim.
       - name: Bundle libcifpp data
         if: inputs.bundle_data
+        # python, not `sed -i`: BSD sed on the macOS runner takes the next
+        # argument as a backup suffix, so `sed -i '/pat/d' f` misparses there
+        # while working fine on the Linux runners. That is exactly how this
+        # step failed on macos-arm64 and nowhere else.
         run: |
-          sed -i '/"share\/\*\*",/d' pyproject.toml
+          python - <<'EOF'
+          import pathlib
+          p = pathlib.Path('pyproject.toml')
+          lines = p.read_text().splitlines(keepends=True)
+          kept = [l for l in lines if '"share/**",' not in l]
+          assert len(kept) == len(lines) - 1, 'expected exactly one share/** line'
+          p.write_text(''.join(kept))
+          print('lifted the share/** exclusion')
+          EOF
           v=$(git describe --tags --abbrev=0 | sed 's/^v//')
           echo "SETUPTOOLS_SCM_PRETEND_VERSION=${v}+data" >> "$GITHUB_ENV"
           echo "bundling libcifpp data; version ${v}+data"
