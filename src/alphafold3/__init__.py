@@ -18,3 +18,18 @@
 # https://github.com/google-deepmind/alphafold3/blob/main/WEIGHTS_TERMS_OF_USE.md
 
 """An implementation of the inference pipeline of AlphaFold 3."""
+
+# libcifpp refuses to load without a components.cif, and the FULL dictionary is
+# 518 MB raw / 120 MB zipped -- 92% of a wheel that is otherwise 10 MB. So a
+# minimal one (the standard residues) ships at constants/libcifpp and is pointed
+# at HERE, before anything imports alphafold3.cpp and the extension loads.
+#
+# Set LIBCIFPP_DATA_DIR yourself to use the full dictionary; `setdefault` means
+# an existing value always wins. Anything beyond the standard residues comes
+# from files.rcsb.org via `constants.ccd_fetch`, or from the input's userCCD.
+import os as _os
+
+_bundled = _os.path.join(_os.path.dirname(__file__), 'constants', 'libcifpp')
+if _os.path.exists(_os.path.join(_bundled, 'components.cif')):
+  _os.environ.setdefault('LIBCIFPP_DATA_DIR', _bundled)
+del _os, _bundled
