@@ -57,13 +57,12 @@ def build_data():
   )
   ccd_codes_path = out_root.joinpath('ccd_codes.txt')
 
-  # REFUSE THE MINIMAL DICTIONARY. `alphafold3/__init__` points
-  # LIBCIFPP_DATA_DIR at a 35-component components.cif so the package imports
-  # without shipping 120 MB, and build_data resolves cif_path through that same
-  # variable -- so without this check it would happily write a 35-component
-  # ccd.pickle and every ligand outside it would fail later, far from here.
-  # The count is the test because the path is not: a user's own full dictionary
-  # may live anywhere.
+  # REFUSE A PARTIAL DICTIONARY. cif_path is resolved through
+  # LIBCIFPP_DATA_DIR, so it is whatever the caller pointed at -- and pointing
+  # it at a handful of components (as `constants.ccd_fetch` writes for one
+  # input) would write a matching ccd.pickle, after which every component
+  # outside that set fails far from the cause. The count is the test because
+  # the path cannot be: a full dictionary may live anywhere.
   n_components = sum(
       1 for line in open(cif_path, encoding='utf-8', errors='replace')
       if line.startswith('data_'))

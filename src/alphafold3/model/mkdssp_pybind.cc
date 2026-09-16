@@ -34,31 +34,49 @@ namespace alphafold3 {
 namespace py = pybind11;
 
 void RegisterModuleMkdssp(pybind11::module m) {
-  if (!getenv("LIBCIFPP_DATA_DIR")) {
+  // THE CHECK IS DEFERRED TO THE CALL, not done at registration.
+  //
+  // This used to `throw` here when no components.cif could be found, which
+  // failed the import of the WHOLE `alphafold3.cpp` module -- including
+  // `cif_dict`, which featurisation needs -- because DSSP's registration could
+  // not find a dictionary. DSSP is used in exactly one place
+  // (`confidences.predicted_disorder`, the AlphaFold-RSA disorder metric) and
+  // nothing in the fold path touches it, so an absent dictionary made the
+  // package unusable for a reason that had nothing to do with what was being
+  // run. `pip install alphafold3-colabfold` then died with
+  // "Could not find the libcifpp components.cif file" on `from
+  // alphafold3.common import folding_input`.
+  //
+  // So: look for the dictionary, remember whether it was found, and raise only
+  // if someone actually calls get_dssp.
+  bool have_data = getenv("LIBCIFPP_DATA_DIR") != nullptr;
+  if (!have_data) {
     py::module site = py::module::import("site");
     py::list paths = py::cast<py::list>(site.attr("getsitepackages")());
     // Find the first path that contains the libcifpp components.cif file.
-    bool found = false;
     for (const auto& py_path : paths) {
       auto path_str =
           std::filesystem::path(py::cast<absl::string_view>(py_path)) /
           "share/libcifpp/components.cif";
       if (std::filesystem::exists(path_str)) {
         setenv("LIBCIFPP_DATA_DIR", path_str.parent_path().c_str(), 0);
-        found = true;
+        have_data = true;
         break;
       }
-    }
-    if (!found) {
-      throw py::type_error(
-        "Could not find the libcifpp components.cif file.");
     }
   }
   m.def(
       "get_dssp",
-      [](absl::string_view mmcif, int model_no,
+      [have_data](absl::string_view mmcif, int model_no,
          int min_poly_proline_stretch_length,
          bool calculate_surface_accessibility) {
+        if (!have_data) {
+          throw py::value_error(
+              "get_dssp needs libcifpp's components.cif, which was not found. "
+              "Set LIBCIFPP_DATA_DIR to a directory containing it (the wwPDB "
+              "CCD, ~518 MB). Only DSSP-derived outputs need it -- folding "
+              "does not.");
+        }
         cif::file cif_file(mmcif.data(), mmcif.size());
         dssp result(cif_file.front(), model_no, min_poly_proline_stretch_length,
                     calculate_surface_accessibility);
