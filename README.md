@@ -331,16 +331,22 @@ storage format, not a compute one — inference is unchanged. Measured cost on
 rosettafold3: within sampling noise on protein, ligand, RNA and a D/L peptide,
 with stereochemistry unchanged.
 
-| `--model` | fp32 | int8 |
-|---|---|---|
-| `chai1` | 1.20 GB | 0.27 GB |
-| `protenix2` | 1.33 GB | 0.19 GB |
-| `rosettafold3` | 1.36 GB | 0.27 GB |
-| `openfold3` | 1.37 GB | 0.26 GB |
-| `openbind0` | 1.31 GB | 0.27 GB |
-| `intellifold2` | 1.77 GB | 0.63 GB |
-| `boltz2` | 1.88 GB | 0.38 GB |
-| `opendde` | 2.47 GB | 0.35 GB |
+`fp16` is the same idea at half precision, and it now exists for every model —
+it had been an accepted flag with nothing published behind it, so
+`--weights_precision fp16` was a 404 for all thirteen until 2026-09-16.
+
+| `--model` | fp32 | fp16 | int8 |
+|---|---|---|---|
+| `chai1` | 1.20 GB | 0.60 GB | 0.27 GB |
+| `protenix1` | 0.99 GB | 0.47 GB | 0.14 GB |
+| `protenix2` | 1.33 GB | 0.61 GB | 0.19 GB |
+| `rosettafold3` | 1.36 GB | 0.65 GB | 0.27 GB |
+| `openfold3` | 1.37 GB | 0.68 GB | 0.27 GB |
+| `openbind0` | 1.31 GB | 0.68 GB | 0.27 GB |
+| `intellifold2` | 1.77 GB | 1.37 GB | 0.63 GB |
+| `boltz2` | 1.88 GB | 0.94 GB | 0.36 GB |
+| `opendde` | 2.47 GB | 0.94 GB | 0.35 GB |
+| `esmfold2` | 0.87 GB | 0.43 GB | 0.18 GB |
 
 Each precision caches to its own directory (`<model>-int8/`), so asking for one
 never silently gets you the other, and switching back to a form you already have
