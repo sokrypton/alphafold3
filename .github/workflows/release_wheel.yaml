@@ -52,9 +52,22 @@ jobs:
       # argument as a backup suffix, so `sed -i` misparses there while working
       # on the Linux runners -- which is how the first fat build failed on
       # macos-arm64 and nowhere else.
+      # Editing pyproject.toml leaves the checkout DIRTY, and setuptools_scm
+      # renders a dirty tree as a LOCAL version -- `3.1.9.dev0+g7f79c77bd.d20260916`
+      # even with the v3.1.8 tag on HEAD. PyPI rejects any local version with
+      # `400 The use of local versions ... is not allowed`, which is how v3.1.8
+      # built three green platforms and published nothing. So on a tag push,
+      # pin the version to the tag before touching the file.
       - name: Slim the wheel for PyPI
         if: ${{ !inputs.bundle_data }}
         run: |
+          case "$GITHUB_REF" in
+            refs/tags/v*)
+              v="${GITHUB_REF#refs/tags/v}"
+              echo "SETUPTOOLS_SCM_PRETEND_VERSION=${v}" >> "$GITHUB_ENV"
+              echo "pinned version ${v} from the tag"
+              ;;
+          esac
           python - <<'EOF'
           import pathlib
           p = pathlib.Path('pyproject.toml')
