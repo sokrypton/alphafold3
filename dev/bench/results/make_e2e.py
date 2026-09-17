@@ -22,10 +22,10 @@ ROOT = pathlib.Path(__file__).resolve().parents[3]
 OVERRIDES = {
     'model': os.environ.get('E2E_MODEL', 'openbind0'),
     'protein': 'PIAQIHILEGRSDEQKETLIREVSEAISRSLDAPLTSVRVIITEMAKGHFGIGGELASK',
-    'msa_mode': 'single_sequence',
+    'msa_mode': os.environ.get('E2E_MSA', 'single_sequence'),
     'num_diffusion_samples': 1,
     'num_recycles': 3,
-    'ligand_ccd': 'ATP',
+    'ligand_ccd': os.environ.get('E2E_LIGAND', 'ATP'),
     'jobname': 'e2e',
 }
 
