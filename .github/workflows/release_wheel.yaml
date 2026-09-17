@@ -4,22 +4,6 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
-    inputs:
-      bundle_data:
-        description: >-
-          Bundle libcifpp's components.cif into the wheel. The slim wheel cannot
-          import without it (`ImportError: Could not find the libcifpp
-          components.cif file`), but bundling takes it from 9 MB to ~250 MB,
-          which is over PyPI's 100 MB per-file limit -- so a fat wheel is a
-          GitHub release asset only. Built as <version>+data so the filename
-          says which one it is.
-        type: boolean
-        default: false
-      release_tag:
-        description: "Attach the fat wheels to this release tag (e.g. v3.1.7)"
-        type: string
-        default: ""
-
 jobs:
   build-wheel:
     name: ${{ matrix.name }}
@@ -59,7 +43,6 @@ jobs:
       # built three green platforms and published nothing. So on a tag push,
       # pin the version to the tag before touching the file.
       - name: Slim the wheel for PyPI
-        if: ${{ !inputs.bundle_data }}
         run: |
           case "$GITHUB_REF" in
             refs/tags/v*)
@@ -79,17 +62,6 @@ jobs:
           print('excluded share/** for the PyPI build')
           EOF
 
-      # FAT, for environments that cannot provision components.cif themselves
-      # (the Colab notebook). Built as <version>+data so the filename says
-      # which wheel it is -- a fat and a slim wheel with identical names would
-      # be a trap worth more than the eight characters it costs to avoid.
-      - name: Version the fat wheel
-        if: inputs.bundle_data
-        run: |
-          v=$(git describe --tags --abbrev=0 | sed 's/^v//')
-          echo "SETUPTOOLS_SCM_PRETEND_VERSION=${v}+data" >> "$GITHUB_ENV"
-          echo "bundling libcifpp data; version ${v}+data"
-
       - name: Build wheels
         uses: pypa/cibuildwheel@v4.2.1
         env:
@@ -100,9 +72,8 @@ jobs:
           # SETUPTOOLS_SCM_PRETEND_VERSION is exported to $GITHUB_ENV by the
           # step above, but cibuildwheel builds Linux wheels INSIDE a manylinux
           # container and the host environment does not follow it in. Without
-          # this the fat wheels came out as 3.1.8.dev4+ge07472ed8 -- setuptools_scm
-          # falling back to `git describe` inside the container -- instead of
-          # 3.1.7+data.
+          # this the wheels came out as 3.1.8.dev4+ge07472ed8 -- setuptools_scm
+          # falling back to `git describe` inside the container.
           CIBW_ENVIRONMENT_PASS_LINUX: SETUPTOOLS_SCM_PRETEND_VERSION
 
       - name: Upload wheels as workflow artifact
@@ -123,33 +94,3 @@ jobs:
         with: { path: dist, pattern: "wheels-*", merge-multiple: true }
       - uses: pypa/gh-action-pypi-publish@release/v1
         with: { packages-dir: dist }
-
-  github-release:
-    # A fat wheel goes to a GitHub RELEASE, never to PyPI: it is ~250 MB and
-    # PyPI's per-file limit is 100 MB. This is how v3.1.5 was distributed, and
-    # it is what the Colab notebook installs.
-    needs: [build-wheel]
-    # `always()`: the first fat build had both Linux legs green and macOS red,
-    # and this job was SKIPPED -- so three good wheels were thrown away over an
-    # unrelated platform. Upload whatever built; the missing platform is
-    # visible from what is attached.
-    if: >-
-      always() && github.event_name == 'workflow_dispatch' && inputs.bundle_data
-      && inputs.release_tag != ''
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v4
-        with: { path: dist, pattern: "wheels-*", merge-multiple: true }
-      - name: Attach to the release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          ls -la dist
-          gh release view "${{ inputs.release_tag }}" >/dev/null 2>&1 \
-            || gh release create "${{ inputs.release_tag }}" \
-                 --title "${{ inputs.release_tag }}" \
-                 --notes "Wheels with libcifpp's components.cif bundled, for environments that cannot provision it separately (the Colab notebook). The slim wheels of the same version are on PyPI."
-          gh release upload "${{ inputs.release_tag }}" dist/*.whl --clobber
