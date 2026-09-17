@@ -182,9 +182,10 @@ def staged_fold(config, params, *, jit=True, chunk=10,
     todo = levels[1:]
     t = 0
     while t < len(todo):
-      chunk = todo[t:t + k]
+      window = todo[t:t + k]   # NOT `chunk`: that is the parameter, and
+                              # assigning it here made it local and unbound
       out = step(params, rng_key, batch, carry, key, dcarry,
-                 chunk if len(chunk) > 1 else chunk[0],
+                 window if len(window) > 1 else window[0],
                  st['pair_cond'], atom_arrays)
       dcarry = out['carry']
       if on_step is not None:
@@ -198,7 +199,7 @@ def staged_fold(config, params, *, jit=True, chunk=10,
         # `sigma` is passed because guidance strength is normally scaled by
         # the noise level: the same nudge is a large move early and a
         # distortion late.
-        steered = on_step(t, dcarry[1], float(chunk[-1]))
+        steered = on_step(t, dcarry[1], float(window[-1]))
         if steered is not None:
           steered = jnp.asarray(steered, dcarry[1].dtype)
           if steered.shape != dcarry[1].shape:
@@ -211,12 +212,12 @@ def staged_fold(config, params, *, jit=True, chunk=10,
         # make_denoising_body: the state is a cloud early (830 A radius of
         # gyration at step 0) where the prediction is already a structure.
         frames = out.get('denoised', out['atom_positions'])
-        if len(chunk) > 1:
-          for j in range(len(chunk)):
+        if len(window) > 1:
+          for j in range(len(window)):
             on_frame('diffusion', t + j, frames[j])
         else:
           on_frame('diffusion', t, frames)
-      t += len(chunk)
+      t += len(window)
     return score(params, rng_key, batch, carry, key, (dcarry[1],))
 
   return run
