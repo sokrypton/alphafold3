@@ -789,9 +789,9 @@ class ModelRunner:
     def run(rng_key, batch, on_frame=None):
       carry, key = None, None
       for i in range(n):
-        carry, key = trunk(params, rng_key, batch, carry, key)
+        carry, key, contacts = trunk(params, rng_key, batch, carry, key)
         if on_frame:
-          on_frame('recycle', i, carry)
+          on_frame('recycle', i, {'embeddings': carry, 'contacts': contacts})
 
       st = cond(params, rng_key, batch, carry, key)
       dcarry, levels = st['init'], st['noise_levels']

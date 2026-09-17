@@ -839,7 +839,14 @@ class Model(hk.Module):
       # 32-residue peptide, which is not noise. Threading the same key through
       # makes the two paths draw identically.
       embeddings, key = recycle_body(None, (embeddings, key))
-      return embeddings, key  # pyrefly: ignore[bad-return]
+      # The contact map comes back with every pass, so the caller can show the
+      # trunk converging. The distogram head already computes contact_probs,
+      # and it is one linear over the pair representation -- cheap enough to
+      # run per pass, which is why the head lives with the trunk at all.
+      dgram = distogram_head.DistogramHead(
+          self.config.heads.distogram, self.global_config
+      )(batch, embeddings, return_distogram=False)
+      return embeddings, key, dgram['contact_probs']  # pyrefly: ignore[bad-return]
     if stage == 'heads':
       if recycle_carry is None:
         raise ValueError("stage='heads' needs the trunk's embeddings")

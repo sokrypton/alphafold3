@@ -36,20 +36,33 @@ if spec.featurise:
         model_dir=os.path.expanduser('~/ported/openbind0'), esm=None,
         has_msa=True, fold_input=fi, cyclic=False)
 from alphafold3.model.components import utils as m_utils
+raw_batch = batch          # keeps the string arrays the output layout needs
 batch = jax.device_put(jax.tree.map(
     __import__('jax').numpy.asarray,
     m_utils.remove_invalidly_typed_feats(batch)))
 
 frames = []
 t0 = time.time()
+import sys as _s; _s.path.insert(0, '/home/ubuntu/alphafold3/dev/live')
+import live_frames as LF
+bobj = LF.as_batch(raw_batch)
+prev_cm = [None]
+cifs = []
 def on_frame(kind, i, data):
     if kind == 'recycle':
-        # a cheap scalar per pass, to show the trunk converging
-        print(f'  [{time.time()-t0:5.1f}s] recycle {i}: '
-              f'|pair| {float(np.abs(np.asarray(data["pair"])).mean()):.4f}', flush=True)
+        cm = LF.contact_map(data['contacts'])
+        d = LF.recycle_distance(prev_cm[0], cm); prev_cm[0] = cm
+        print(f'  [{time.time()-t0:5.1f}s] recycle {i}: contact map {cm.shape}'
+              f'  mean {cm.mean():.4f}  moved {d:.5f}', flush=True)
     else:
         xyz = np.asarray(data)[0]
         frames.append(xyz)
+        if i in (0, 9, 19):
+            cif = LF.frame_cif(xyz, bobj, name=f'f{i}')
+            cifs.append(cif)
+            print(f'      -> mmCIF frame {i}: {len(cif)} chars, '
+                  f'{sum(1 for l in cif.splitlines() if l.startswith("ATOM"))} atoms',
+                  flush=True)
         if i % 4 == 0 or i >= 18:
             print(f'  [{time.time()-t0:5.1f}s] diffusion step {i}: '
                   f'radius of gyration {np.sqrt(((xyz - xyz.mean(0))**2).sum(-1).mean()):.2f} A',
