@@ -88,13 +88,13 @@ for ax, m in zip(axes.flat, models):
             ax.annotate(f'{r:.1f}x', (l, NATIVE[m][l]), textcoords='offset points',
                         xytext=(4, 6), fontsize=8, color='#d62728')
     ax.set_title(m + (f'  ({NOTE[m]})' if m in NOTE else ''), fontsize=10)
-    ax.set_yscale('log'); ax.set_xscale('log', base=2)
     ax.set_xticks(L); ax.set_xticklabels(L)
+    ax.set_ylim(bottom=0)
     ax.grid(alpha=.3, which='both'); ax.legend(fontsize=8)
 for ax in axes[1]:
     ax.set_xlabel('tokens')
 for ax in axes[:, 0]:
-    ax.set_ylabel('steady-state seconds (log)')
+    ax.set_ylabel('steady-state seconds')
 fig.suptitle('Steady-state runtime, ours vs native (A10, forward-only, 3 recycles)',
              fontsize=12)
 fig.tight_layout()
