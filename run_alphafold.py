@@ -1112,7 +1112,18 @@ def predict_structure(
   # what the existing ranking already sorts and what keeps the output layout
   # (`seed-N_sample-M`) unchanged; giving each model its own ResultsForSeed
   # would have five entries claiming one seed and colliding on the directory.
+  # getattr, because an AF3 runner genuinely has no such property -- one set of
+  # weights -- and 1 is the right answer for it. But if af2_num_models was
+  # ASKED for and the property is missing, that is a stale library rather than
+  # a model with one set, and it must not be silently answered with 1: that is
+  # how --af2_num_models=5 ran a single model and said nothing.
   n_sets = getattr(model_runner, 'num_param_sets', 1)
+  if int(_AF2_NUM_MODELS.value) > 1 and not hasattr(model_runner,
+                                                    'num_param_sets'):
+    raise RuntimeError(
+        '--af2_num_models > 1 needs a runner that reports num_param_sets; '
+        f'{type(model_runner).__name__} does not. On Colab this means the '
+        'overlay did not carry af2/inference.py -- check dev/live/overlay.txt.')
   n_models = max(1, min(int(_AF2_NUM_MODELS.value), n_sets))
   if n_models > 1:
     print(f'Using {n_models} of {n_sets} AlphaFold 2 parameter sets; each is a '

@@ -1,0 +1,14 @@
+# Files the Colab notebook overlays onto the published wheel, one per line,
+# relative to src/. The notebook FETCHES THIS LIST rather than hard-coding it:
+# twice now a library file changed on this branch and the notebook's own list
+# did not, which fails as an ImportError (staged.py) or, worse, silently --
+# af2/inference.py grew `num_param_sets`, the wheel's copy did not have it, and
+# `getattr(runner, 'num_param_sets', 1)` quietly returned 1, so
+# --af2_num_models=5 ran one model and nothing said why.
+#
+# Keep in step with `git diff --name-only main colab -- src`.
+alphafold3/model/model.py
+alphafold3/model/staged.py
+alphafold3/model/network/diffusion_head.py
+alphafold3/model/atom_layout/atom_layout.py
+alphafold3/af2/inference.py
