@@ -75,7 +75,7 @@ for line in open(OURS):
         pass
 
 models = [m for m in NATIVE if m in ours and NATIVE[m]]
-fig, axes = plt.subplots(2, 3, figsize=(15, 8.5), sharex=True)
+fig, axes = plt.subplots(2, 3, figsize=(15, 9))
 for ax, m in zip(axes.flat, models):
     L = sorted(ours[m])
     y = [statistics.mean(ours[m][l]) for l in L]
@@ -90,12 +90,17 @@ for ax, m in zip(axes.flat, models):
     ax.set_title(m + (f'  ({NOTE[m]})' if m in NOTE else ''), fontsize=10)
     ax.set_xticks(L); ax.set_xticklabels(L)
     ax.set_ylim(bottom=0)
-    ax.grid(alpha=.3, which='both'); ax.legend(fontsize=8)
-for ax in axes[1]:
+    # Labels on EVERY panel, not just the outer ones. Each panel has its own y
+    # scale -- protenix2 tops out at 60 s where boltz2 tops out at 40 -- so a
+    # shared label down the side invites reading two panels as one axis.
     ax.set_xlabel('tokens')
-for ax in axes[:, 0]:
     ax.set_ylabel('steady-state seconds')
-fig.suptitle('Steady-state runtime, ours vs native (A10, forward-only, 3 recycles)',
+    ax.tick_params(labelbottom=True, labelleft=True)
+    ax.grid(alpha=.3, which='both'); ax.legend(fontsize=8)
+
+fig.suptitle('Steady-state runtime, ours (jax) vs native (A10, forward-only, '
+             '3 recycles, 1 sample)\n'
+             'red labels are native/ours; lower is faster',
              fontsize=12)
 fig.tight_layout()
 fig.savefig(OUT, dpi=130)

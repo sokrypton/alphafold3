@@ -675,7 +675,13 @@ def make_denoising_body(denoising_step, mask, config, global_config, chai):
     else:
       positions_out = positions_noisy + config.step_scale * d_t * grad
 
-    return (key, positions_out, noise_level), positions_out
+    # ys carries BOTH: the state this step hands on, and the denoiser's own
+    # prediction of the clean structure (x0). For display you want the second.
+    # The state is the noisy trajectory -- at step 0 it has a radius of
+    # gyration of 830 A, i.e. a cloud -- while the prediction is already a
+    # compact structure that sharpens as sigma falls. Showing the state makes
+    # the animation look like noise for most of its length.
+    return (key, positions_out, noise_level), (positions_out, positions_denoised)
 
   return apply_denoising_step
 
@@ -779,7 +785,8 @@ def sample(
   # compile tracked the step count in a way that looked inexplicable.
   # (Below `unroll` steps jax's _scan_impl emits no loop at all -- num_trips==1 and
   # remainder==0 -- which is the 3.5s case, not something to design around.)
-  result, trajectory = hk.scan(apply_denoising_step, init, noise_levels[1:], unroll=1)
+  result, (trajectory, _denoised_traj) = hk.scan(
+      apply_denoising_step, init, noise_levels[1:], unroll=1)
   _, positions_out, _ = result
 
   final_dense_atom_mask = jnp.tile(mask[None], (num_samples, 1, 1))

@@ -645,16 +645,17 @@ class Model(hk.Module):
           self.global_config.model == 'chai1')
       body = hk.vmap(body, in_axes=(0, None), split_rng=not hk.running_init())
       if jnp.ndim(noise_level) == 0:
-        carry, positions = body(carry, noise_level)
-        return {'carry': carry, 'atom_positions': positions}
+        carry, (positions, denoised) = body(carry, noise_level)
+        return {'carry': carry, 'atom_positions': positions,
+                'denoised': denoised}
       # A CHUNK of steps in one dispatch. One step per call left ~21 ms of
       # dispatch on top of the step's own ~12 ms, which is most of live mode's
       # remaining cost; scanning k steps divides that by k while `ys` still
       # returns every intermediate frame, so nothing is lost to the animation.
       # unroll=1 for the same reason sample() uses it: one body copy, so
       # compile does not track the chunk length.
-      carry, traj = hk.scan(body, carry, noise_level, unroll=1)
-      return {'carry': carry, 'atom_positions': traj}
+      carry, (traj, denoised) = hk.scan(body, carry, noise_level, unroll=1)
+      return {'carry': carry, 'atom_positions': traj, 'denoised': denoised}
 
     sample = diffusion_head.sample(
         denoising_step=denoising_step,
@@ -884,9 +885,14 @@ class Model(hk.Module):
           self.config.heads.distogram, self.global_config
       )(batch, embeddings, return_distogram=False)
       return embeddings, key, dgram['contact_probs']  # pyrefly: ignore[bad-return]
-    if stage == 'heads':
+    # 'score' belongs here too. It fell through to the branch below, which
+    # means it RAN THE WHOLE RECYCLE LOOP AGAIN -- four more trunk passes and a
+    # second compile of the trunk -- before reaching the confidence head. That
+    # is why scoring appeared to take 31.8 s on a cold T4 while the confidence
+    # head itself is 81 ms warm: almost none of it was the head.
+    if stage in ('heads', 'score'):
       if recycle_carry is None:
-        raise ValueError("stage='heads' needs the trunk's embeddings")
+        raise ValueError(f"stage={stage!r} needs the trunk's embeddings")
       embeddings = {**embeddings, **recycle_carry}
     elif hk.running_init():
       embeddings, _ = recycle_body(None, (embeddings, key))

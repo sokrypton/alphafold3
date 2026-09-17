@@ -858,7 +858,10 @@ class ModelRunner:
                   f'{dcarry[1].shape} (num_samples, num_tokens, max_atoms, 3)')
             dcarry = (dcarry[0], steered, dcarry[2])
         if on_frame:
-          frames = out['atom_positions']
+          # The DENOISER'S PREDICTION, not the noisy state it hands on. See
+          # make_denoising_body: the state is a cloud early (830 A radius of
+          # gyration at step 0) where the prediction is already a structure.
+          frames = out.get('denoised', out['atom_positions'])
           if len(chunk) > 1:
             for j in range(len(chunk)):
               on_frame('diffusion', t + j, frames[j])
