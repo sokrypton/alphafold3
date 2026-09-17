@@ -49,28 +49,31 @@ void RegisterModuleMkdssp(pybind11::module m) {
   //
   // So: look for the dictionary, remember whether it was found, and raise only
   // if someone actually calls get_dssp.
-  bool have_data = getenv("LIBCIFPP_DATA_DIR") != nullptr;
-  if (!have_data) {
+  // Looked up ON CALL, not here. The dictionary can appear AFTER import --
+  // alphafold3.constants.ccd_fetch writes a small one built from the same
+  // rcsb fetch it uses for the CCD pickles -- and a value captured at
+  // registration would never see it.
+  auto find_data = []() -> bool {
+    if (getenv("LIBCIFPP_DATA_DIR") != nullptr) return true;
     py::module site = py::module::import("site");
     py::list paths = py::cast<py::list>(site.attr("getsitepackages")());
-    // Find the first path that contains the libcifpp components.cif file.
     for (const auto& py_path : paths) {
       auto path_str =
           std::filesystem::path(py::cast<absl::string_view>(py_path)) /
           "share/libcifpp/components.cif";
       if (std::filesystem::exists(path_str)) {
         setenv("LIBCIFPP_DATA_DIR", path_str.parent_path().c_str(), 0);
-        have_data = true;
-        break;
+        return true;
       }
     }
-  }
+    return false;
+  };
   m.def(
       "get_dssp",
-      [have_data](absl::string_view mmcif, int model_no,
+      [find_data](absl::string_view mmcif, int model_no,
          int min_poly_proline_stretch_length,
          bool calculate_surface_accessibility) {
-        if (!have_data) {
+        if (!find_data()) {
           throw py::value_error(
               "get_dssp needs libcifpp's components.cif, which was not found. "
               "Set LIBCIFPP_DATA_DIR to a directory containing it (the wwPDB "

@@ -83,8 +83,20 @@ def fetch_cifs(codes, max_workers: int = 16, log=None) -> dict[str, str]:
   return out
 
 
-def write_pickles(codes, ccd_pickle_path, sets_pickle_path, log=print):
-  """Fetch `codes` and write the two pickles `alphafold3.constants` reads."""
+def write_pickles(codes, ccd_pickle_path, sets_pickle_path, log=print,
+                  libcifpp_dir=None):
+  """Fetch `codes` and write the two pickles `alphafold3.constants` reads.
+
+  `libcifpp_dir`, if given, also gets a `components.cif` holding the same
+  fetched components. libcifpp needs one for DSSP, and without it every fold
+  logs `rasa calculation failed` once per sample and `fraction_disordered`
+  comes back 0.0 -- a value, not a gap, which then enters the ranking score at
+  weight 0.5. The full dictionary is 518 MB; this one is 0.26 MB and is built
+  from what we already downloaded. Point it at `<site-packages>/share/libcifpp`
+  and `get_dssp` finds it on its own.
+  """
+  import os
+
   from alphafold3.constants.converters import chemical_component_sets_gen
   from alphafold3.cpp import cif_dict
 
@@ -100,5 +112,11 @@ def write_pickles(codes, ccd_pickle_path, sets_pickle_path, log=print):
   sets = chemical_component_sets_gen.find_ions_and_glycans_in_ccd(ccd)
   with open(sets_pickle_path, 'wb') as f:
     pickle.dump(sets, f)
+  if libcifpp_dir is not None:
+    os.makedirs(libcifpp_dir, exist_ok=True)
+    dst = os.path.join(libcifpp_dir, 'components.cif')
+    with open(dst, 'w') as f:
+      f.write(merged)
+    log(f'wrote {dst} ({os.path.getsize(dst) / 1e6:.2f} MB) so DSSP works')
   log(f'wrote {ccd_pickle_path} ({len(ccd)} components) and {sets_pickle_path}')
   return ccd

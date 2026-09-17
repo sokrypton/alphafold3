@@ -25,19 +25,26 @@ OVERRIDES = {
     'msa_mode': 'single_sequence',
     'num_diffusion_samples': 1,
     'num_recycles': 3,
+    'ligand_ccd': 'ATP',
     'jobname': 'e2e',
 }
 
 CHECK = '''
 import glob, json, os
 cifs = sorted(glob.glob(f'{job_dir}/**/*.cif', recursive=True))
-atoms = sum(1 for l in open(cifs[0]) if l.startswith('ATOM')) if cifs else 0
-print('CIFS:', len(cifs), 'ATOMS:', atoms)
+text = open(cifs[0]).read() if cifs else ''
+# HETATM too: a CCD ligand is never an ATOM record, so counting only those
+# made an ATP run indistinguishable from a protein-only one (448 both times).
+atoms = sum(1 for l in text.splitlines() if l.startswith(('ATOM', 'HETATM')))
+het = sum(1 for l in text.splitlines() if l.startswith('HETATM'))
+print('CIFS:', len(cifs), 'ATOMS:', atoms, 'HETATM:', het)
+ligand_ok = (not ccd_codes) or all(c in text for c in ccd_codes)
+print('LIGANDS:', ccd_codes, 'present' if ligand_ok else 'MISSING')
 conf = sorted(glob.glob(f'{job_dir}/**/*summary_confidences.json', recursive=True))
 if conf:
   print('PLDDT/PTM:', {k: v for k, v in json.load(open(conf[0])).items()
                        if k in ('ptm', 'iptm', 'fraction_disordered')})
-print('RESULT:', 'PASS' if (cifs and atoms > 100) else 'FAIL')
+print('RESULT:', 'PASS' if (cifs and atoms > 100 and ligand_ok) else 'FAIL')
 '''
 
 
