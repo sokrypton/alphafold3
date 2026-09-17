@@ -31,3 +31,18 @@ openfold3	768	NATIVE-OPENFOLD3 L=768 WARM first  92.59s | steady 92.153s | all [
 chai1	384	FAILED
 chai1	512	FAILED
 chai1	768	FAILED
+boltz2	64	FAILED
+rosettafold3	64	NATIVE-RF3 first  19.64s | steady 10.952s | featurise  0.328s | steady-minus-featurise 10.624s | all [19.64, 10.89, 10.95]
+protenix2	64	NATIVE-PROTENIX2 L=64 kernels=torch WARM first  10.85s | steady 10.295s | all [10.85, 10.26, 10.24, 10.35]
+opendde	64	NATIVE-OPENDDE L=64 kernels=torch WARM first   7.59s | steady  7.242s | all [7.59, 7.25, 7.24, 7.25]
+openfold3	64	NATIVE-OPENFOLD3 L=64 WARM first  11.69s | steady 10.832s | all [11.69, 10.8, 10.87, 10.79]
+boltz2	128	FAILED
+boltz2	192	FAILED
+boltz2	256	FAILED
+boltz2	384	FAILED
+boltz2	512	FAILED
+boltz2	768	FAILED
+rosettafold3	768	OOM
+chai1	384	FAILED
+chai1	512	FAILED
+chai1	768	FAILED
