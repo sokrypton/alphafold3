@@ -99,6 +99,26 @@ Verified, in this order, each one on the published artefact:
    10, CCD 0), fold 69 s, 2 structures, ptm 0.59. The cell label said 90 s and
    now says 35.
 
+The notebook SHIPS FROM `sokrypton/ColabFold`, not from this repo:
+https://colab.research.google.com/github/sokrypton/ColabFold/blob/main/ColabFold2_preview.ipynb
+That copy is kept current there; this repo's copy is the source of truth for
+the code and the badge now points at ColabFold. Before copying one over the
+other, DIFF THE CELL SOURCES -- the ColabFold copy carried a `style="cartoon"`
+change that a blind copy would have reverted.
+
+GPU matrix, all PASS on a cold VM with 3.1.10 and an ATP ligand:
+
+    GPU   cc    attention              inference  total
+    T4    7.5   xla                    58 s       81 s
+    A100  8.0   triton                 37 s       50 s
+    L4    8.9   xla (Ada fallback)     43 s       56 s
+
+The A100 row is the one that mattered: the jax pin was dropped on T4-only
+evidence and tokamax's Triton kernels are datacenter-only, so nothing had ever
+run that path. `fraction_disordered` is 0.03 on T4 and 0.0 on the other two --
+1/32 residues, not a DSSP failure; there were zero `rasa calculation failed`
+lines on any of the three.
+
 Three failures worth not rediscovering:
 
 * **A tag push published nothing.** The slim step rewrites pyproject.toml,
