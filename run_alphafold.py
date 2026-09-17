@@ -715,7 +715,11 @@ class ModelRunner:
 
     apply_fn = forward_fn.apply
     if not _NOJIT.value:
-      apply_fn = jax.jit(apply_fn, device=self._device)
+      # No `device=`: jit's backend/device arguments are deprecated, and they
+      # were redundant here -- run_inference already device_puts the batch on
+      # self._device, and jax runs a computation where its committed inputs
+      # are. Passing it only bought a DeprecationWarning on every run.
+      apply_fn = jax.jit(apply_fn)
     # before anything is traced -- see _preinit_tokamax_context
     self._preinit_tokamax_context()
     return functools.partial(apply_fn, self.model_params)
