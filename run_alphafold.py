@@ -758,7 +758,8 @@ class ModelRunner:
             recycle_carry=carry, stage=name, diffusion_state=diffusion_state)
       return fn.apply if _NOJIT.value else jax.jit(fn.apply)
 
-    trunk, cond, score = _stage('trunk'), _stage('diff_cond'), _stage('score')
+    embed, trunk = _stage('embed'), _stage('trunk')
+    cond, score = _stage('diff_cond'), _stage('score')
 
     def _split_static(tree):
       """Arrays cross the jit boundary; everything else is closed over.
@@ -914,12 +915,11 @@ class ModelRunner:
       # haiku rng (first argument) is held constant on purpose: with
       # use_dropout=False nothing in the trunk draws from it, and advancing it
       # per pass would be a second, gratuitous difference from the fused path.
-      # key=None on the FIRST pass, so it is drawn with hk.next_rng_key() off
-      # the same haiku rng the fused path uses -- otherwise the first pass
-      # starts from a different key and the whole trajectory diverges. Costs
-      # one extra trace (None vs an array is a different signature), which is
-      # still independent of the recycle count.
-      carry, key = None, None
+      # The initial carry comes from its own cheap stage, so all n trunk calls
+      # share one jit signature. key=None here so the first key is drawn with
+      # hk.next_rng_key() off the same haiku rng the fused path uses --
+      # otherwise the trajectory diverges from a normal fold.
+      carry, key = embed(params, rng_key, batch, None, None)
       for i in range(n):
         carry, key = trunk(params, rng_key, batch, carry, key)
         if _TRUNK_CALLBACK[0] is not None:

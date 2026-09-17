@@ -858,6 +858,16 @@ class Model(hk.Module):
       # loop). The evoformer cannot see the iteration index inside a fori_loop,
       # so flag the first pass in the carry and let it substitute z_init/s_init.
       embeddings['recycle_first'] = jnp.ones((), jnp.float32)
+    # The INITIAL carry: zeros for the recycled tensors plus target_feat, which
+    # is the atom-level input embedding and does not depend on the recycle
+    # state. Its own trace is cheap -- no trunk in it -- and it exists so every
+    # trunk call can pass a FULL carry. Before this the first call passed None
+    # and the rest passed a dict, which is two jit signatures for one
+    # computation: measured 24.9 s for the first trace and 19.8 s for the
+    # second, on a cold T4.
+    if stage == 'embed':
+      return embeddings, key  # pyrefly: ignore[bad-return]
+
     # ONE PASS, jitted once and driven from Python (stage='trunk'). The recycle
     # count then never reaches the graph at all -- one executable serves any
     # number of passes, and the caller sees the embeddings between them, which
