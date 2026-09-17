@@ -810,7 +810,7 @@ class ModelRunner:
     self._preinit_tokamax_context()
     params = self.model_params
 
-    def run(rng_key, batch, on_frame=None):
+    def run(rng_key, batch, on_frame=None, on_step=None):
       carry, key = None, None
       for i in range(n):
         carry, key, contacts = trunk(params, rng_key, batch, carry, key)
@@ -825,7 +825,11 @@ class ModelRunner:
       # back, so the animation is unchanged and the per-call overhead is paid
       # once per chunk instead of once per step. The tail chunk is a second
       # (and last) shape, so at most two executables.
-      k = max(1, _LIVE_CHUNK[0])
+      # Steering can only act where the host sees the coordinates, so a chunk
+      # of k steps means steering every k steps. With a steer callback the
+      # chunk drops to 1; the cost of that is now 8% rather than the 14x it was
+      # before the trace was memoised.
+      k = 1 if on_step else max(1, _LIVE_CHUNK[0])
       todo = levels[1:]
       t = 0
       while t < len(todo):
@@ -834,6 +838,25 @@ class ModelRunner:
                    chunk if len(chunk) > 1 else chunk[0],
                    st['pair_cond'], atom_arrays)
         dcarry = out['carry']
+        if on_step is not None:
+          # STEERING. The callback sees the coordinates this step produced and
+          # returns them changed, or None to leave them alone; what it returns
+          # is what the next step denoises. This is the seam a restraint, a
+          # symmetry average or a pull towards a pocket goes through, and none
+          # of it touches the graph -- which is the argument for driving the
+          # loop from Python even where the animation is not wanted.
+          #
+          # `sigma` is passed because guidance strength is normally scaled by
+          # the noise level: the same nudge is a large move early and a
+          # distortion late.
+          steered = on_step(t, dcarry[1], float(chunk[-1]))
+          if steered is not None:
+            steered = jnp.asarray(steered, dcarry[1].dtype)
+            if steered.shape != dcarry[1].shape:
+              raise ValueError(
+                  f'on_step returned {steered.shape}, expected '
+                  f'{dcarry[1].shape} (num_samples, num_tokens, max_atoms, 3)')
+            dcarry = (dcarry[0], steered, dcarry[2])
         if on_frame:
           frames = out['atom_positions']
           if len(chunk) > 1:

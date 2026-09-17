@@ -99,3 +99,73 @@ def frame_positions(positions, batch):
   return (np.asarray(xyz[valid], dtype=np.float32),
           [str(c) for c in chains[valid]],
           [int(r) for r in resids[valid]])
+
+
+# ---------------------------------------------------------------- steering
+#
+# `live_model()`'s run(..., on_step=f) calls f(step, positions, sigma) after
+# every denoise step and denoises whatever it returns. The examples below are
+# deliberately simple: the point is that a restraint is a few lines of numpy
+# against the coordinates, with no change to the graph and no recompile.
+#
+# Guidance is scaled by SIGMA. The sampler is still at hundreds of angstroms of
+# noise early on, where a 1 A nudge is nothing, and near zero at the end, where
+# the same nudge is a distortion. Scaling by sigma/sigma_max applies the push
+# while the structure is still forming and lets it go as it sets.
+
+
+def pull_together(token_a, token_b, target=8.0, strength=0.5, batch=None):
+  """Nudge two tokens' representative atoms towards `target` angstroms apart.
+
+  A distance restraint, which is the simplest thing anyone actually wants from
+  steering. Returns a callback for `on_step`.
+  """
+  import numpy as np
+  idx, _ = rep_atom_index(batch)
+  ia, ib = int(idx[token_a]), int(idx[token_b])
+
+  def steer(step, positions, sigma):
+    pos = np.array(positions)                 # (samples, tokens, atoms, 3)
+    a = pos[:, token_a, ia]
+    b = pos[:, token_b, ib]
+    d = np.linalg.norm(b - a, axis=-1, keepdims=True)
+    unit = (b - a) / np.maximum(d, 1e-6)
+    # how far each end has to move, halved because both move
+    shift = ((d - target) * 0.5 * strength
+             * min(1.0, sigma / 16.0))[..., None, :]
+    # WHOLE TOKENS, not the representative atom alone. Moving one atom of one
+    # residue is undone by the next denoise step -- measured: pulling two CAs
+    # from 39.2 A towards 6 A at full strength ended at 38.7 A, i.e. nothing.
+    # Translating every atom of the residue is a restraint the score has to
+    # argue with rather than simply repair.
+    pos[:, token_a] = pos[:, token_a] + unit[:, None, :] * shift[:, 0]
+    pos[:, token_b] = pos[:, token_b] - unit[:, None, :] * shift[:, 0]
+    return pos
+
+  return steer
+
+
+def symmetrise(n_copies, batch=None):
+  """Average the coordinates of `n_copies` equal-length chains.
+
+  C_n symmetry the crude way -- average in the frame of the first copy. Enough
+  to show that a whole-structure operation is the same kind of callback.
+  """
+  import numpy as np
+
+  def steer(step, positions, sigma):
+    pos = np.array(positions)
+    n_tok = pos.shape[1]
+    per = n_tok // n_copies
+    if per * n_copies != n_tok:
+      return None                             # not equal chains; leave it alone
+    block = pos[:, :per * n_copies].reshape(pos.shape[0], n_copies, per,
+                                            *pos.shape[2:])
+    mean = block.mean(axis=1, keepdims=True)
+    w = min(1.0, sigma / 16.0)
+    block = block * (1 - w) + mean * w
+    pos[:, :per * n_copies] = block.reshape(pos.shape[0], per * n_copies,
+                                            *pos.shape[2:])
+    return pos
+
+  return steer
