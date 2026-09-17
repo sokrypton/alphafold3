@@ -594,6 +594,16 @@ _TRUNK_CALLBACK = [None]
 # slowest.
 _LIVE_CHUNK = [10]
 
+_NUM_MSA = flags.DEFINE_integer(
+    'num_msa',
+    None,
+    'MSA rows the trunk subsamples to (default 1024, keeping the query at row'
+    ' 0). Featurisation always produces a fixed 16384-row buffer, so this is'
+    ' about what the trunk READS, not what is downloaded. Barely a speed dial'
+    ' -- 1 vs 1024 measured 0.4% at 512 tokens -- but it lowers memory, and a'
+    ' different value is a different compiled executable.',
+)
+
 _NOJIT = flags.DEFINE_bool(
     'nojit',
     False,
@@ -629,6 +639,7 @@ def make_model_config(
     return_embeddings: bool = False,
     return_distogram: bool = False,
     model_name: str = 'alphafold3',
+    num_msa: int | None = None,
 ) -> model.Model.Config:
   """Returns a model config with some defaults overridden.
 
@@ -645,6 +656,17 @@ def make_model_config(
   config.return_embeddings = return_embeddings
   config.return_distogram = return_distogram
   model_registry.get(model_name).configure(config)
+  # HOW MANY MSA ROWS THE TRUNK SEES. Featurisation always hands over a fixed
+  # 16384-row buffer (pipeline.msa_crop_size) and the trunk subsamples to this,
+  # keeping the query at row 0. Lowering it is the one MSA knob a user can turn.
+  #
+  # Measured, and worth saying before anyone reaches for it as a speed dial:
+  # sweeping 1 / 256 / 1024 moved steady-state runtime by 0.4% at 512 tokens.
+  # It changes MEMORY and it changes the compiled executable -- a different
+  # value is a different shape, so it misses a compile cache built at another.
+  if num_msa is not None:
+    config.evoformer.num_msa = int(num_msa)
+
   return config
 
 
@@ -1770,6 +1792,7 @@ def main(_):
               return_embeddings=_SAVE_EMBEDDINGS.value,
               return_distogram=_SAVE_DISTOGRAM.value,
               model_name=model_name,
+              num_msa=_NUM_MSA.value,
           ),
           device=device,
           model_dir=model_dir,
