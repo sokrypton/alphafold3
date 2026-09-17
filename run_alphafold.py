@@ -812,7 +812,12 @@ class ModelRunner:
     params = self.model_params
 
     def run(rng_key, batch, on_frame=None, on_step=None):
-      carry, key = None, None
+      # The initial carry comes from its own cheap stage, so all n trunk calls
+      # share ONE jit signature. With carry=None on the first call and a dict
+      # on the rest, one computation compiled twice: 22.5 s then 20.2 s on a
+      # cold T4. key=None here so the first key is drawn with hk.next_rng_key()
+      # off the same haiku rng the fused path uses.
+      carry, key = embed(params, rng_key, batch, None, None)
       for i in range(n):
         carry, key, contacts = trunk(params, rng_key, batch, carry, key)
         if on_frame:
@@ -874,59 +879,14 @@ class ModelRunner:
     return run
 
   def _stepwise_model(self):
-    """ONE jitted trunk pass, called once per recycle, then the heads.
+    """--stepwise_recycles: live_model without the callbacks.
 
-    The recycle count leaves the graph entirely: `stage` is a Python string and
-    the carry is a device pytree, so the trunk executable is compiled once and
-    reused for every pass and every --num_recycles value. That is what makes a
-    SHIPPED compile cache usable, since otherwise each recycle setting is its
-    own executable (measured: with 10/5/3/1 already cached, 4 alone paid 31 s).
-
-    It also puts the embeddings in the caller's hands between passes, which is
-    what a notebook needs to show what each recycle changed.
-
-    NOT bit-identical to the fused path. The fused loop carries its PRNG key in
-    the scan carry; here each pass gets an independently split key, so dropout
-    and MSA subsampling draw differently. Same distribution, different draw --
-    so parity gates must compare against this mode, not across modes.
+    It WAS a second copy of the same loop, which is how an embed-stage fix
+    landed here and not in live_model -- the driver the notebook actually
+    uses -- and the duplicate trunk trace it was meant to remove stayed.
     """
-    @hk.transform
-    def trunk_fn(batch, carry, key):
-      return model.Model(self._model_config)(
-          batch, key=key, use_dropout=self._use_dropout,
-          recycle_carry=carry, stage='trunk')
-
-    @hk.transform
-    def heads_fn(batch, carry, key):
-      return model.Model(self._model_config)(
-          batch, key=key, use_dropout=self._use_dropout,
-          recycle_carry=carry, stage='heads')
-
-    trunk = jax.jit(trunk_fn.apply) if not _NOJIT.value else trunk_fn.apply
-    heads = jax.jit(heads_fn.apply) if not _NOJIT.value else heads_fn.apply
-    n = model.num_trunk_passes(self._model_config.num_recycles,
-                               self._model_config.global_config.model)
-    self._preinit_tokamax_context()
-    params = self.model_params
-
-    def run(rng_key, batch):
-      # `key` is threaded exactly as the fused scan carries it, so the two
-      # paths draw the same MSA subsample and reach the same structure. The
-      # haiku rng (first argument) is held constant on purpose: with
-      # use_dropout=False nothing in the trunk draws from it, and advancing it
-      # per pass would be a second, gratuitous difference from the fused path.
-      # The initial carry comes from its own cheap stage, so all n trunk calls
-      # share one jit signature. key=None here so the first key is drawn with
-      # hk.next_rng_key() off the same haiku rng the fused path uses --
-      # otherwise the trajectory diverges from a normal fold.
-      carry, key = embed(params, rng_key, batch, None, None)
-      for i in range(n):
-        carry, key = trunk(params, rng_key, batch, carry, key)
-        if _TRUNK_CALLBACK[0] is not None:
-          _TRUNK_CALLBACK[0](i, carry)
-      return heads(params, rng_key, batch, carry, key)
-
-    return run
+    run = self.live_model()
+    return lambda rng_key, batch: run(rng_key, batch)
 
   @functools.cached_property
   def _model(
