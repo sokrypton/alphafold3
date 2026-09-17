@@ -1,0 +1,33 @@
+boltz2	128	FAILED
+rosettafold3	128	NATIVE-RF3 first  20.90s | steady 11.818s | featurise  0.431s | steady-minus-featurise 11.387s | all [20.9, 11.82, 11.73]
+protenix2	128	NATIVE-PROTENIX2 L=128 kernels=torch WARM first  11.23s | steady 10.616s | all [11.23, 10.62, 10.63, 10.61]
+opendde	128	NATIVE-OPENDDE L=128 kernels=torch WARM first  10.39s | steady 10.009s | all [10.39, 10.02, 9.99, 10.03]
+openfold3	128	NATIVE-OPENFOLD3 L=128 WARM first  11.42s | steady 10.614s | all [11.42, 10.55, 10.64, 10.58]
+boltz2	192	FAILED
+rosettafold3	192	NATIVE-RF3 first  24.12s | steady 15.644s | featurise  0.578s | steady-minus-featurise 15.066s | all [24.12, 15.62, 15.64]
+protenix2	192	NATIVE-PROTENIX2 L=192 kernels=torch WARM first  13.87s | steady 13.296s | all [13.87, 13.29, 13.31, 13.28]
+opendde	192	NATIVE-OPENDDE L=192 kernels=torch WARM first  16.44s | steady 16.197s | all [16.44, 16.15, 16.18, 16.22]
+openfold3	192	NATIVE-OPENFOLD3 L=192 WARM first  13.04s | steady 12.290s | all [13.04, 12.25, 12.28, 12.3]
+boltz2	256	FAILED
+rosettafold3	256	NATIVE-RF3 first  32.54s | steady 24.041s | featurise  0.727s | steady-minus-featurise 23.314s | all [32.54, 23.98, 24.04]
+protenix2	256	NATIVE-PROTENIX2 L=256 kernels=torch WARM first  18.30s | steady 17.681s | all [18.3, 17.7, 17.68, 17.68]
+opendde	256	NATIVE-OPENDDE L=256 kernels=torch WARM first  29.97s | steady 29.647s | all [29.97, 29.64, 29.65, 29.64]
+openfold3	256	NATIVE-OPENFOLD3 L=256 WARM first  15.79s | steady 15.047s | all [15.79, 15.03, 15.04, 15.06]
+boltz2	384	FAILED
+rosettafold3	384	NATIVE-RF3 first  56.90s | steady 49.137s | featurise  1.006s | steady-minus-featurise 48.131s | all [56.9, 48.86, 49.14]
+protenix2	384	NATIVE-PROTENIX2 L=384 kernels=torch WARM first  32.29s | steady 32.035s | all [32.29, 31.87, 32.02, 32.05]
+opendde	384	NATIVE-OPENDDE L=384 NO_TIMINGS (predict never called)
+openfold3	384	NATIVE-OPENFOLD3 L=384 WARM first  25.43s | steady 24.747s | all [25.43, 24.65, 24.69, 24.81]
+boltz2	512	FAILED
+rosettafold3	512	NATIVE-RF3 first  98.93s | steady 91.329s | featurise  1.323s | steady-minus-featurise 90.007s | all [98.93, 91.15, 91.33]
+protenix2	512	NATIVE-PROTENIX2 L=512 kernels=torch WARM first  61.40s | steady 61.288s | all [61.4, 61.09, 61.27, 61.31]
+opendde	512	NATIVE-OPENDDE L=512 NO_TIMINGS (predict never called)
+openfold3	512	NATIVE-OPENFOLD3 L=512 WARM first  43.18s | steady 42.684s | all [43.18, 42.32, 42.6, 42.76]
+boltz2	768	FAILED
+rosettafold3	768	OOM
+protenix2	768	NATIVE-PROTENIX2 L=768 NO_TIMINGS (predict never called)
+opendde	768	NATIVE-OPENDDE L=768 NO_TIMINGS (predict never called)
+openfold3	768	NATIVE-OPENFOLD3 L=768 WARM first  92.59s | steady 92.153s | all [92.59, 91.75, 92.09, 92.22]
+chai1	384	FAILED
+chai1	512	FAILED
+chai1	768	FAILED

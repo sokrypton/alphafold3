@@ -22,8 +22,15 @@ import matplotlib.pyplot as plt
 OURS = sys.argv[1]
 OUT = sys.argv[2] if len(sys.argv) > 2 else 'ours_vs_native.png'
 
-# model -> {length: seconds}, forward-only natives
-NATIVE = {
+# Natives are parsed from run_native_sweep.sh's TSV when one is given, else
+# they fall back to the 2026-09-03 single points below.
+#
+# WHICH FIELD, per harness -- getting this wrong is the whole error:
+#   rosettafold3  `steady-minus-featurise`, because its steady INCLUDES
+#                 featurisation and ours does not.
+#   others        `steady`, already model-only and warm.
+# FAILED / OOM / NO_TIMINGS rows are dropped, not plotted as zero.
+FALLBACK = {
     'boltz2':       {64: 7.594, 128: 8.669, 192: 11.639, 256: 17.151, 384: 38.686},
     'rosettafold3': {64: 11.725, 192: 18.382, 384: 56.190},
     'openfold3':    {64: 12.880},
@@ -31,8 +38,31 @@ NATIVE = {
     'opendde':      {64: 8.425},
     'chai1':        {64: 37.967, 128: 38.177, 192: 38.470, 256: 28.394},
 }
-NOTE = {'chai1': 'buckets to 256', 'rosettafold3': 'featurisation subtracted',
-        'openfold3': 'one point', 'protenix2': 'one point', 'opendde': 'one point'}
+NOTE = {'chai1': 'buckets to 256', 'rosettafold3': 'featurisation subtracted'}
+
+
+def parse_native(path):
+    import re
+    out = collections.defaultdict(dict)
+    for line in open(path):
+        f = line.rstrip('\n').split('\t')
+        if len(f) < 3 or any(k in f[2] for k in ('FAILED', 'OOM', 'NO_TIMINGS')):
+            continue
+        m, L, txt = f[0], int(f[1]), f[2]
+        key = 'steady-minus-featurise' if 'steady-minus-featurise' in txt else 'steady'
+        hit = re.search(key + r'\s+([0-9.]+)', txt)
+        if hit:
+            out[m][L] = float(hit.group(1))
+    return out
+
+
+NATIVE = dict(FALLBACK)
+if len(sys.argv) > 3:
+    parsed = parse_native(sys.argv[3])
+    for m, d in parsed.items():
+        NATIVE[m] = d                      # a fresh same-session curve wins outright
+    print('natives from', sys.argv[3], '->',
+          {m: len(d) for m, d in parsed.items()})
 
 ours = collections.defaultdict(lambda: collections.defaultdict(list))
 for line in open(OURS):
@@ -44,7 +74,7 @@ for line in open(OURS):
     except ValueError:
         pass
 
-models = [m for m in NATIVE if m in ours]
+models = [m for m in NATIVE if m in ours and NATIVE[m]]
 fig, axes = plt.subplots(2, 3, figsize=(15, 8.5), sharex=True)
 for ax, m in zip(axes.flat, models):
     L = sorted(ours[m])
