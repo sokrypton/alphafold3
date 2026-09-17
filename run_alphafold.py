@@ -604,6 +604,16 @@ _NUM_MSA = flags.DEFINE_integer(
     ' different value is a different compiled executable.',
 )
 
+_AF2_NUM_MODELS = flags.DEFINE_integer(
+    'af2_num_models',
+    1,
+    "How many of AlphaFold 2's five parameter sets to run, for --model=af2_*."
+    ' Each is a separately trained model rather than a seed, so running several'
+    ' and ranking them is what ColabFold does and why num_models exists there.'
+    ' All five are downloaded and loaded either way; this decides how many are'
+    ' USED. Ignored by the AF3-family models, which have one set of weights.',
+)
+
 _NOJIT = flags.DEFINE_bool(
     'nojit',
     False,
@@ -1092,32 +1102,47 @@ def predict_structure(
   )
   all_inference_start_time = time.time()
   all_inference_results = []
+  # AlphaFold 2's five parameter sets are five trained models, so for af2_* the
+  # iteration is over (seed, model) pairs rather than seeds alone. One set is
+  # the default and reproduces the old behaviour exactly; the AF3 family has a
+  # single set of weights and always takes the 1-element path.
+  # AlphaFold 2 ships FIVE parameter sets -- five separately trained models,
+  # not five seeds -- and until now inference used the first and ignored the
+  # rest. With --af2_num_models > 1 they become the SAMPLES of a seed, which is
+  # what the existing ranking already sorts and what keeps the output layout
+  # (`seed-N_sample-M`) unchanged; giving each model its own ResultsForSeed
+  # would have five entries claiming one seed and colliding on the directory.
+  n_sets = getattr(model_runner, 'num_param_sets', 1)
+  n_models = max(1, min(int(_AF2_NUM_MODELS.value), n_sets))
+  if n_models > 1:
+    print(f'Using {n_models} of {n_sets} AlphaFold 2 parameter sets; each is a '
+          'sample of the seed.')
   for seed, example in zip(fold_input.rng_seeds, featurised_examples):
-    print(f'Running model inference with seed {seed}...')
     inference_start_time = time.time()
     rng_key = jax.random.PRNGKey(seed)
-    result = model_runner.run_inference(example, rng_key)
-    print(
-        f'Running model inference with seed {seed} took'
-        f' {time.time() - inference_start_time:.2f} seconds.'
-    )
-    print(f'Extracting inference results with seed {seed}...')
-    extract_structures = time.time()
-    inference_results = model_runner.extract_inference_results(
-        batch=example, result=result, target_name=fold_input.name
-    )
-    num_tokens = len(inference_results[0].metadata['token_chain_ids'])  # pyrefly: ignore[bad-argument-type]
-    embeddings = model_runner.extract_embeddings(
-        result=result, num_tokens=num_tokens
-    )
-    distogram = model_runner.extract_distogram(
-        result=result, num_tokens=num_tokens
-    )
-    print(
-        f'Extracting {len(inference_results)} inference samples with'
-        f' seed {seed} took {time.time() - extract_structures:.2f} seconds.'
-    )
-
+    inference_results, embeddings, distogram = [], None, None
+    for model_index in range(n_models):
+      label = (f'seed {seed}' if n_models == 1
+               else f'seed {seed}, model {model_index + 1}/{n_models}')
+      print(f'Running model inference with {label}...')
+      one_start = time.time()
+      result = (model_runner.run_inference(example, rng_key, model_index)
+                if n_models > 1 else model_runner.run_inference(example, rng_key))
+      print(f'Running model inference with {label} took'
+            f' {time.time() - one_start:.2f} seconds.')
+      part = model_runner.extract_inference_results(
+          batch=example, result=result, target_name=fold_input.name)
+      inference_results.extend(part)
+      if embeddings is None:
+        # From the first model only: these describe the input as one model saw
+        # it, and five copies of an embedding nothing ranks is just weight.
+        num_tokens = len(part[0].metadata['token_chain_ids'])
+        embeddings = model_runner.extract_embeddings(
+            result=result, num_tokens=num_tokens)
+        distogram = model_runner.extract_distogram(
+            result=result, num_tokens=num_tokens)
+    print(f'Extracting inference results with seed {seed} took'
+          f' {time.time() - inference_start_time:.2f} seconds.')
     all_inference_results.append(
         ResultsForSeed(
             seed=seed,

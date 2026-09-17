@@ -163,16 +163,37 @@ class AF2ModelRunner:
     return self._runner.apply(
         params, {**inputs, 'opt': full_opt}, key, model_params=model_params)
 
-  def run_inference(self, featurised_example, rng_key):
-    """One forward pass, from the SAME featurised batch an AF3 model gets."""
+  @property
+  def num_param_sets(self) -> int:
+    """How many of DeepMind's five parameter sets are loaded.
+
+    AlphaFold 2 ships five, and ColabFold's habit of running several and
+    ranking them is the reason anyone asks for `num_models`. They are all
+    loaded already -- `default_model_names` returns model_1..5 (or 1..2 for the
+    monomer template path, the only two trained with templates) -- and until
+    now inference used `model_params[0]` and ignored the rest.
+    """
+    return len(self.model_params)
+
+  def run_inference(self, featurised_example, rng_key, model_index: int = 0):
+    """One forward pass, from the SAME featurised batch an AF3 model gets.
+
+    `model_index` picks which of the five parameter sets to use. Each set is a
+    separately trained model, not a seed: two of them on one input disagree
+    about as much as two different methods would, which is why running several
+    and ranking is worth the time.
+    """
     import jax
 
     from ..model import feat_batch
 
     batch = feat_batch.Batch.from_data_dict(featurised_example)
-    outputs = self.forward(batch, key=rng_key)
+    mp = self.model_params[model_index % len(self.model_params)]
+    outputs = self.forward(batch, key=rng_key, model_params=mp)
     result = jax.tree.map(np.asarray, dict(outputs))
-    result['__identifier__'] = self.model_name.encode()
+    names = getattr(self._runner, 'model_names', None)
+    tag = (names[model_index % len(names)] if names else self.model_name)
+    result['__identifier__'] = str(tag).encode()
     # The batch travels with the result: extract_inference_results is handed the
     # BatchDict, and rebuilding the Batch there would be the second place that
     # has to agree about padding.
