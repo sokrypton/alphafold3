@@ -731,6 +731,82 @@ class ModelRunner:
     except Exception:  # pylint: disable=broad-except
       pass
 
+  def live_model(self):
+    """Recycles AND diffusion steps driven from Python, one frame at a time.
+
+    Returns `run(rng_key, batch, on_frame=None)`. `on_frame(kind, index, data)`
+    is called after every trunk pass (kind='recycle', data=embeddings) and after
+    every denoise step (kind='diffusion', data=atom_positions), so a notebook
+    can draw the structure as it emerges rather than after it is finished.
+    `return_trajectory` cannot do this: it yields its frames only once the whole
+    scan has run.
+
+    Compiled once each: trunk pass, conditioning, denoise step, scoring. Neither
+    the recycle count nor the step count reaches a graph, so changing either
+    costs nothing and one compile cache covers both.
+    """
+    def _stage(name):
+      @hk.transform
+      def fn(batch, carry=None, key=None, diffusion_state=None):
+        return model.Model(self._model_config)(
+            batch, key=key, use_dropout=self._use_dropout,
+            recycle_carry=carry, stage=name, diffusion_state=diffusion_state)
+      return fn.apply if _NOJIT.value else jax.jit(fn.apply)
+
+    trunk, cond, score = _stage('trunk'), _stage('diff_cond'), _stage('score')
+
+    def _split_static(tree):
+      """Arrays cross the jit boundary; everything else is closed over.
+
+      The atom conditioning carries Python flags (swa_rope) that drive control
+      flow inside the encoder, so passing them as traced values fails with
+      TracerBoolConversionError. They are constant for a whole fold, so they
+      belong in the closure, not in the signature.
+      """
+      arrays, static = {}, {}
+      for k, v in tree.items():
+        # A 0-d BOOL is a flag, not data -- swa_rope is a numpy bool scalar, so
+        # `hasattr(v, 'shape')` filed it as an array and it came back a tracer.
+        is_flag = isinstance(v, bool) or (
+            np.ndim(v) == 0 and np.asarray(v).dtype == np.bool_)
+        (static if is_flag or not hasattr(v, 'shape') else arrays)[k] = v
+      return arrays, static
+
+    def _denoise_stage(static_atom_cond):
+      @hk.transform
+      def fn(batch, carry, key, dcarry, noise_level, pair_cond, atom_arrays):
+        return model.Model(self._model_config)(
+            batch, key=key, use_dropout=self._use_dropout,
+            recycle_carry=carry, stage='denoise',
+            diffusion_state=(dcarry, noise_level, pair_cond,
+                             {**atom_arrays, **static_atom_cond}))
+      return fn.apply if _NOJIT.value else jax.jit(fn.apply)
+    n = model.num_trunk_passes(self._model_config.num_recycles,
+                               self._model_config.global_config.model)
+    self._preinit_tokamax_context()
+    params = self.model_params
+
+    def run(rng_key, batch, on_frame=None):
+      carry, key = None, None
+      for i in range(n):
+        carry, key = trunk(params, rng_key, batch, carry, key)
+        if on_frame:
+          on_frame('recycle', i, carry)
+
+      st = cond(params, rng_key, batch, carry, key)
+      dcarry, levels = st['init'], st['noise_levels']
+      atom_arrays, atom_static = _split_static(st['atom_cond'])
+      step = _denoise_stage(atom_static)
+      for t in range(len(levels) - 1):
+        out = step(params, rng_key, batch, carry, key, dcarry,
+                   levels[t + 1], st['pair_cond'], atom_arrays)
+        dcarry = out['carry']
+        if on_frame:
+          on_frame('diffusion', t, out['atom_positions'])
+      return score(params, rng_key, batch, carry, key, (dcarry[1],))
+
+    return run
+
   def _stepwise_model(self):
     """ONE jitted trunk pass, called once per recycle, then the heads.
 

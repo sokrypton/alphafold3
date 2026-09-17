@@ -125,6 +125,10 @@ class SampleConfig(base_config.BaseConfig):
   num_samples: int = 1
   # Keep every denoising step, not just the last one.
   return_trajectory: bool = False
+  # Return the step body and initial carry instead of running the loop, so the
+  # caller can drive it and see every frame as it is produced. The live
+  # animation path; `sample` is otherwise unchanged.
+  stepwise: bool = False
   # EDM schedule shape. AF3 hardcoded these as noise_schedule()'s defaults, which
   # silently applied AF3's sampler to every ported family; they are config fields
   # so each model can carry the constants it was trained with (boltz2 wants rho 8,
@@ -602,35 +606,14 @@ def _kabsch(mob, ref, w):
   return ((mob - mc).reshape(-1, 3) @ rot).reshape(mob.shape) + rc
 
 
-def sample(
-    denoising_step: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray],
-    batch: feat_batch.Batch,
-    key: jnp.ndarray,
-    config: SampleConfig,
-    global_config: model_config.GlobalConfig | None = None,
-) -> dict[str, jnp.ndarray]:
-  """Sample using denoiser on batch.
+def make_denoising_body(denoising_step, mask, config, global_config, chai):
+  """The per-step body, shared by the scanned path and a Python-driven one.
 
-  Args:
-    denoising_step: the denoising function.
-    batch: the batch
-    key: random key
-    config: config for the sampling process (e.g. number of denoising steps,
-      etc.)
-
-  Returns:
-    a dict
-      {
-         'atom_positions': jnp.array(...)       # shape (<common_axes>, 3)
-         'mask': jnp.array(...)                 # shape (<common_axes>,)
-      }
-    where the <common_axes> are
-    (num_samples, num_tokens, max_atoms_per_token)
+  Lifted out of `sample` so a live animation runs the SAME step a normal
+  fold runs. Reimplementing it would be a second EDM sampler to keep in
+  agreement with this one, and the churn, the -0.0 guard and chai's
+  non-textbook Heun step are exactly the details that would drift.
   """
-
-  mask = batch.predicted_structure_info.atom_mask
-  chai = global_config is not None and global_config.model == 'chai1'
-
   def apply_denoising_step(carry, noise_level):
     key, positions, noise_level_prev = carry
     key, key_noise, key_aug = jax.random.split(key, 3)
@@ -694,42 +677,99 @@ def sample(
 
     return (key, positions_out, noise_level), positions_out
 
-  num_samples = config.num_samples
+  return apply_denoising_step
 
+
+def noise_schedule_for(config, chai: bool):
+  """The sampling sigmas, host-side.
+
+  numpy, not jnp: the schedule is a compile-time constant and the clip below is
+  a boolean mask a traced array cannot take. float32 explicitly -- numpy would
+  default to float64 and hand every model a schedule differing in the last bits
+  from the traced one, which silently changes the sampling trajectory of
+  thirteen models.
+
+  Pulled out of `sample` so a caller driving the steps itself (the live
+  animation path) uses the SAME sigmas as the scanned path rather than
+  reconstructing them.
+  """
   if chai:
     # chai evaluates the schedule at MIDPOINTS -- linspace(0, 1, 2N+1)[1::2] --
-    # where AF3 uses the N+1 endpoints. So it never samples sigma=0 exactly, and
+    # where AF3 uses the N+1 endpoints, so it never samples sigma=0 exactly and
     # every sigma sits half a step inside AF3's.
     times = np.linspace(0.0, 1.0, 2 * config.steps + 1, dtype=np.float32)[1::2]
   else:
     times = np.linspace(0, 1, config.steps + 1, dtype=np.float32)
-  # numpy, not jnp: the schedule is a compile-time constant, and the clip below
-  # is a boolean mask that a traced array cannot take. float32 explicitly --
-  # numpy would default to float64 here and hand every model a schedule that
-  # differs from the traced one in the last bits, which is a silent change to
-  # the sampling trajectory of thirteen models that have nothing to do with the
-  # clip this was added for.
-  noise_levels = np.asarray(noise_schedule(
-      times, smin=config.sigma_min, smax=config.sigma_max, p=config.rho),
-      dtype=np.float32)
+  levels = np.asarray(noise_schedule(times, smin=config.sigma_min,
+                                     smax=config.sigma_max, p=config.rho),
+                      dtype=np.float32)
   if getattr(config, 'max_sigma', 0.0):
-    noise_levels = np.concatenate(
-        [[config.max_sigma], noise_levels[noise_levels <= config.max_sigma]])
-  noise_levels = jnp.asarray(noise_levels, jnp.float32)
+    levels = np.concatenate([[config.max_sigma],
+                             levels[levels <= config.max_sigma]])
+  return jnp.asarray(levels, jnp.float32)
 
+
+def sample_init(batch, key, config, global_config=None):
+  """The initial carry and sigmas for the sampler.
+
+  Shared with `sample` rather than reconstructed, so a Python-driven loop
+  starts from the same noise draw the scanned path starts from.
+  """
+  chai = global_config is not None and global_config.model == 'chai1'
+  mask = batch.predicted_structure_info.atom_mask
+  noise_levels = noise_schedule_for(config, chai)
   key, noise_key = jax.random.split(key)
-  positions = jax.random.normal(noise_key, (num_samples,) + mask.shape + (3,))
+  positions = jax.random.normal(noise_key, (config.num_samples,) + mask.shape + (3,))
   positions *= noise_levels[0]
-
   init = (
-      jax.random.split(key, num_samples),
+      jax.random.split(key, config.num_samples),
       positions,
-      jnp.tile(noise_levels[None, 0], (num_samples,)),
+      jnp.tile(noise_levels[None, 0], (config.num_samples,)),
   )
+  return init, noise_levels
+
+
+def sample(
+    denoising_step: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray],
+    batch: feat_batch.Batch,
+    key: jnp.ndarray,
+    config: SampleConfig,
+    global_config: model_config.GlobalConfig | None = None,
+) -> dict[str, jnp.ndarray]:
+  """Sample using denoiser on batch.
+
+  Args:
+    denoising_step: the denoising function.
+    batch: the batch
+    key: random key
+    config: config for the sampling process (e.g. number of denoising steps,
+      etc.)
+
+  Returns:
+    a dict
+      {
+         'atom_positions': jnp.array(...)       # shape (<common_axes>, 3)
+         'mask': jnp.array(...)                 # shape (<common_axes>,)
+      }
+    where the <common_axes> are
+    (num_samples, num_tokens, max_atoms_per_token)
+  """
+
+  mask = batch.predicted_structure_info.atom_mask
+  chai = global_config is not None and global_config.model == 'chai1'
+
+  apply_denoising_step = make_denoising_body(
+      denoising_step, mask, config, global_config, chai)
+
+  num_samples = config.num_samples
+  noise_levels = noise_schedule_for(config, chai)
+
+  init, _ = sample_init(batch, key, config, global_config)
 
   apply_denoising_step = hk.vmap(
       apply_denoising_step, in_axes=(0, None), split_rng=(not hk.running_init())
   )
+
   # unroll=1, NOT AF3's 4. Measured on this graph (steps -> total compile):
   #   unroll=4: 1->3.5s  2->4.0s  4->50.3s  8->53.4s  20->52.9s  50->64.1s
   #   unroll=1: 20->40.6s  50->41.9s   (flat -- one body copy, compiled once)

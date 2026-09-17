@@ -593,6 +593,7 @@ class Model(hk.Module):
       embeddings: dict[str, jnp.ndarray],
       *,
       sample_config: diffusion_head.SampleConfig,
+      diffusion_state=None,
   ) -> dict[str, jnp.ndarray]:
     # ONCE, not once per sampling step per sample. The pair conditioning reads
     # only the trunk embeddings and the batch -- the noise level enters the
@@ -600,14 +601,22 @@ class Model(hk.Module):
     # projection and two transition blocks over (num_tokens, num_tokens,
     # pair_channel), plus an (L, L, 139) relative encoding, were rebuilt for
     # every step of every sample: ~1000 times in a default fold.
-    pair_cond, atom_cond = self.diffusion_module(
-        positions_noisy=None,        # unused on this path
-        noise_level=jnp.zeros(()),   # unused by the pair half
-        batch=batch,
-        embeddings=embeddings,
-        use_conditioning=True,
-        conditioning_only=True,
-    )
+    if diffusion_state is not None and len(diffusion_state) == 4:
+      # The caller already has the conditioning from the diff_cond stage.
+      # Recomputing it per step is what the comment above forbids: a LayerNorm,
+      # a projection and two transition blocks over (num_tokens, num_tokens,
+      # pair_channel) for every step of every sample.
+      _, _, pair_cond, atom_cond = diffusion_state
+      diffusion_state = diffusion_state[:2]
+    else:
+      pair_cond, atom_cond = self.diffusion_module(
+          positions_noisy=None,        # unused on this path
+          noise_level=jnp.zeros(()),   # unused by the pair half
+          batch=batch,
+          embeddings=embeddings,
+          use_conditioning=True,
+          conditioning_only=True,
+      )
 
     denoising_step = functools.partial(
         self.diffusion_module,
@@ -617,6 +626,26 @@ class Model(hk.Module):
         pair_cond=pair_cond,
         atom_cond=atom_cond,
     )
+
+    # LIVE PATH. `stepwise` hands back the conditioning and the initial carry
+    # instead of running the loop, so a caller can apply one step at a time and
+    # see every frame as it is produced -- which a scan cannot do, and which
+    # `return_trajectory` cannot either, since that only yields the frames once
+    # the whole loop has finished.
+    if sample_config.stepwise and diffusion_state is None:
+      init, noise_levels = diffusion_head.sample_init(
+          batch, hk.next_rng_key(), sample_config, self.global_config)
+      return {'pair_cond': pair_cond, 'atom_cond': atom_cond,
+              'init': init, 'noise_levels': noise_levels}
+    if diffusion_state is not None:
+      carry, noise_level = diffusion_state
+      body = diffusion_head.make_denoising_body(
+          denoising_step, batch.predicted_structure_info.atom_mask,
+          sample_config, self.global_config,
+          self.global_config.model == 'chai1')
+      body = hk.vmap(body, in_axes=(0, None), split_rng=not hk.running_init())
+      carry, positions = body(carry, noise_level)
+      return {'carry': carry, 'atom_positions': positions}
 
     sample = diffusion_head.sample(
         denoising_step=denoising_step,
@@ -689,6 +718,7 @@ class Model(hk.Module):
       num_trunk_passes_override=None,
       recycle_carry=None,
       stage='all',
+      diffusion_state=None,
   ) -> ModelResult:
     """ColabDesign2: soft_seq is the continuous relaxation of sequence.
 
@@ -910,11 +940,31 @@ class Model(hk.Module):
         diff_emb = dict(embeddings)
         diff_emb['target_feat'] = target_feat_structure
 
-    samples = self._sample_diffusion(
-        diff_batch,
-        diff_emb,
-        sample_config=self.config.heads.diffusion.eval,
-    )
+    if stage in ('diff_cond', 'denoise'):
+      # Either hand back the conditioning, or apply one denoise step to the
+      # state the caller passes in. Both return before the confidence heads.
+      return self._sample_diffusion(  # pyrefly: ignore[bad-return]
+          diff_batch, diff_emb,
+          sample_config=self.config.heads.diffusion.eval,
+          diffusion_state=diffusion_state)
+
+    if diffusion_state is not None and stage == 'score':
+      # Coordinates the caller produced by driving the steps itself; scored
+      # through exactly the path a fused sample takes. The mask is derived here
+      # rather than passed in -- the caller has no business reconstructing it.
+      pos = diffusion_state[0]
+      samples = {
+          'atom_positions': pos,
+          'mask': jnp.tile(
+              diff_batch.predicted_structure_info.atom_mask[None],
+              (pos.shape[0], 1, 1)),
+      }
+    else:
+      samples = self._sample_diffusion(
+          diff_batch,
+          diff_emb,
+          sample_config=self.config.heads.diffusion.eval,
+      )
 
     if has_structural:
       # OpenDDE's own confidence head, on the structural-token set. Rep-atom coords

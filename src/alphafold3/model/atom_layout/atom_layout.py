@@ -33,6 +33,7 @@ from alphafold3.constants import mmcif_names
 from alphafold3.constants import residue_names
 from alphafold3.data.tools import rdkit_utils
 from alphafold3.structure import chemical_components as struc_chem_comps
+import jax
 import jax.numpy as jnp
 import numpy as np
 from rdkit import Chem
@@ -383,6 +384,18 @@ class GatherInfo:
         input_shape=d[prefix + 'input_shape'],
     )
 
+
+
+# A PYTREE, so a GatherInfo can cross a jit boundary. The stepwise diffusion
+# path returns the atom conditioning from one jitted stage and hands it to
+# another; without this, jax rejects it with "returned a value of type
+# GatherInfo, which is not a valid JAX type". All three fields are arrays, so
+# they are the leaves and there is no static metadata to carry.
+jax.tree_util.register_pytree_node(
+    GatherInfo,
+    lambda g: ((g.gather_idxs, g.gather_mask, g.input_shape), None),
+    lambda _, xs: GatherInfo(*xs),
+)
 
 def fill_in_optional_fields(
     minimal_atom_layout: AtomLayout,
