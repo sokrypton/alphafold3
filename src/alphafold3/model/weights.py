@@ -21,6 +21,8 @@ import glob
 import os
 import sys
 import tarfile
+import time
+import urllib.error
 import urllib.request
 
 from alphafold3.model import model_config
@@ -28,6 +30,10 @@ from alphafold3.model import model_registry
 
 
 _HF_URL = 'https://huggingface.co/{repo}/resolve/main/{file}'
+
+# Six tries: 5 s, 10 s, 20 s, 40 s, 80 s between them, so a rate limit has
+# about three minutes to clear before the run gives up and says why.
+_DOWNLOAD_ATTEMPTS = 6
 
 
 def default_dir(model_name: str, precision: str = 'fp32') -> str:
@@ -56,7 +62,28 @@ def _download(url: str, dst: str, log=print) -> None:
                        f'{total >> 20} MB)')
       sys.stderr.flush()
 
-  urllib.request.urlretrieve(url, tmp, reporthook=hook)
+  # RETRY, because HuggingFace rate-limits. A Colab VM shares an anonymous
+  # egress IP with everyone else on that host, and `HTTP Error 429: Too Many
+  # Requests` came back in under a second on 2026-09-17 -- which, fetched in
+  # the background by the notebook, looked like an indefinite hang rather than
+  # a failure. 429 and 5xx are transient by definition, so wait and ask again;
+  # honour Retry-After when the server sends one. A 404 is not retried.
+  delay = 5.0
+  for attempt in range(1, _DOWNLOAD_ATTEMPTS + 1):
+    try:
+      urllib.request.urlretrieve(url, tmp, reporthook=hook)
+      break
+    except urllib.error.HTTPError as err:
+      if err.code not in (429, 500, 502, 503, 504) or attempt == _DOWNLOAD_ATTEMPTS:
+        raise
+      wait = float(err.headers.get('Retry-After') or delay)
+      sys.stderr.write('\n')
+      log(f'  HTTP {err.code} from the weights host; retrying in {wait:.0f} s '
+          f'(attempt {attempt} of {_DOWNLOAD_ATTEMPTS - 1})')
+      time.sleep(wait)
+      delay = min(delay * 2, 120.0)
+      if os.path.exists(tmp):
+        os.remove(tmp)
   sys.stderr.write('\n')
   os.replace(tmp, dst)
 
