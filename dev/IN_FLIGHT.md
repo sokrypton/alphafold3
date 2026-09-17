@@ -81,24 +81,42 @@ a RESULT rather than a failure (where an implementation stops on this card).
 `ColabFold2-Preview.ipynb` -> this; both old paths now 404). Title "ColabFold2
 preview". Badge points at `main/ColabFold2_preview.ipynb`, HTTP 200.
 
-### THE IMMEDIATE NEXT STEP
-**v3.1.8 was tagged and its wheel build was IN PROGRESS at compaction.** It
-carries the real fix for the import failure (see below). When it publishes:
+### DONE as of 2026-09-17 ~01:30 -- the notebook is on the slim PyPI wheel
 
-1. Verify the **SLIM** wheel (`pip install alphafold3-colabfold==3.1.8`, ~9 MB
-   from PyPI) IMPORTS AND FOLDS with no `components.cif` anywhere. A clean
-   Python 3.13 venv exists for this: `$SCRATCHPAD/t313`, and
-   `dev/bench/results/slim.ipynb` is the Colab fold test.
-2. If it does: point the notebook's install at the slim PyPI wheel, delete the
-   `_whl` release-asset URL and the `WHEEL_DL_DONE` prefetch, and RETIRE the fat
-   `+data` wheel machinery (the `bundle_data` dispatch input and the
-   `github-release` job in `.github/workflows/release_wheel.yaml`).
-3. Then `ccd_fetch.py` is IN the wheel, so stop fetching it from `main` (see
-   the drift note below) and pin both halves to the tag again.
+v3.1.8 published the fix, v3.1.9 added a download retry, and the notebook
+installs `alphafold3-colabfold==3.1.9` from PyPI. The fat `+data` wheel and the
+`github-release` job that built it are GONE (commit e016935); v3.1.7's assets
+stay attached to that release. `ccd_fetch` ships in the wheel, so nothing is
+fetched from `main` any more.
 
-Do not assume the C++ fix works in a built wheel because it compiles. It
-compiled in CI (`Install Python dependencies` and `Build data` both green); that
-is not the same as the published artefact importing without the dictionary.
+Verified, in this order, each one on the published artefact:
+
+1. `dev/bench/results/slim_check.py` in a clean 3.13 venv with no
+   components.cif: the cpp extension imports, 36 components come from
+   files.rcsb.org, a protein+BTN input featurises, `get_dssp` raises a
+   ValueError naming LIBCIFPP_DATA_DIR.
+2. Cold Colab T4, `/content` verified empty first: setup 33 s (pip 22, weights
+   10, CCD 0), fold 69 s, 2 structures, ptm 0.59. The cell label said 90 s and
+   now says 35.
+
+Three failures worth not rediscovering:
+
+* **A tag push published nothing.** The slim step rewrites pyproject.toml,
+  which leaves the checkout dirty, and setuptools_scm renders a dirty tree as
+  a LOCAL version (`3.1.9.dev0+g7f79c77bd.d20260916`). PyPI answers 400. The
+  tag path now pins SETUPTOOLS_SCM_PRETEND_VERSION from the ref.
+* **HuggingFace returned 429** to a Colab VM and `_download` had no retry, so
+  the backgrounded prefetch died in under a second and the install cell waited
+  forever with `Downloading openbind0 weights...` on screen. Raw throughput
+  from that same VM was 65 MB/s. Retry with backoff is in 3.1.9.
+* **Two cold measurements were warm and did not say so.** `colab new` can hand
+  back a recycled VM; `colab ls` before the run is the check.
+
+Colab-CLI notes to add to the five already below: `--auth adc` works without
+re-authenticating; `colab ls -s <name>` reads files even while a kernel is
+busy, and `colab download -s <name> /content/<file> <local>` needs the ABSOLUTE
+remote path; a session can die mid-cell and the client then waits on a dead
+kernel rather than reporting it.
 
 ### The import failure, and the real fix
 `pip install alphafold3-colabfold` died with
