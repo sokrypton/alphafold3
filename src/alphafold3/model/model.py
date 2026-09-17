@@ -686,6 +686,9 @@ class Model(hk.Module):
       design_mask=None,
       structure=True,
       use_dropout=False,
+      num_trunk_passes_override=None,
+      recycle_carry=None,
+      stage='all',
   ) -> ModelResult:
     """ColabDesign2: soft_seq is the continuous relaxation of sequence.
 
@@ -787,11 +790,47 @@ class Model(hk.Module):
       # loop). The evoformer cannot see the iteration index inside a fori_loop,
       # so flag the first pass in the carry and let it substitute z_init/s_init.
       embeddings['recycle_first'] = jnp.ones((), jnp.float32)
-    if hk.running_init():
+    # ONE PASS, jitted once and driven from Python (stage='trunk'). The recycle
+    # count then never reaches the graph at all -- one executable serves any
+    # number of passes, and the caller sees the embeddings between them, which
+    # is what lets a notebook show what each recycle changed. The AF2 runner in
+    # ColabDesign2 drives its recycles the same way.
+    #
+    # `stage` is a Python string, so each stage is its own traced function; the
+    # carry is a device pytree that never needs to come back to the host.
+    if stage == 'trunk':
+      if recycle_carry is not None:
+        # keep the initialised keys (target_feat, and the per-model extras
+        # seeded above) and overwrite only what a pass actually carries
+        embeddings = {**embeddings, **recycle_carry}
+      # The ADVANCED key comes back with the embeddings. The fused loop carries
+      # its key in the scan carry, so a Python driver that split its own keys
+      # instead produced a different sample -- measured at 1.098 A on a
+      # 32-residue peptide, which is not noise. Threading the same key through
+      # makes the two paths draw identically.
+      embeddings, key = recycle_body(None, (embeddings, key))
+      return embeddings, key  # pyrefly: ignore[bad-return]
+    if stage == 'heads':
+      if recycle_carry is None:
+        raise ValueError("stage='heads' needs the trunk's embeddings")
+      embeddings = {**embeddings, **recycle_carry}
+    elif hk.running_init():
       embeddings, _ = recycle_body(None, (embeddings, key))
     else:
       num_iter = num_trunk_passes(self.config.num_recycles,
                                   self.global_config.model)
+      # A TRACED trip count, when the caller supplies one: the recycle count is
+      # otherwise a Python int baked into the HLO, so every value compiles its
+      # own executable and a persistent compile cache built at one recycle
+      # setting misses at every other (measured: 10/5/3/1 cached, 4 alone paid
+      # 31 s). Passed in as an argument, one executable serves them all.
+      #
+      # PREDICTION ONLY. `lax.fori_loop` with a dynamic bound is not
+      # reverse-differentiable, and the design path backprops through the trunk
+      # -- see recycle_last_only below. Callers that need gradients leave this
+      # None and keep the static count.
+      if num_trunk_passes_override is not None:
+        num_iter = num_trunk_passes_override
       # ColabDesign2: AF3's recycle loop has no stop_gradient on `prev`, so with
       # num_recycles>0 the gradient backprops through EVERY pass -- the exact
       # mistake that cost the AF2 design path 3x its interface quality. When
@@ -799,7 +838,11 @@ class Model(hk.Module):
       # final pass and DETACH their output, so only the last pass is
       # differentiated: the trunk still recycles, but the sequence gradient is
       # the clean single-pass one. Off by default -> exact original behaviour.
-      if getattr(self.config, 'recycle_last_only', False) and num_iter > 1:
+      # `num_iter > 1` is a Python bool only while the count is static, which is
+      # exactly when this branch applies: recycle_last_only exists for design,
+      # and design does not pass an override.
+      if (getattr(self.config, 'recycle_last_only', False)
+          and num_trunk_passes_override is None and num_iter > 1):
         embeddings, key = hk.fori_loop(0, num_iter - 1, recycle_body,
                                        (embeddings, key))
         embeddings = jax.tree_util.tree_map(jax.lax.stop_gradient, embeddings)

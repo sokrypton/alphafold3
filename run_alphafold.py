@@ -560,6 +560,35 @@ _PRECOMPILE = flags.DEFINE_list(
     ' which is what --buckets makes predictable.',
 )
 
+_DYNAMIC_RECYCLES = flags.DEFINE_bool(
+    'dynamic_recycles',
+    False,
+    'Pass the recycle count into the model as a traced argument instead of'
+    ' baking it into the graph. The count is otherwise a Python int, so every'
+    ' --num_recycles value compiles its own executable and a persistent'
+    ' compile cache built at one value misses at every other. With this, one'
+    ' executable serves them all -- which is what makes a SHIPPED cache'
+    ' useful, since a user who changes the recycle count would otherwise pay a'
+    ' full compile. Prediction only: lax.fori_loop with a dynamic bound is not'
+    ' reverse-differentiable, so the design path must leave this off.',
+)
+
+_STEPWISE_RECYCLES = flags.DEFINE_bool(
+    'stepwise_recycles',
+    False,
+    'Compile ONE trunk pass and call it once per recycle from Python, instead'
+    ' of a fori_loop whose trip count is baked into the graph. One executable'
+    ' then serves every --num_recycles value -- which is what makes a shipped'
+    ' compile cache useful -- and the embeddings are available between passes,'
+    ' so a caller can show what each recycle changed. Prediction only, and NOT'
+    ' bit-identical to the fused path: each pass gets an independently split'
+    ' PRNG key rather than one carried through a scan.',
+)
+
+# Set to a callable(pass_index, embeddings) to observe each recycle; used by the
+# notebook to draw the structure as it converges. Left None, costs nothing.
+_TRUNK_CALLBACK = [None]
+
 _NOJIT = flags.DEFINE_bool(
     'nojit',
     False,
@@ -702,6 +731,62 @@ class ModelRunner:
     except Exception:  # pylint: disable=broad-except
       pass
 
+  def _stepwise_model(self):
+    """ONE jitted trunk pass, called once per recycle, then the heads.
+
+    The recycle count leaves the graph entirely: `stage` is a Python string and
+    the carry is a device pytree, so the trunk executable is compiled once and
+    reused for every pass and every --num_recycles value. That is what makes a
+    SHIPPED compile cache usable, since otherwise each recycle setting is its
+    own executable (measured: with 10/5/3/1 already cached, 4 alone paid 31 s).
+
+    It also puts the embeddings in the caller's hands between passes, which is
+    what a notebook needs to show what each recycle changed.
+
+    NOT bit-identical to the fused path. The fused loop carries its PRNG key in
+    the scan carry; here each pass gets an independently split key, so dropout
+    and MSA subsampling draw differently. Same distribution, different draw --
+    so parity gates must compare against this mode, not across modes.
+    """
+    @hk.transform
+    def trunk_fn(batch, carry, key):
+      return model.Model(self._model_config)(
+          batch, key=key, use_dropout=self._use_dropout,
+          recycle_carry=carry, stage='trunk')
+
+    @hk.transform
+    def heads_fn(batch, carry, key):
+      return model.Model(self._model_config)(
+          batch, key=key, use_dropout=self._use_dropout,
+          recycle_carry=carry, stage='heads')
+
+    trunk = jax.jit(trunk_fn.apply) if not _NOJIT.value else trunk_fn.apply
+    heads = jax.jit(heads_fn.apply) if not _NOJIT.value else heads_fn.apply
+    n = model.num_trunk_passes(self._model_config.num_recycles,
+                               self._model_config.global_config.model)
+    self._preinit_tokamax_context()
+    params = self.model_params
+
+    def run(rng_key, batch):
+      # `key` is threaded exactly as the fused scan carries it, so the two
+      # paths draw the same MSA subsample and reach the same structure. The
+      # haiku rng (first argument) is held constant on purpose: with
+      # use_dropout=False nothing in the trunk draws from it, and advancing it
+      # per pass would be a second, gratuitous difference from the fused path.
+      # key=None on the FIRST pass, so it is drawn with hk.next_rng_key() off
+      # the same haiku rng the fused path uses -- otherwise the first pass
+      # starts from a different key and the whole trajectory diverges. Costs
+      # one extra trace (None vs an array is a different signature), which is
+      # still independent of the recycle count.
+      carry, key = None, None
+      for i in range(n):
+        carry, key = trunk(params, rng_key, batch, carry, key)
+        if _TRUNK_CALLBACK[0] is not None:
+          _TRUNK_CALLBACK[0](i, carry)
+      return heads(params, rng_key, batch, carry, key)
+
+    return run
+
   @functools.cached_property
   def _model(
       self,
@@ -709,9 +794,13 @@ class ModelRunner:
     """Loads model parameters and returns a jitted model forward pass."""
 
     @hk.transform
-    def forward_fn(batch):
-      return model.Model(self._model_config)(batch,
-                                             use_dropout=self._use_dropout)
+    def forward_fn(batch, num_trunk_passes=None):
+      return model.Model(self._model_config)(
+          batch, use_dropout=self._use_dropout,
+          num_trunk_passes_override=num_trunk_passes)
+
+    if _STEPWISE_RECYCLES.value:
+      return self._stepwise_model()
 
     apply_fn = forward_fn.apply
     if not _NOJIT.value:
@@ -722,6 +811,11 @@ class ModelRunner:
       apply_fn = jax.jit(apply_fn)
     # before anything is traced -- see _preinit_tokamax_context
     self._preinit_tokamax_context()
+    if _DYNAMIC_RECYCLES.value:
+      n = model.num_trunk_passes(self._model_config.num_recycles,
+                                 self._model_config.global_config.model)
+      return functools.partial(apply_fn, self.model_params,
+                               num_trunk_passes=jnp.asarray(n, jnp.int32))
     return functools.partial(apply_fn, self.model_params)
 
   def run_inference(
