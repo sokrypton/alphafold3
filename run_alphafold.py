@@ -589,6 +589,11 @@ _STEPWISE_RECYCLES = flags.DEFINE_bool(
 # notebook to draw the structure as it converges. Left None, costs nothing.
 _TRUNK_CALLBACK = [None]
 
+# How many denoise steps go in one dispatch. Frames still arrive one per step;
+# this only decides how often the host is involved. 1 is the finest and the
+# slowest.
+_LIVE_CHUNK = [10]
+
 _NOJIT = flags.DEFINE_bool(
     'nojit',
     False,
@@ -772,7 +777,24 @@ class ModelRunner:
         (static if is_flag or not hasattr(v, 'shape') else arrays)[k] = v
       return arrays, static
 
+    # MEMOISED. Building this inside `run` re-traced the whole score model on
+    # every fold: measured 4708 ms on the first chunk against 118 ms on the
+    # next (10 steps, i.e. 11.8 ms a step against fused's 11.7). The per-step
+    # cost was never the problem -- the trace was, and it is the only reason
+    # live mode is slower at all.
+    stage_cache = {}
+
     def _denoise_stage(static_atom_cond):
+      # 0-d jax arrays are not hashable, so the key holds their VALUES --
+      # `num_tokens` arrives as an ArrayImpl and raised
+      # "unhashable type: ArrayImpl" straight out of the dict lookup.
+      def _hashable(v):
+        return v.item() if hasattr(v, 'item') else v
+      ckey = tuple(sorted((k, _hashable(v)) for k, v in static_atom_cond.items()
+                          if np.ndim(v) == 0))
+      if ckey in stage_cache:
+        return stage_cache[ckey]
+
       @hk.transform
       def fn(batch, carry, key, dcarry, noise_level, pair_cond, atom_arrays):
         return model.Model(self._model_config)(
@@ -780,7 +802,9 @@ class ModelRunner:
             recycle_carry=carry, stage='denoise',
             diffusion_state=(dcarry, noise_level, pair_cond,
                              {**atom_arrays, **static_atom_cond}))
-      return fn.apply if _NOJIT.value else jax.jit(fn.apply)
+      out = fn.apply if _NOJIT.value else jax.jit(fn.apply)
+      stage_cache[ckey] = out
+      return out
     n = model.num_trunk_passes(self._model_config.num_recycles,
                                self._model_config.global_config.model)
     self._preinit_tokamax_context()
@@ -797,12 +821,27 @@ class ModelRunner:
       dcarry, levels = st['init'], st['noise_levels']
       atom_arrays, atom_static = _split_static(st['atom_cond'])
       step = _denoise_stage(atom_static)
-      for t in range(len(levels) - 1):
+      # CHUNKED. `_LIVE_CHUNK` steps go in one dispatch and every frame comes
+      # back, so the animation is unchanged and the per-call overhead is paid
+      # once per chunk instead of once per step. The tail chunk is a second
+      # (and last) shape, so at most two executables.
+      k = max(1, _LIVE_CHUNK[0])
+      todo = levels[1:]
+      t = 0
+      while t < len(todo):
+        chunk = todo[t:t + k]
         out = step(params, rng_key, batch, carry, key, dcarry,
-                   levels[t + 1], st['pair_cond'], atom_arrays)
+                   chunk if len(chunk) > 1 else chunk[0],
+                   st['pair_cond'], atom_arrays)
         dcarry = out['carry']
         if on_frame:
-          on_frame('diffusion', t, out['atom_positions'])
+          frames = out['atom_positions']
+          if len(chunk) > 1:
+            for j in range(len(chunk)):
+              on_frame('diffusion', t + j, frames[j])
+          else:
+            on_frame('diffusion', t, frames)
+        t += len(chunk)
       return score(params, rng_key, batch, carry, key, (dcarry[1],))
 
     return run

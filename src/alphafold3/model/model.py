@@ -644,8 +644,17 @@ class Model(hk.Module):
           sample_config, self.global_config,
           self.global_config.model == 'chai1')
       body = hk.vmap(body, in_axes=(0, None), split_rng=not hk.running_init())
-      carry, positions = body(carry, noise_level)
-      return {'carry': carry, 'atom_positions': positions}
+      if jnp.ndim(noise_level) == 0:
+        carry, positions = body(carry, noise_level)
+        return {'carry': carry, 'atom_positions': positions}
+      # A CHUNK of steps in one dispatch. One step per call left ~21 ms of
+      # dispatch on top of the step's own ~12 ms, which is most of live mode's
+      # remaining cost; scanning k steps divides that by k while `ys` still
+      # returns every intermediate frame, so nothing is lost to the animation.
+      # unroll=1 for the same reason sample() uses it: one body copy, so
+      # compile does not track the chunk length.
+      carry, traj = hk.scan(body, carry, noise_level, unroll=1)
+      return {'carry': carry, 'atom_positions': traj}
 
     sample = diffusion_head.sample(
         denoising_step=denoising_step,
@@ -753,6 +762,24 @@ class Model(hk.Module):
 
     batch = feat_batch.Batch.from_data_dict(batch)
 
+    # DENOISE RETURNS HERE, before the prologue. `create_target_feat_embedding`
+    # below is an atom-level transformer over every atom, and entering
+    # __call__ from the top ran it on EVERY denoise step -- 200 times in a
+    # default fold, for a value the trunk carry already holds. Measured at 32
+    # tokens: 0.17 s a step against the step's own ~0.012 s, i.e. the
+    # conditioning prologue was 90% of live mode.
+    #
+    # Everything the score model needs is in the carry (single, pair,
+    # target_feat) plus the conditioning the caller passes in, so nothing above
+    # has to run again.
+    if stage == 'denoise':
+      if recycle_carry is None or diffusion_state is None:
+        raise ValueError("stage='denoise' needs the trunk carry and a state")
+      return self._sample_diffusion(  # pyrefly: ignore[bad-return]
+          batch, recycle_carry,
+          sample_config=self.config.heads.diffusion.eval,
+          diffusion_state=diffusion_state)
+
     embedding_module = evoformer_network.Evoformer(
         self.config.evoformer, self.global_config
     )
@@ -760,13 +787,23 @@ class Model(hk.Module):
     # prediction. See featurization.blend_soft.
     embedding_module.soft_seq = soft_seq
     embedding_module.design_mask = design_mask
-    target_feat = create_target_feat_embedding(
-        batch=batch,  # pyrefly: ignore[bad-argument-type]
-        config=embedding_module.config,
-        global_config=self.global_config,
-        soft_seq=soft_seq,
-        design_mask=design_mask,
-    )
+    # REUSED from the carry when the caller has it. This is an atom-level
+    # transformer over every atom and it does not depend on the recycle state,
+    # so the fused path computes it once before the loop. A stepwise caller
+    # re-enters here for every trunk pass and for the conditioning and scoring
+    # stages -- six times in a default fold -- and the value was then
+    # overwritten by the carry's own copy anyway. Measured at 32 tokens: 7.1 s
+    # of live mode against 2.4 s fused, almost all of it this.
+    if recycle_carry is not None and 'target_feat' in recycle_carry:
+      target_feat = recycle_carry['target_feat']
+    else:
+      target_feat = create_target_feat_embedding(
+          batch=batch,  # pyrefly: ignore[bad-argument-type]
+          config=embedding_module.config,
+          global_config=self.global_config,
+          soft_seq=soft_seq,
+          design_mask=design_mask,
+      )
     # chai projects the token embedding twice -- see
     # model_config.SEPARATE_STRUCTURE_TARGET_FEAT. The trunk gets the first and
     # the diffusion module the second, applied to `diff_emb` below.
