@@ -92,4 +92,10 @@ def frame_positions(positions, batch):
   xyz = np.asarray(positions)[np.arange(len(idx)), idx]
   chains = np.asarray(layout.chain_id)[:, 0]
   resids = np.asarray(layout.res_id)[:, 0]
-  return xyz[valid], list(chains[valid]), list(resids[valid].astype(int))
+  # PLAIN python types. py2Dmol serialises these to JSON, and a numpy int64
+  # raises "Object of type int64 is not JSON serializable" -- which surfaces as
+  # every frame being silently dropped by the viewer while the fold itself runs
+  # perfectly (0 of 8 frames arrived, measured on Colab).
+  return (np.asarray(xyz[valid], dtype=np.float32),
+          [str(c) for c in chains[valid]],
+          [int(r) for r in resids[valid]])
