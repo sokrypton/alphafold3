@@ -165,7 +165,7 @@ def haiku_linear_get_params(
   else:
     raise ValueError('num_input_dims must be >= 0.')
 
-  weight_init = _get_initializer_scale(initializer, in_shape)
+  weight_init = get_initializer_scale(initializer, in_shape)
   with hk.name_scope(name) if name else contextlib.nullcontext():
 
     if transpose_weights:
@@ -287,7 +287,7 @@ class Linear(hk.Module):
       else:
         in_shape = ()
 
-      weight_init = _get_initializer_scale(self.initializer, in_shape)
+      weight_init = get_initializer_scale(self.initializer, in_shape)
 
       in_letters = 'abcde'[: self.num_input_dims]
       out_letters = 'hijkl'[: self.num_output_dims]
@@ -324,7 +324,7 @@ class Linear(hk.Module):
     return output
 
 
-def _get_initializer_scale(initializer_name, input_shape):
+def get_initializer_scale(initializer_name, input_shape):
   """Get initializer for weights."""
 
   if initializer_name == 'zeros':

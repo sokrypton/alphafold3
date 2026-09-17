@@ -245,7 +245,7 @@ class _RelativeEncodingProjection(hk.Module):
     num_features = 2 * n_idx + 1 + n_chain
     weights = hk.get_parameter(
         'weights', (num_features, self.num_channels), dtype,
-        hm._get_initializer_scale('linear', (num_features,)))  # pylint: disable=protected-access
+        hm.get_initializer_scale('linear', (num_features,)))
     w_pos = weights[:n_idx]
     w_token = weights[n_idx:2 * n_idx]
     w_entity = weights[2 * n_idx]
