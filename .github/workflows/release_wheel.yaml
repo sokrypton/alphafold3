@@ -4,10 +4,22 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      all_platforms:
+        description: >-
+          Build the full matrix (cp312/313/314 x linux-x86_64, linux-aarch64,
+          macOS-arm64) instead of just Colab's cp313 manylinux x86_64. Nine
+          wheels and ~12 minutes against one and ~3.5. Use it for a release
+          anyone other than Colab installs.
+        type: boolean
+        default: false
 jobs:
   build-wheel:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runs_on }}
+    # COLAB ONLY by default. Colab is Python 3.13 on linux x86_64, and every
+    # other leg of the matrix cost ~8 minutes per build to serve nobody we are
+    # currently shipping to. `all_platforms` brings the other eight back.
     strategy:
       fail-fast: false
       matrix:
@@ -15,12 +27,16 @@ jobs:
           - name: linux-x86_64
             runs_on: ubuntu-latest
             build: "cp312-manylinux_x86_64 cp313-manylinux_x86_64 cp314-manylinux_x86_64"
+            colab: "cp313-manylinux_x86_64"
           - name: linux-aarch64
             runs_on: ubuntu-24.04-arm
             build: "cp312-manylinux_aarch64 cp313-manylinux_aarch64 cp314-manylinux_aarch64"
           - name: macos-arm64
             runs_on: macos-14
             build: "cp312-macosx_arm64 cp313-macosx_arm64 cp314-macosx_arm64"
+
+    # Skip every leg but Colab's unless asked for the lot.
+    if: ${{ inputs.all_platforms || matrix.colab != '' }}
 
     steps:
       - uses: actions/checkout@v6
@@ -65,7 +81,8 @@ jobs:
       - name: Build wheels
         uses: pypa/cibuildwheel@v4.2.1
         env:
-          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_BUILD: >-
+            ${{ (inputs.all_platforms && matrix.build) || matrix.colab }}
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
           CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
           CIBW_BUILD_VERBOSITY: 1
@@ -84,7 +101,11 @@ jobs:
 
   publish:
     needs: [build-wheel]
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    # Any run on a tag ref publishes -- a push, or a workflow_dispatch against
+    # that tag. The dispatch path is the only way to publish the full matrix,
+    # since `inputs` do not exist on a push:
+    #     gh workflow run release_wheel.yaml --ref v3.1.11 -f all_platforms=true
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
