@@ -55,3 +55,41 @@ def recycle_distance(prev, cur):
   if prev is None:
     return float('nan')
   return float(np.abs(np.asarray(cur) - np.asarray(prev)).mean())
+
+
+# py2Dmol's `add(coords, ...)` wants ONE coordinate per position, not the dense
+# (token, atom_slot) grid the model works in. The representative atom differs by
+# polymer: CA for protein, C1' for a nucleotide, and for a ligand there is no
+# canonical one, so the first atom present is used. Read from the layout's own
+# atom names rather than assuming a slot -- CA happens to be slot 1 for every
+# standard residue, which is exactly the kind of coincidence that breaks on the
+# first ligand.
+_REP_ATOMS = ("CA", "C1'")
+
+
+def rep_atom_index(batch):
+  """(token -> slot, valid) for the atom that represents each token."""
+  import numpy as np
+  layout = batch.convert_model_output.token_atoms_layout
+  names = np.asarray(layout.atom_name)
+  present = names != ''
+  idx = np.zeros(names.shape[0], dtype=int)
+  for t in range(names.shape[0]):
+    hit = [j for j in range(names.shape[1]) if names[t, j] in _REP_ATOMS]
+    if hit:
+      idx[t] = hit[0]
+    else:                       # ligand or an unexpected residue: first atom
+      first = np.flatnonzero(present[t])
+      idx[t] = first[0] if first.size else 0
+  return idx, present.any(-1)
+
+
+def frame_positions(positions, batch):
+  """One diffusion frame -> (coords Nx3, chains, residue_numbers), masked."""
+  import numpy as np
+  idx, valid = rep_atom_index(batch)
+  layout = batch.convert_model_output.token_atoms_layout
+  xyz = np.asarray(positions)[np.arange(len(idx)), idx]
+  chains = np.asarray(layout.chain_id)[:, 0]
+  resids = np.asarray(layout.res_id)[:, 0]
+  return xyz[valid], list(chains[valid]), list(resids[valid].astype(int))
