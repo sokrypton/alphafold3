@@ -722,8 +722,26 @@ def make_model_config(
   # sweeping 1 / 256 / 1024 moved steady-state runtime by 0.4% at 512 tokens.
   # It changes MEMORY and it changes the compiled executable -- a different
   # value is a different shape, so it misses a compile cache built at another.
+  #
+  # ANY value is allowed, not just the notebook's ladder. Two need a guard:
+  # below 1 there is no query row, and above the featurisation buffer jax does
+  # NOT raise -- a gather CLAMPS out-of-range indices, so `--num_msa=20000`
+  # against a 16384-row buffer would hand the trunk 3616 duplicates of the
+  # last padded row and fold on quietly (checked: a[arange(3,8)] on a 5-row
+  # array repeats row 4 four times).
   if num_msa is not None:
-    config.evoformer.num_msa = int(num_msa)
+    num_msa = int(num_msa)
+    from alphafold3.model.pipeline import pipeline as _model_pipeline
+    buffer = _model_pipeline.WholePdbPipeline.Config().msa_crop_size
+    if num_msa < 1:
+      raise ValueError(
+          f'--num_msa must be at least 1 -- row 0 is the query -- got {num_msa}.')
+    if num_msa > buffer:
+      print(f'--num_msa={num_msa} is above the {buffer}-row featurisation '
+            f'buffer, so {buffer} is what the trunk can actually read; using '
+            'that. Rows past the buffer would be copies of its last padded row.')
+      num_msa = buffer
+    config.evoformer.num_msa = num_msa
 
   return config
 
