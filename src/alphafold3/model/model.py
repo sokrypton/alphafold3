@@ -193,7 +193,9 @@ def create_target_feat_embedding(
   twice -- once for the trunk and once for the diffusion module.
   """
 
-  dtype = jnp.bfloat16 if global_config.bfloat16 == 'all' else jnp.float32
+  dtype = (jnp.bfloat16
+           if global_config.bfloat16 in ('all', 'intermediate')
+           else jnp.float32)
 
   with utils.bfloat16_context():
     target_feat = featurization.create_target_feat(

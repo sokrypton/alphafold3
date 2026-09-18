@@ -600,6 +600,40 @@ _MSA_SERVER_USER_AGENT = flags.DEFINE_string(
 )
 
 
+def _bfloat16_default() -> str:
+  """GlobalConfig.bfloat16: 'all' where bf16 pays, 'intermediate' where it does not.
+
+  'intermediate' keeps the trunk and confidence head in bf16 and leaves the
+  diffusion sampler in float32 -- which is what this model did for its whole
+  life. 'all' extends bf16 to the sampler too, worth ~10% at 256 tokens on an
+  A10 (cc 8.6).
+
+  The boundary is compute capability 8.0 (Ampere) and it is MEASURED. Below it
+  there are no bf16 tensor cores and XLA's converts cost more than the narrower
+  operands save: on a real Colab T4 (sm_75), openbind0 at 59 residues / 10
+  recycles / 5 samples reads 30.91 s with the sampler in f32 and 32.19 s in
+  bf16 -- +4.2%, over interleaved reps on warm caches. It runs correctly either
+  way, it is just slower, so a T4 gets 'intermediate'.
+
+  The TRUNK keeps bf16 on that card regardless: its own cost there is 1.1%, and
+  'none' would buy that back by doubling the [N, N, 128] pair representation's
+  activation memory on the GPU with the least to spare.
+
+  Here rather than in the model because choosing needs the device, and a model
+  module should not be asking what GPU this is. AF3_SAMPLER_BF16=1 / =0 forces
+  'all' / 'intermediate'.
+  """
+  env = os.environ.get('AF3_SAMPLER_BF16')
+  if env is not None:
+    return 'all' if env not in ('', '0', 'false', 'False') else 'intermediate'
+  try:
+    cc = str(getattr(jax.devices()[0], 'compute_capability', '') or '')
+    major, _, minor = cc.partition('.')
+    return 'all' if (int(major), int(minor or 0)) >= (8, 0) else 'intermediate'
+  except Exception:
+    return 'intermediate'
+
+
 def make_model_config(
     *,
     flash_attention_implementation: tokamax.DotProductAttentionImplementation = 'triton',
@@ -623,6 +657,7 @@ def make_model_config(
   config.num_recycles = num_recycles
   config.return_embeddings = return_embeddings
   config.return_distogram = return_distogram
+  config.global_config.bfloat16 = _bfloat16_default()
   model_registry.get(model_name).configure(config)
   return config
 

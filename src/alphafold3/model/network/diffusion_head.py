@@ -543,10 +543,18 @@ class DiffusionHead(hk.Module):
           name='single_cond_embedding_projection',
       )(_s_cond_in)
 
-      act = jnp.asarray(act, dtype=jnp.float32)
-      trunk_single_cond = jnp.asarray(trunk_single_cond, dtype=jnp.float32)
-      trunk_pair_cond = jnp.asarray(trunk_pair_cond, dtype=jnp.float32)
-      sequence_mask = jnp.asarray(sequence_mask, dtype=jnp.float32)
+      # The sampler's dtype, chosen the way evoformer.py chooses the trunk's.
+      # hm.LayerNorm upcasts a (b)float16 input for its statistics, so those
+      # stay f32 either way; what changes is the operands of every GEMM in the
+      # 24 token blocks and the atom encoder/decoder, and the residual stream
+      # they accumulate on. `precision='highest'` projections above are
+      # unaffected -- they pin their own precision.
+      dtype = (jnp.bfloat16 if self.global_config.bfloat16 == 'all'
+               else jnp.float32)
+      act = jnp.asarray(act, dtype=dtype)
+      trunk_single_cond = jnp.asarray(trunk_single_cond, dtype=dtype)
+      trunk_pair_cond = jnp.asarray(trunk_pair_cond, dtype=dtype)
+      sequence_mask = jnp.asarray(sequence_mask, dtype=dtype)
 
       transformer = diffusion_transformer.Transformer(
           self.config.transformer, self.global_config
@@ -749,13 +757,12 @@ def sample(
   # remainder==0 -- which is the 3.5s case, not something to design around.)
   # xs = (noise_levels[i], noise_levels[i-1]) for i = 1..steps: the pair the
   # carry used to supply, now unbatched under the vmap above.
-  with diffusion_transformer.sampler_scope():
-    result, trajectory = hk.scan(
-        apply_denoising_step,
-        init,
-        (noise_levels[1:], noise_levels[:-1]),
-        unroll=1,
-    )
+  result, trajectory = hk.scan(
+      apply_denoising_step,
+      init,
+      (noise_levels[1:], noise_levels[:-1]),
+      unroll=1,
+  )
   _, positions_out = result
 
   final_dense_atom_mask = jnp.tile(mask[None], (num_samples, 1, 1))
