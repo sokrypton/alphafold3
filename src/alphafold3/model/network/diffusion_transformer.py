@@ -59,6 +59,7 @@ def adaptive_layernorm(x, single_cond, name, global_config=None, atom=False):
   esm = (atom and global_config is not None
          and global_config.model in model_config.SWA_ROPE_ATOM_ATTENTION)
   identity_scale = chai or esm
+  lowp = False
   if single_cond is None:
     x = hm.LayerNorm(name=f'{name}layer_norm', use_fast_variance=False)(x)
   else:
@@ -80,6 +81,9 @@ def adaptive_layernorm(x, single_cond, name, global_config=None, atom=False):
           use_fast_variance=False,
           create_offset=False,
       )(single_cond)
+    lowp = _sampler_lowp(x) and _sampler_lowp(single_cond)
+    if lowp:
+      single_cond = single_cond.astype(jnp.bfloat16)
     single_scale = hm.Linear(
         x.shape[-1],
         initializer='zeros',
@@ -90,7 +94,12 @@ def adaptive_layernorm(x, single_cond, name, global_config=None, atom=False):
         x.shape[-1], initializer='zeros', name=f'{name}single_cond_bias'
     )(single_cond)
     gate = (single_scale + 1.0) if identity_scale else jax.nn.sigmoid(single_scale)
+    # promotes back to f32 (x is f32): the modulation itself is unchanged
     x = gate * x + single_bias
+    if lowp:
+      # the block's q/k/v/gate projections, transition and output projection
+      # read bf16 operands from here on
+      return x.astype(jnp.bfloat16)
   return x
 
 
@@ -141,6 +150,8 @@ def adaptive_zero_init(
   else:
     output = hm.Linear(num_channels, name=f'{name}transition2')(x)
     # Init to a small gain, sigmoid(-2) ~ 0.1
+    if x.dtype == jnp.bfloat16 and _sampler_lowp(single_cond):
+      single_cond = single_cond.astype(jnp.bfloat16)
     cond = hm.Linear(
         output.shape[-1],
         initializer='zeros',
@@ -350,6 +361,55 @@ def self_attention(
       project=project_output,
   )
   return output
+
+
+def _sampler_bf16_default():
+  """On by default where bf16 has tensor-core support, off below it.
+
+  The 200-step sampler is the model's one f32 island, and putting its block
+  GEMMs on bf16 operands is worth ~14% at 256 tokens (measured, A10). But a
+  card without hardware bf16 -- a Colab T4 is sm_75 -- gets no tensor-core
+  path and XLA emulates the casts, so the lever is gated on compute
+  capability 8.0 (Ampere) and above rather than shipped blind. Override
+  either way with AF3_SAMPLER_BF16=1 / =0.
+  """
+  env = os.environ.get('AF3_SAMPLER_BF16')
+  if env is not None:
+    return env not in ('', '0', 'false', 'False')
+  try:
+    import jax  # local: this must not import jax at module scope
+    cc = str(getattr(jax.devices()[0], 'compute_capability', '') or '')
+    major, _, minor = cc.partition('.')
+    return (int(major), int(minor or 0)) >= (8, 0)
+  except Exception:
+    return False
+
+
+_SAMPLER_BF16 = None          # resolved on first use: jax devices are not up at import
+_SAMPLER_DEPTH = [0]
+
+
+class sampler_scope:
+  """Raised while `diffusion_head.sample` traces, so the bf16 operand casts
+  below apply to the sampler's blocks only -- the trunk pairformer's single
+  attention calls the same two functions and must keep its own dtype."""
+
+  def __enter__(self):
+    _SAMPLER_DEPTH[0] += 1
+    return self
+
+  def __exit__(self, *exc):
+    _SAMPLER_DEPTH[0] -= 1
+    return False
+
+
+def _sampler_lowp(x):
+  """bf16 inside the sampler scope on an f32 island; unchanged elsewhere."""
+  global _SAMPLER_BF16
+  if _SAMPLER_BF16 is None:
+    _SAMPLER_BF16 = _sampler_bf16_default()
+  return (_SAMPLER_BF16 and _SAMPLER_DEPTH[0] > 0
+          and x is not None and x.dtype == jnp.float32)
 
 
 def _stack(num_layer, fn, remat, **kwargs):
