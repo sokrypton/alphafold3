@@ -1212,7 +1212,15 @@ def write_outputs(
           compress=compress_large_output_files,
       )
       ranking_score = float(result.metadata['ranking_score'])
-      ranking_scores.append((seed, sample_idx, ranking_score))
+      # WHICH model produced it. The name is already in the sample's mmCIF
+      # (`_software.version`, from InferenceResult.model_id), but finding out
+      # that model_4 won meant opening five files. For AF3 this is the version
+      # string and constant across samples, so the column is only added when
+      # the samples actually differ.
+      model_tag = getattr(result, 'model_id', b'') or b''
+      if isinstance(model_tag, bytes):
+        model_tag = model_tag.rstrip(b'\x00').decode('ascii', 'replace')
+      ranking_scores.append((seed, sample_idx, ranking_score, model_tag))
       if max_ranking_score is None or ranking_score > max_ranking_score:
         max_ranking_score = ranking_score
         max_ranking_result = result
@@ -1248,8 +1256,14 @@ def write_outputs(
     ranking_scores_csv_path = output_dir / f'{job_name}_ranking_scores.csv'
     with ranking_scores_csv_path.open('w') as f:
       writer = csv.writer(f)
-      writer.writerow(['seed', 'sample', 'ranking_score'])
-      writer.writerows(ranking_scores)
+      tags = {r[3] for r in ranking_scores}
+      if len(tags) > 1:
+        writer.writerow(['seed', 'sample', 'ranking_score', 'model'])
+        writer.writerows(ranking_scores)
+      else:
+        # One model, so the column would be the same word five times.
+        writer.writerow(['seed', 'sample', 'ranking_score'])
+        writer.writerows([r[:3] for r in ranking_scores])
 
 
 def replace_db_dir(
