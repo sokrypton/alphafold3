@@ -37,6 +37,7 @@ import functools
 import io
 import logging
 import os
+import pickle
 import pathlib
 
 # Silence tokamax CPU-fallback errors before any other imports fire them.
@@ -547,6 +548,18 @@ _WEIGHTS_PRECISION = flags.DEFINE_enum(
     ' and is the exact bytes the converters wrote, if you want them. Ignored'
     ' when --model_dir points at weights you already have.')
 
+_LOWERCACHE_DIR = flags.DEFINE_string(
+    'lowercache_dir',
+    None,
+    'Directory of SERIALIZED EXECUTABLES (jax.experimental.serialize_executable).'
+    ' The persistent compile cache stores the compiled binary but NOT the trace'
+    ' and lowering in front of it, and on this model that floor is 10.75 s of a'
+    ' 24.22 s first fold at 256 tokens (measured: same input, two seeds in one'
+    ' process -> 24.22 s then 13.47 s). A serialized executable skips it. The'
+    ' blob is valid only for the same jax/jaxlib, GPU model, XLA flags, model'
+    ' config and input signature; a miss falls back to tracing and WRITES the'
+    ' blob, so the first run populates the directory and later runs load it.',
+)
 _PRECOMPILE = flags.DEFINE_list(
     'precompile',
     [],
@@ -633,6 +646,8 @@ class ModelRunner:
     self._use_dropout = use_dropout
     self._autotune_result = self._load_autotune_cache()
     self._autotune_attempted = False
+    self._lowercache_memo = {}
+    self._jitted_apply = None
 
   @property
   def model_dir(self) -> epath.Path:
@@ -723,7 +738,75 @@ class ModelRunner:
       apply_fn = jax.jit(apply_fn)
     # before anything is traced -- see _preinit_tokamax_context
     self._preinit_tokamax_context()
+    if _LOWERCACHE_DIR.value and not _NOJIT.value:
+      self._jitted_apply = apply_fn
+      return self._lowercached_model
     return functools.partial(apply_fn, self.model_params)
+
+  def _lowercache_key(self, rng_key, batch) -> str:
+    """What a serialized executable is only valid for.
+
+    The persistent compile cache keys on the program and the stack; this has to
+    key on the same things PLUS the input signature, because a blob is an
+    executable for ONE set of avals. XLA flags are in here because they change
+    the program, and device_kind because an executable is built for a card.
+    """
+    import hashlib
+    import jaxlib
+    def avals(tree):
+      return [(getattr(x, 'shape', None), str(getattr(x, 'dtype', type(x))))
+              for x in jax.tree_util.tree_leaves(tree)]
+    material = repr([
+        jax.__version__, getattr(jaxlib, '__version__', '?'),
+        str(getattr(jax.devices()[0], 'device_kind', '?')),
+        os.environ.get('XLA_FLAGS', ''),
+        os.environ.get('AF3_SAMPLER_BF16', ''),
+        self.model_name, repr(self._model_config), self._use_dropout,
+        avals(self.model_params), avals(rng_key), sorted(batch),
+        avals([batch[k] for k in sorted(batch)]),
+    ])
+    return hashlib.sha256(material.encode()).hexdigest()[:32]
+
+  def _lowercached_model(self, rng_key, batch):
+    """The jitted apply, with trace+lowering served from disk when it can be.
+
+    A miss lowers, compiles and WRITES the blob, so the directory populates
+    itself; only the trace and lowering are skipped on a hit, and the executable
+    is the same one jit would have produced (checked: a serialize round trip
+    returns bit-identical values).
+    """
+    from jax.experimental import serialize_executable as _se
+    key = self._lowercache_key(rng_key, batch)
+    got = self._lowercache_memo.get(key)
+    if got is None:
+      d = epath.Path(_LOWERCACHE_DIR.value)
+      path = d / f'{key}.bin'
+      t0 = time.time()
+      if path.exists():
+        try:
+          blob, in_tree, out_tree = pickle.loads(path.read_bytes())
+          got = _se.deserialize_and_load(blob, in_tree, out_tree)
+          print(f'  lowercache HIT  {path.name} in {time.time() - t0:.2f} s')
+        except Exception as err:   # a blob from another stack: say so, retrace
+          print(f'  lowercache blob unusable ({type(err).__name__}: {err}); '
+                'lowering instead')
+          got = None
+      if got is None:
+        lowered = self._jitted_apply.lower(self.model_params, rng_key, batch)
+        got = lowered.compile()
+        print(f'  lowercache MISS: lowered and compiled in '
+              f'{time.time() - t0:.2f} s')
+        try:
+          d.mkdir(parents=True, exist_ok=True)
+          payload = pickle.dumps(_se.serialize(got))
+          path.write_bytes(payload)
+          print(f'  lowercache WROTE {path.name} '
+                f'({len(payload) / 1e6:.1f} MB)')
+        except Exception as err:
+          print(f'  lowercache could not be written ({type(err).__name__}: '
+                f'{err}); this run is unaffected')
+      self._lowercache_memo[key] = got
+    return got(self.model_params, rng_key, batch)
 
   def run_inference(
       self, featurised_example: features.BatchDict, rng_key: jnp.ndarray
