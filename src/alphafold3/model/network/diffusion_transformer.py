@@ -180,6 +180,13 @@ def _pair_logits_from_normalized(pair_hat, num_head, dtype, create_offset):
   return logits if offset is None else logits + (offset @ weights).astype(logits.dtype)
 
 
+# layer_stack names itself after `with_per_layer_inputs`, so say the name explicitly
+_LAYER_STACK = '__layer_stack_no_per_layer'
+
+# holding every block's logits costs num_blocks * num_head * N^2; past this, rebuild
+_PRECOMPUTED_LOGITS_BUDGET = 3 * 1024 ** 3
+
+
 def _trans_mask(global_config, mask):
   """The mask a transition should apply, or None -- see MASK_TRANSITIONS."""
   if global_config.model in model_config.MASK_TRANSITIONS:
@@ -429,6 +436,9 @@ class Transformer(hk.Module):
       single_cond: jnp.ndarray,
       pair_cond: jnp.ndarray | None,
       extra_pair_bias: jnp.ndarray | None = None,
+      *,
+      precompute_pair_logits: bool = False,
+      pair_logits: jnp.ndarray | None = None,
   ) -> jnp.ndarray:
     assert self.config.num_blocks % self.config.super_block_size == 0
     num_super_blocks = self.config.num_blocks // self.config.super_block_size
@@ -444,6 +454,9 @@ class Transformer(hk.Module):
     per_block_pair = (
         self.global_config.model in model_config.PER_BLOCK_PAIR_LAYER_NORM
         or chai)
+    if precompute_pair_logits and not (per_block_pair and pair_cond is not None):
+      # stock alphafold3 precomputes its pair logits already; nothing to hand on
+      return None
     if per_block_pair and pair_cond is not None:
       # OF3 mode: per-block pair LayerNorm + projection. pair_cond is shared
       # across all blocks; each block in the layer_stack gets its own LN/Linear
@@ -458,14 +471,42 @@ class Transformer(hk.Module):
       create_offset = model_config.affine_norm(self.global_config.model,
                                                'pair_input_layer_norm')
 
-      def block(act):  # pylint: disable=function-redefined
-        block_pair_logits = _pair_logits_from_normalized(
+      def logits_of_block():
+        out = _pair_logits_from_normalized(
             pair_hat, self.config.attention.num_head, pair_cond.dtype,
             create_offset)
-        block_pair_logits = jnp.transpose(block_pair_logits, [2, 0, 1])
+        out = jnp.transpose(out, [2, 0, 1])
         if extra_pair_bias is not None:
-          block_pair_logits = block_pair_logits + extra_pair_bias[None].astype(
-              block_pair_logits.dtype)
+          out = out + extra_pair_bias[None].astype(out.dtype)
+        return out
+
+      logits_bytes = (self.config.num_blocks * self.config.attention.num_head
+                      * pair_cond.shape[0] * pair_cond.shape[1]
+                      * jnp.dtype(pair_cond.dtype).itemsize)
+      if precompute_pair_logits and logits_bytes > _PRECOMPUTED_LOGITS_BUDGET:
+        return None
+      if precompute_pair_logits:
+        # Every block's logits in one pass, for a caller that will hold them
+        # across the whole sampling loop instead of rebuilding them per step.
+        # The stacks carry the same explicit name as the ones below, so both
+        # find one set of parameters -- haiku gives a child the same name in
+        # every call of the method that builds it. `with_per_layer_inputs`
+        # would otherwise rename the stack and miss the checkpoint entirely.
+        def collect(carry):
+          return carry, logits_of_block()
+
+        def collect_super(carry):
+          return _stack(self.config.super_block_size, collect, False,
+                        with_per_layer_inputs=True, name=_LAYER_STACK)(carry)
+
+        _, every = _stack(num_super_blocks, collect_super, False,
+                          with_per_layer_inputs=True, name=_LAYER_STACK)(
+                              jnp.zeros((), jnp.float32))
+        return every
+
+      def block(act, given_logits=None):  # pylint: disable=function-redefined
+        block_pair_logits = (logits_of_block() if given_logits is None
+                             else given_logits)
         attn = self_attention(
             act, mask, block_pair_logits,
             self.config.attention, self.global_config, single_cond,
@@ -489,6 +530,21 @@ class Transformer(hk.Module):
               self.global_config, single_cond, name=self.name,
               mask=_trans_mask(self.global_config, mask),
           )
+        return act
+
+      if pair_logits is not None:
+        def take(act, given_logits):
+          return block(act, given_logits), None
+
+        def super_block(act, super_logits):  # pylint: disable=function-redefined
+          act, _ = _stack(self.config.super_block_size, take,
+                          self.config.block_remat, with_per_layer_inputs=True,
+                          name=_LAYER_STACK)(act, super_logits)
+          return act, None
+
+        act, _ = _stack(num_super_blocks, super_block, False,
+                        with_per_layer_inputs=True, name=_LAYER_STACK)(
+                            act, pair_logits)
         return act
 
       def super_block(act):  # pylint: disable=function-redefined
