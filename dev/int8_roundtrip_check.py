@@ -30,7 +30,25 @@ int8_root = os.path.expanduser(sys.argv[2] if len(sys.argv) > 2
                                else '~/ported_int8')
 fp32 = params.get_model_haiku_params(model_dir=os.path.expanduser(f'~/ported/{m}'))
 q8 = params.get_model_haiku_params(model_dir=os.path.join(int8_root, m))
-missing = set(fp32) ^ set(q8)
+# FULL (scope, name) pairs, not `set(fp32) ^ set(q8)`. That compared SCOPE names
+# only and merely PRINTED the count, so a blob quantised before a parameter
+# existed sailed through: boltz2 shipped without
+# `diffuser/boltz2_cyclic_conditioning/weights` and a diffusion-head bias, and
+# opendde without `distogram_head/half_logits/bias` -- neither LOADS. A missing
+# parameter is a different failure from a coarse one and has to be fail-closed.
+keys_fp32 = {(s_, n_) for s_, d in fp32.items() for n_ in d}
+keys_q8 = {(s_, n_) for s_, d in q8.items() for n_ in d}
+only_fp32, only_q8 = sorted(keys_fp32 - keys_q8), sorted(keys_q8 - keys_fp32)
+if only_fp32 or only_q8:
+  print(f'{m}: PARAMETER SETS DIFFER -- this blob is STALE, not just quantised.')
+  for s_, n_ in only_fp32[:8]:
+    print(f'  missing from the quantised blob: {s_}/{n_}')
+  for s_, n_ in only_q8[:8]:
+    print(f'  present only in the quantised blob: {s_}/{n_}')
+  print(f'  ({len(only_fp32)} missing, {len(only_q8)} extra) '
+        'Re-run the quantiser against the CURRENT float32 blob.')
+  raise SystemExit(1)
+missing = keys_fp32 ^ keys_q8
 worst, worst_name, worst_abs, n = 0.0, None, 0.0, 0
 for scope in fp32:
   for name in fp32[scope]:

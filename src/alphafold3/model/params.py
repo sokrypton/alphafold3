@@ -233,6 +233,38 @@ def select_model_files(
 _Q_SCALE_SUFFIX = '__q_scale'
 
 
+def dequantise_int8(q, scale):
+  """int8 payload times its scales -> float32.
+
+  Scales are per-CHANNEL over the last axis and per-BLOCK of rows down the
+  reduction axis, so one outlying row no longer coarsens a whole column. The
+  block count is not stored: it is `scale.shape[0]`, and the rows per block are
+  recovered as ceil(rows / blocks) exactly as the writer derived them
+  (converters/quantise._quantise_blocked) -- the two must agree or every
+  weight is scaled by the wrong number.
+
+  A 1-D `scale` is a blob written before the scales were split down the
+  reduction axis. Those still load, and must keep loading: they are what is
+  published today.
+
+  This is the ONE implementation. converters/quantise.py imports it rather than
+  restating it -- a second copy of a layout agreement is how half a fix ships.
+  """
+  shape = q.shape
+  flat = np.asarray(q).reshape(-1, shape[-1]).astype(np.float32)
+  scale = np.asarray(scale, np.float32)
+  if scale.ndim == 1:
+    return (flat * scale).reshape(shape)
+  rows, channels = flat.shape
+  blocks = scale.shape[0]
+  g = -(-rows // blocks)
+  pad = blocks * g - rows
+  if pad:
+    flat = np.concatenate([flat, np.zeros((pad, channels), np.float32)])
+  out = flat.reshape(blocks, g, channels) * scale[:, None, :]
+  return out.reshape(-1, channels)[:rows].reshape(shape)
+
+
 def _dequantise_records(records):
   """Undo bfloat16 / int8 storage. A float32 blob passes through untouched.
 
@@ -255,9 +287,7 @@ def _dequantise_records(records):
   for scope, name, arr in payload:
     scale = scales.pop((scope, name), None)
     if scale is not None:
-      shape = arr.shape
-      arr = (arr.reshape(-1, shape[-1]).astype(np.float32)
-             * scale).reshape(shape)
+      arr = dequantise_int8(arr, scale)
     elif arr.dtype == np.uint16:          # a bfloat16 bit pattern
       arr = (arr.astype(np.uint32) << 16).view(np.float32)
     elif arr.dtype == np.float16:
