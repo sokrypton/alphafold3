@@ -367,11 +367,20 @@ def _sampler_bf16_default():
   """On by default where bf16 has tensor-core support, off below it.
 
   The 200-step sampler is the model's one f32 island, and putting its block
-  GEMMs on bf16 operands is worth ~14% at 256 tokens (measured, A10). But a
-  card without hardware bf16 -- a Colab T4 is sm_75 -- gets no tensor-core
-  path and XLA emulates the casts, so the lever is gated on compute
-  capability 8.0 (Ampere) and above rather than shipped blind. Override
-  either way with AF3_SAMPLER_BF16=1 / =0.
+  GEMMs on bf16 operands is worth ~14% at 256 tokens (measured, A10).
+
+  Gated at compute capability 8.0 (Ampere) because it is MEASURED to cost time
+  below it, not out of caution: on a Colab T4 (sm_75, no bf16 tensor cores),
+  openbind0 at 59 residues / 10 recycles / 5 samples reads 30.91 s with the
+  lever off and 32.19 s on -- +4.2%, consistent over interleaved reps on warm
+  caches. It RUNS there and folds correctly; XLA's converts simply cost more
+  than the narrower operands save when there is no tensor-core path to reach.
+  (The counter-argument was reasonable -- the trunk already runs bf16 on that
+  same card under GlobalConfig.bfloat16='all' -- so it was tested rather than
+  assumed. Measured at one small size, which is what a T4 is used for; the
+  bandwidth case would be stronger on a large input, if one fit.)
+
+  Override either way with AF3_SAMPLER_BF16=1 / =0.
   """
   env = os.environ.get('AF3_SAMPLER_BF16')
   if env is not None:
