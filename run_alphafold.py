@@ -632,6 +632,7 @@ class ModelRunner:
     # (bernoulli(keep=1) is all-ones) and toggling costs no recompile.
     self._use_dropout = use_dropout
     self._autotune_result = self._load_autotune_cache()
+    self._autotune_attempted = False
 
   @property
   def model_dir(self) -> epath.Path:
@@ -735,7 +736,16 @@ class ModelRunner:
         self._device,
     )
 
-    if self._autotune_result is None and self._autotune_cache_path:
+    # ONCE PER PROCESS, and say why if it fails. On a failure this left
+    # _autotune_result None, so every later inference tried again -- once per
+    # seed, per bucket, per fold job -- and swallowed the reason each time:
+    # silent repeated work with nothing to diagnose from. Anthropic's af3_jax
+    # optimization kit reports the same thing against this fork as its FIX1
+    # lever ('stock calls tokamax.autotune() before the first inference of
+    # every new bucket size and the call raises on this stack').
+    if (self._autotune_result is None and self._autotune_cache_path
+        and not self._autotune_attempted):
+      self._autotune_attempted = True
       try:
         self._autotune_result = tokamax.autotune(self._model, rng_key, featurised_example)
         os.makedirs(os.path.dirname(os.path.abspath(self._autotune_cache_path)), exist_ok=True)
@@ -743,8 +753,9 @@ class ModelRunner:
           self._autotune_result.dump(f)
         print(f'Tokamax autotune cache saved to {self._autotune_cache_path}')
         print('Subsequent runs will load this cache and skip autotuning.')
-      except Exception:
-        pass  # Autotune not supported on this device/jaxlib combo; runs fine without it.
+      except Exception as err:  # pylint: disable=broad-except
+        print('TOKAMAX autotune unavailable, continuing without it: '
+              f'{type(err).__name__}: {err}')
 
     if self._autotune_result is not None:
       with self._autotune_result:
