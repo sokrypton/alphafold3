@@ -970,6 +970,26 @@ PADDED_SINGLE_COND = (('openfold3', 'openbind0', 'rosettafold3', 'opendde')
 class GlobalConfig(base_config.BaseConfig):
   """Global configuration for the AlphaFold3 model."""
 
+  # Three states, and the third was dead until 2026-09-18: `intermediate` was
+  # declared here, read nowhere, and would trip evoformer's own assert.
+  #
+  #   'all'          trunk + confidence head AND the diffusion sampler in bf16
+  #   'intermediate' trunk + confidence head in bf16, the sampler in float32
+  #   'none'         float32 throughout
+  #
+  # `intermediate` is what this model did for its whole life: DiffusionHead
+  # casts the activation and both conditionings back to f32 before the 24-block
+  # token transformer, so the sampler was the one f32 island inside an otherwise
+  # bf16 model. 'all' now means what it says, and is worth ~10% at 256 tokens on
+  # an A10.
+  #
+  # Which one to pick needs the DEVICE, so it is chosen where the config is
+  # built (run_alphafold.make_model_config), not here. Below compute capability
+  # 8.0 there are no bf16 tensor cores and the sampler in bf16 is measured to
+  # COST 4.2% on a Colab T4 -- that card wants 'intermediate'. (Its trunk pays
+  # only 1.1% for bf16 and keeps it, because 'none' would double the
+  # [N, N, 128] pair representation's activation memory on the card with the
+  # least to spare.)
   bfloat16: Literal['all', 'none', 'intermediate'] = 'all'
   final_init: Literal['zeros', 'linear'] = 'zeros'
   pair_attention_chunk_size: Sequence[_Shape2DType] = ((1536, 128), (None, 32))

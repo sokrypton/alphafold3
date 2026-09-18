@@ -20,23 +20,19 @@ jobs:
     # COLAB ONLY by default. Colab is Python 3.13 on linux x86_64, and every
     # other leg of the matrix cost ~8 minutes per build to serve nobody we are
     # currently shipping to. `all_platforms` brings the other eight back.
+    # The MATRIX decides, not a job-level `if`. A job-level `if` cannot see the
+    # `matrix` context (only github / needs / vars / inputs), so
+    # `if: inputs.all_platforms || matrix.colab != ''` made the whole file
+    # invalid -- GitHub created no jobs at all and reported "workflow file
+    # issue", which is why the v3.1.11 tag built nothing. `strategy` CAN see
+    # `inputs`, so the leg list is chosen here instead.
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: linux-x86_64
-            runs_on: ubuntu-latest
-            build: "cp312-manylinux_x86_64 cp313-manylinux_x86_64 cp314-manylinux_x86_64"
-            colab: "cp313-manylinux_x86_64"
-          - name: linux-aarch64
-            runs_on: ubuntu-24.04-arm
-            build: "cp312-manylinux_aarch64 cp313-manylinux_aarch64 cp314-manylinux_aarch64"
-          - name: macos-arm64
-            runs_on: macos-14
-            build: "cp312-macosx_arm64 cp313-macosx_arm64 cp314-macosx_arm64"
-
-    # Skip every leg but Colab's unless asked for the lot.
-    if: ${{ inputs.all_platforms || matrix.colab != '' }}
+        include: >-
+          ${{ fromJSON(inputs.all_platforms
+          && '[{"name":"linux-x86_64","runs_on":"ubuntu-latest","build":"cp312-manylinux_x86_64 cp313-manylinux_x86_64 cp314-manylinux_x86_64"},{"name":"linux-aarch64","runs_on":"ubuntu-24.04-arm","build":"cp312-manylinux_aarch64 cp313-manylinux_aarch64 cp314-manylinux_aarch64"},{"name":"macos-arm64","runs_on":"macos-14","build":"cp312-macosx_arm64 cp313-macosx_arm64 cp314-macosx_arm64"}]'
+          || '[{"name":"linux-x86_64","runs_on":"ubuntu-latest","build":"cp313-manylinux_x86_64"}]') }}
 
     steps:
       - uses: actions/checkout@v6
@@ -81,8 +77,7 @@ jobs:
       - name: Build wheels
         uses: pypa/cibuildwheel@v4.2.1
         env:
-          CIBW_BUILD: >-
-            ${{ (inputs.all_platforms && matrix.build) || matrix.colab }}
+          CIBW_BUILD: ${{ matrix.build }}
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
           CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
           CIBW_BUILD_VERBOSITY: 1

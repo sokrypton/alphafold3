@@ -326,10 +326,20 @@ parameters are the exception: they are not ours to redistribute, so `--model
 alphafold3` needs `--model_dir` pointing at your own copy.
 
 **Smaller downloads.** `--weights_precision int8` fetches the same weights stored
-as 8-bit with a per-channel scale, expanded back when the model loads. This is a
-storage format, not a compute one — inference is unchanged. Measured cost on
-rosettafold3: within sampling noise on protein, ligand, RNA and a D/L peptide,
-with stereochemistry unchanged.
+as 8-bit, expanded back when the model loads. This is a storage format, not a
+compute one — inference is unchanged. Measured cost on rosettafold3: within
+sampling noise on protein, ligand, RNA and a D/L peptide, with stereochemistry
+unchanged; on 6MRR the int8 blobs fold at float32's accuracy (boltz2 0.557 vs
+0.558, opendde 1.194 vs 1.197, openfold3 1.642 vs 1.639 CA-RMSD).
+
+Scales are per output channel AND per block of 128 rows down the reduction axis,
+halved until the tensor is within 1e-2 relative rms — one outlying row no longer
+sets the step for a whole column, which on a 250x-outlier tensor is a 10x lower
+weight error. **These blobs are bigger than the ones published before 2026-09-18
+(+30% overall), and that is the point:** under a single per-channel scale the
+other rows quantised toward zero and compressed away, so the old files were
+small partly because they were discarding information. Blobs written under the
+older scheme still load.
 
 `fp16` is the same idea at half precision, and it now exists for every model —
 it had been an accepted flag with nothing published behind it, so
@@ -337,16 +347,16 @@ it had been an accepted flag with nothing published behind it, so
 
 | `--model` | fp32 | fp16 | int8 |
 |---|---|---|---|
-| `chai1` | 1.20 GB | 0.60 GB | 0.27 GB |
-| `protenix1` | 0.99 GB | 0.47 GB | 0.14 GB |
-| `protenix2` | 1.33 GB | 0.61 GB | 0.19 GB |
-| `rosettafold3` | 1.36 GB | 0.65 GB | 0.27 GB |
-| `openfold3` | 1.37 GB | 0.68 GB | 0.27 GB |
-| `openbind0` | 1.31 GB | 0.68 GB | 0.27 GB |
-| `intellifold2` | 1.77 GB | 1.37 GB | 0.63 GB |
-| `boltz2` | 1.88 GB | 0.94 GB | 0.36 GB |
-| `opendde` | 2.47 GB | 0.94 GB | 0.35 GB |
-| `esmfold2` | 0.87 GB | 0.43 GB | 0.18 GB |
+| `chai1` | 1.20 GB | 0.60 GB | 0.31 GB |
+| `protenix1` | 0.99 GB | 0.47 GB | 0.23 GB |
+| `protenix2` | 1.33 GB | 0.61 GB | 0.29 GB |
+| `rosettafold3` | 1.36 GB | 0.65 GB | 0.35 GB |
+| `openfold3` | 1.37 GB | 0.68 GB | 0.35 GB |
+| `openbind0` | 1.31 GB | 0.68 GB | 0.35 GB |
+| `intellifold2` | 1.77 GB | 1.37 GB | 0.80 GB |
+| `boltz2` | 1.88 GB | 0.94 GB | 0.49 GB |
+| `opendde` | 2.47 GB | 0.94 GB | 0.54 GB |
+| `esmfold2` | 0.87 GB | 0.43 GB | 0.23 GB |
 
 Each precision caches to its own directory (`<model>-int8/`), so asking for one
 never silently gets you the other, and switching back to a form you already have

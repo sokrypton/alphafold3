@@ -193,7 +193,9 @@ def create_target_feat_embedding(
   twice -- once for the trunk and once for the diffusion module.
   """
 
-  dtype = jnp.bfloat16 if global_config.bfloat16 == 'all' else jnp.float32
+  dtype = (jnp.bfloat16
+           if global_config.bfloat16 in ('all', 'intermediate')
+           else jnp.float32)
 
   with utils.bfloat16_context():
     target_feat = featurization.create_target_feat(
@@ -638,13 +640,18 @@ class Model(hk.Module):
       return {'pair_cond': pair_cond, 'atom_cond': atom_cond,
               'init': init, 'noise_levels': noise_levels}
     if diffusion_state is not None:
+      # `noise_level` is the PAIR the scanned path feeds as xs: (sigma_i,
+      # sigma_{i-1}). The previous level used to ride in the carry, which made
+      # it per-sample and re-traced the whole noise/AdaLN half of the step at
+      # num_samples * num_tokens; it is a scan input on both paths now, so the
+      # driver has to hand over both.
       carry, noise_level = diffusion_state
       body = diffusion_head.make_denoising_body(
           denoising_step, batch.predicted_structure_info.atom_mask,
           sample_config, self.global_config,
           self.global_config.model == 'chai1')
       body = hk.vmap(body, in_axes=(0, None), split_rng=not hk.running_init())
-      if jnp.ndim(noise_level) == 0:
+      if jnp.ndim(noise_level[0]) == 0:
         carry, (positions, denoised) = body(carry, noise_level)
         return {'carry': carry, 'atom_positions': positions,
                 'denoised': denoised}

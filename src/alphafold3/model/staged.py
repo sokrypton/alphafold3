@@ -179,13 +179,17 @@ def staged_fold(config, params, *, jit=True, chunk=10,
     # chunk drops to 1; the cost of that is now 8% rather than the 14x it was
     # before the trace was memoised.
     k = 1 if on_step else max(1, chunk)
-    todo = levels[1:]
+    # The step consumes a PAIR of sigmas, (this level, the previous one).
+    # The previous one used to live in the carry; it is a scan input now, so
+    # the same work is traced once per step instead of once per sample.
+    todo, prev = levels[1:], levels[:-1]
     t = 0
     while t < len(todo):
       window = todo[t:t + k]   # NOT `chunk`: that is the parameter, and
                               # assigning it here made it local and unbound
-      out = step(params, rng_key, batch, carry, key, dcarry,
-                 window if len(window) > 1 else window[0],
+      pwin = prev[t:t + k]
+      xs = ((window, pwin) if len(window) > 1 else (window[0], pwin[0]))
+      out = step(params, rng_key, batch, carry, key, dcarry, xs,
                  st['pair_cond'], atom_arrays)
       dcarry = out['carry']
       if on_step is not None:
@@ -206,7 +210,7 @@ def staged_fold(config, params, *, jit=True, chunk=10,
             raise ValueError(
                 f'on_step returned {steered.shape}, expected '
                 f'{dcarry[1].shape} (num_samples, num_tokens, max_atoms, 3)')
-          dcarry = (dcarry[0], steered, dcarry[2])
+          dcarry = (dcarry[0], steered)
       if on_frame:
         # The DENOISER'S PREDICTION, not the noisy state it hands on. See
         # make_denoising_body: the state is a cloud early (830 A radius of

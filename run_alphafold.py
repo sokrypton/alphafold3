@@ -37,6 +37,7 @@ import functools
 import io
 import logging
 import os
+import pickle
 import pathlib
 
 # Silence tokamax CPU-fallback errors before any other imports fire them.
@@ -547,6 +548,18 @@ _WEIGHTS_PRECISION = flags.DEFINE_enum(
     ' and is the exact bytes the converters wrote, if you want them. Ignored'
     ' when --model_dir points at weights you already have.')
 
+_LOWERCACHE_DIR = flags.DEFINE_string(
+    'lowercache_dir',
+    None,
+    'Directory of SERIALIZED EXECUTABLES (jax.experimental.serialize_executable).'
+    ' The persistent compile cache stores the compiled binary but NOT the trace'
+    ' and lowering in front of it, and on this model that floor is 10.75 s of a'
+    ' 24.22 s first fold at 256 tokens (measured: same input, two seeds in one'
+    ' process -> 24.22 s then 13.47 s). A serialized executable skips it. The'
+    ' blob is valid only for the same jax/jaxlib, GPU model, XLA flags, model'
+    ' config and input signature; a miss falls back to tracing and WRITES the'
+    ' blob, so the first run populates the directory and later runs load it.',
+)
 _PRECOMPILE = flags.DEFINE_list(
     'precompile',
     [],
@@ -641,6 +654,40 @@ _MSA_SERVER_USER_AGENT = flags.DEFINE_string(
 )
 
 
+def _bfloat16_default() -> str:
+  """GlobalConfig.bfloat16: 'all' where bf16 pays, 'intermediate' where it does not.
+
+  'intermediate' keeps the trunk and confidence head in bf16 and leaves the
+  diffusion sampler in float32 -- which is what this model did for its whole
+  life. 'all' extends bf16 to the sampler too, worth ~10% at 256 tokens on an
+  A10 (cc 8.6).
+
+  The boundary is compute capability 8.0 (Ampere) and it is MEASURED. Below it
+  there are no bf16 tensor cores and XLA's converts cost more than the narrower
+  operands save: on a real Colab T4 (sm_75), openbind0 at 59 residues / 10
+  recycles / 5 samples reads 30.91 s with the sampler in f32 and 32.19 s in
+  bf16 -- +4.2%, over interleaved reps on warm caches. It runs correctly either
+  way, it is just slower, so a T4 gets 'intermediate'.
+
+  The TRUNK keeps bf16 on that card regardless: its own cost there is 1.1%, and
+  'none' would buy that back by doubling the [N, N, 128] pair representation's
+  activation memory on the GPU with the least to spare.
+
+  Here rather than in the model because choosing needs the device, and a model
+  module should not be asking what GPU this is. AF3_SAMPLER_BF16=1 / =0 forces
+  'all' / 'intermediate'.
+  """
+  env = os.environ.get('AF3_SAMPLER_BF16')
+  if env is not None:
+    return 'all' if env not in ('', '0', 'false', 'False') else 'intermediate'
+  try:
+    cc = str(getattr(jax.devices()[0], 'compute_capability', '') or '')
+    major, _, minor = cc.partition('.')
+    return 'all' if (int(major), int(minor or 0)) >= (8, 0) else 'intermediate'
+  except Exception:
+    return 'intermediate'
+
+
 def make_model_config(
     *,
     flash_attention_implementation: tokamax.DotProductAttentionImplementation = 'triton',
@@ -665,6 +712,7 @@ def make_model_config(
   config.num_recycles = num_recycles
   config.return_embeddings = return_embeddings
   config.return_distogram = return_distogram
+  config.global_config.bfloat16 = _bfloat16_default()
   model_registry.get(model_name).configure(config)
   # HOW MANY MSA ROWS THE TRUNK SEES. Featurisation always hands over a fixed
   # 16384-row buffer (pipeline.msa_crop_size) and the trunk subsamples to this,
@@ -698,6 +746,9 @@ class ModelRunner:
     # (bernoulli(keep=1) is all-ones) and toggling costs no recompile.
     self._use_dropout = use_dropout
     self._autotune_result = self._load_autotune_cache()
+    self._autotune_attempted = False
+    self._lowercache_memo = {}
+    self._jitted_apply = None
 
   @property
   def model_dir(self) -> epath.Path:
@@ -815,12 +866,88 @@ class ModelRunner:
       apply_fn = jax.jit(apply_fn)
     # before anything is traced -- see _preinit_tokamax_context
     self._preinit_tokamax_context()
+    extra = {}
     if _DYNAMIC_RECYCLES.value:
       n = model.num_trunk_passes(self._model_config.num_recycles,
                                  self._model_config.global_config.model)
-      return functools.partial(apply_fn, self.model_params,
-                               num_trunk_passes=jnp.asarray(n, jnp.int32))
-    return functools.partial(apply_fn, self.model_params)
+      extra['num_trunk_passes'] = jnp.asarray(n, jnp.int32)
+    if _LOWERCACHE_DIR.value and not _NOJIT.value:
+      self._jitted_apply = apply_fn
+      self._lowercache_extra = extra
+      return self._lowercached_model
+    return functools.partial(apply_fn, self.model_params, **extra)
+
+  def _lowercache_key(self, rng_key, batch) -> str:
+    """What a serialized executable is only valid for.
+
+    The persistent compile cache keys on the program and the stack; this has to
+    key on the same things PLUS the input signature, because a blob is an
+    executable for ONE set of avals. XLA flags are in here because they change
+    the program, and device_kind because an executable is built for a card.
+    """
+    import hashlib
+    import jaxlib
+    def avals(tree):
+      return [(getattr(x, 'shape', None), str(getattr(x, 'dtype', type(x))))
+              for x in jax.tree_util.tree_leaves(tree)]
+    material = repr([
+        jax.__version__, getattr(jaxlib, '__version__', '?'),
+        str(getattr(jax.devices()[0], 'device_kind', '?')),
+        os.environ.get('XLA_FLAGS', ''),
+        os.environ.get('AF3_SAMPLER_BF16', ''),
+        self.model_name, repr(self._model_config), self._use_dropout,
+        avals(self.model_params), avals(rng_key), sorted(batch),
+        avals([batch[k] for k in sorted(batch)]),
+        # an executable is built for the kwargs it was lowered with, and
+        # --dynamic_recycles passes one
+        sorted(getattr(self, '_lowercache_extra', {})),
+        avals(getattr(self, '_lowercache_extra', {})),
+    ])
+    return hashlib.sha256(material.encode()).hexdigest()[:32]
+
+  def _lowercached_model(self, rng_key, batch):
+    """The jitted apply, with trace+lowering served from disk when it can be.
+
+    A miss lowers, compiles and WRITES the blob, so the directory populates
+    itself; only the trace and lowering are skipped on a hit, and the executable
+    is the same one jit would have produced (checked: a serialize round trip
+    returns bit-identical values).
+    """
+    from jax.experimental import serialize_executable as _se
+    key = self._lowercache_key(rng_key, batch)
+    got = self._lowercache_memo.get(key)
+    if got is None:
+      d = epath.Path(_LOWERCACHE_DIR.value)
+      path = d / f'{key}.bin'
+      t0 = time.time()
+      if path.exists():
+        try:
+          blob, in_tree, out_tree = pickle.loads(path.read_bytes())
+          got = _se.deserialize_and_load(blob, in_tree, out_tree)
+          print(f'  lowercache HIT  {path.name} in {time.time() - t0:.2f} s')
+        except Exception as err:   # a blob from another stack: say so, retrace
+          print(f'  lowercache blob unusable ({type(err).__name__}: {err}); '
+                'lowering instead')
+          got = None
+      if got is None:
+        lowered = self._jitted_apply.lower(
+            self.model_params, rng_key, batch,
+            **getattr(self, '_lowercache_extra', {}))
+        got = lowered.compile()
+        print(f'  lowercache MISS: lowered and compiled in '
+              f'{time.time() - t0:.2f} s')
+        try:
+          d.mkdir(parents=True, exist_ok=True)
+          payload = pickle.dumps(_se.serialize(got))
+          path.write_bytes(payload)
+          print(f'  lowercache WROTE {path.name} '
+                f'({len(payload) / 1e6:.1f} MB)')
+        except Exception as err:
+          print(f'  lowercache could not be written ({type(err).__name__}: '
+                f'{err}); this run is unaffected')
+      self._lowercache_memo[key] = got
+    return got(self.model_params, rng_key, batch,
+               **getattr(self, '_lowercache_extra', {}))
 
   def run_inference(
       self, featurised_example: features.BatchDict, rng_key: jnp.ndarray
@@ -833,7 +960,16 @@ class ModelRunner:
         self._device,
     )
 
-    if self._autotune_result is None and self._autotune_cache_path:
+    # ONCE PER PROCESS, and say why if it fails. On a failure this left
+    # _autotune_result None, so every later inference tried again -- once per
+    # seed, per bucket, per fold job -- and swallowed the reason each time:
+    # silent repeated work with nothing to diagnose from. Anthropic's af3_jax
+    # optimization kit reports the same thing against this fork as its FIX1
+    # lever ('stock calls tokamax.autotune() before the first inference of
+    # every new bucket size and the call raises on this stack').
+    if (self._autotune_result is None and self._autotune_cache_path
+        and not self._autotune_attempted):
+      self._autotune_attempted = True
       try:
         self._autotune_result = tokamax.autotune(self._model, rng_key, featurised_example)
         os.makedirs(os.path.dirname(os.path.abspath(self._autotune_cache_path)), exist_ok=True)
@@ -841,8 +977,9 @@ class ModelRunner:
           self._autotune_result.dump(f)
         print(f'Tokamax autotune cache saved to {self._autotune_cache_path}')
         print('Subsequent runs will load this cache and skip autotuning.')
-      except Exception:
-        pass  # Autotune not supported on this device/jaxlib combo; runs fine without it.
+      except Exception as err:  # pylint: disable=broad-except
+        print('TOKAMAX autotune unavailable, continuing without it: '
+              f'{type(err).__name__}: {err}')
 
     if self._autotune_result is not None:
       with self._autotune_result:

@@ -547,10 +547,18 @@ class DiffusionHead(hk.Module):
           name='single_cond_embedding_projection',
       )(_s_cond_in)
 
-      act = jnp.asarray(act, dtype=jnp.float32)
-      trunk_single_cond = jnp.asarray(trunk_single_cond, dtype=jnp.float32)
-      trunk_pair_cond = jnp.asarray(trunk_pair_cond, dtype=jnp.float32)
-      sequence_mask = jnp.asarray(sequence_mask, dtype=jnp.float32)
+      # The sampler's dtype, chosen the way evoformer.py chooses the trunk's.
+      # hm.LayerNorm upcasts a (b)float16 input for its statistics, so those
+      # stay f32 either way; what changes is the operands of every GEMM in the
+      # 24 token blocks and the atom encoder/decoder, and the residual stream
+      # they accumulate on. `precision='highest'` projections above are
+      # unaffected -- they pin their own precision.
+      dtype = (jnp.bfloat16 if self.global_config.bfloat16 == 'all'
+               else jnp.float32)
+      act = jnp.asarray(act, dtype=dtype)
+      trunk_single_cond = jnp.asarray(trunk_single_cond, dtype=dtype)
+      trunk_pair_cond = jnp.asarray(trunk_pair_cond, dtype=dtype)
+      sequence_mask = jnp.asarray(sequence_mask, dtype=dtype)
 
       transformer = diffusion_transformer.Transformer(
           self.config.transformer, self.global_config
@@ -614,8 +622,20 @@ def make_denoising_body(denoising_step, mask, config, global_config, chai):
   agreement with this one, and the churn, the -0.0 guard and chai's
   non-textbook Heun step are exactly the details that would drift.
   """
-  def apply_denoising_step(carry, noise_level):
-    key, positions, noise_level_prev = carry
+  def apply_denoising_step(carry, step_noise):
+    # noise_level_prev arrives as a scan INPUT, not in the vmapped carry. Both
+    # are the same numbers the carry used to hold -- noise_levels[i] and
+    # noise_levels[i-1] -- but a carry value is per-sample, so `t_hat` came out
+    # batched and everything derived from it alone was traced num_samples times:
+    # the noise embedding, the single half of the conditioning, and the AdaLN
+    # scale/bias plus adaptive-zero gate projections of all 24 blocks, at
+    # M = num_samples * num_tokens instead of num_tokens. As an unbatched scan
+    # input the schedule is sample-independent by construction, so hk.vmap
+    # traces that work ONCE per step and broadcasts it where it meets the
+    # per-sample stream. Every per-sample quantity (key split, augmentation,
+    # noise, positions) is untouched.
+    noise_level, noise_level_prev = step_noise
+    key, positions = carry
     key, key_noise, key_aug = jax.random.split(key, 3)
 
     positions = random_augmentation(
@@ -681,7 +701,7 @@ def make_denoising_body(denoising_step, mask, config, global_config, chai):
     # gyration of 830 A, i.e. a cloud -- while the prediction is already a
     # compact structure that sharpens as sigma falls. Showing the state makes
     # the animation look like noise for most of its length.
-    return (key, positions_out, noise_level), (positions_out, positions_denoised)
+    return (key, positions_out), (positions_out, positions_denoised)
 
   return apply_denoising_step
 
@@ -727,11 +747,7 @@ def sample_init(batch, key, config, global_config=None):
   key, noise_key = jax.random.split(key)
   positions = jax.random.normal(noise_key, (config.num_samples,) + mask.shape + (3,))
   positions *= noise_levels[0]
-  init = (
-      jax.random.split(key, config.num_samples),
-      positions,
-      jnp.tile(noise_levels[None, 0], (config.num_samples,)),
-  )
+  init = (jax.random.split(key, config.num_samples), positions)
   return init, noise_levels
 
 
@@ -785,9 +801,15 @@ def sample(
   # compile tracked the step count in a way that looked inexplicable.
   # (Below `unroll` steps jax's _scan_impl emits no loop at all -- num_trips==1 and
   # remainder==0 -- which is the 3.5s case, not something to design around.)
+  # xs = (noise_levels[i], noise_levels[i-1]) for i = 1..steps: the pair the
+  # carry used to supply, now unbatched under the vmap above.
   result, (trajectory, _denoised_traj) = hk.scan(
-      apply_denoising_step, init, noise_levels[1:], unroll=1)
-  _, positions_out, _ = result
+      apply_denoising_step,
+      init,
+      (noise_levels[1:], noise_levels[:-1]),
+      unroll=1,
+  )
+  _, positions_out = result
 
   final_dense_atom_mask = jnp.tile(mask[None], (num_samples, 1, 1))
 

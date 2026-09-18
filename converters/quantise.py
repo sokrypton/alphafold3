@@ -10,8 +10,13 @@ parameter's own name, and its scales under `<name>__q_scale`. Scales are
 per-CHANNEL over the last axis, which is the output axis of every Linear in this
 graph, so each output feature gets its own range; a single scale per tensor is
 markedly worse on the attention projections, whose columns differ in magnitude.
+They are also per-BLOCK of rows down the reduction axis, so one outlying row no
+longer coarsens a whole column; an older blob has a 1-D scale and still loads.
 `dequantise_records` puts them back together, so nothing downstream of the
-loader knows the difference.
+loader knows the difference. The INVERSE lives in the shipped library
+(`alphafold3.model.params.dequantise_int8`) and is imported here: the writer and
+the loader have to agree about the block layout, and two copies of an agreement
+is how half a fix ships.
 
 Left alone in every scheme:
   * anything that is not float32 -- integer tables and the __meta__ identifier.
@@ -22,6 +27,8 @@ Left alone in every scheme:
 """
 
 import numpy as np
+
+from alphafold3.model.params import dequantise_int8
 
 BF16 = 'bfloat16'
 SCALE_SUFFIX = '__q_scale'
@@ -42,20 +49,53 @@ def from_bfloat16(u16):
   return (u16.astype(np.uint32) << 16).view(np.float32)
 
 
-def quantise_int8(a):
-  """symmetric per-last-axis-channel int8. Returns (int8 array, fp32 scales)."""
+# One scale per channel lets a single outlying ROW set the step for a whole
+# column, so scales are also per-block down the reduction axis. 128 rows is the
+# starting block; a tensor whose relative error still misses TARGET_RMS gets its
+# block halved, which is cheaper in bytes than blocking every tensor finely.
+BLOCK_ROWS = 128
+TARGET_RMS = 1e-2
+FINEST_ROWS = 16
+
+
+def quantise_int8(a, block_rows=BLOCK_ROWS, target_rms=TARGET_RMS):
+  """symmetric per-channel, per-row-block int8. Returns (int8 array, fp32 scales).
+
+  The block is halved until the dequantised tensor is within `target_rms`
+  RELATIVE rms of the original, or the block reaches FINEST_ROWS. Relative, not
+  absolute: these tensors span many orders of magnitude and an absolute target
+  would block the large ones finely and the small ones not at all.
+  """
+  a = np.asarray(a, dtype=np.float32)
+  norm = float(np.sqrt(np.mean(a.astype(np.float64) ** 2)))
+  block = block_rows
+  while True:
+    q, scale = _quantise_blocked(a, block)
+    if not block or target_rms is None or norm < 1e-20 or block <= FINEST_ROWS:
+      return q, scale
+    err = float(np.sqrt(np.mean(
+        (a - dequantise_int8(q, scale)).astype(np.float64) ** 2)))
+    if err / norm <= target_rms:
+      return q, scale
+    block //= 2
+
+
+def _quantise_blocked(a, block_rows):
+  """The writer's half of the layout `params.dequantise_int8` reads back."""
   a = np.asarray(a, dtype=np.float32)
   flat = a.reshape(-1, a.shape[-1])
-  scale = np.abs(flat).max(axis=0) / 127.0
-  scale[scale == 0] = 1.0                  # an all-zero channel stays all-zero
-  q = np.rint(flat / scale).clip(-127, 127).astype(np.int8)
-  return q.reshape(a.shape), scale.astype(np.float32)
-
-
-def dequantise_int8(q, scale):
-  shape = q.shape
-  return (q.reshape(-1, shape[-1]).astype(np.float32)
-          * scale).reshape(shape)
+  rows, channels = flat.shape
+  blocks = 1 if not block_rows else -(-rows // min(block_rows, rows))
+  # the loader recovers this as ceil(rows / blocks), so derive it the same way
+  g = -(-rows // blocks)
+  pad = blocks * g - rows
+  if pad:
+    flat = np.concatenate([flat, np.zeros((pad, channels), np.float32)])
+  v = flat.reshape(blocks, g, channels)
+  scale = np.abs(v).max(axis=1) / 127.0
+  scale[scale == 0] = 1.0                  # an all-zero block stays all-zero
+  q = np.rint(v / scale[:, None, :]).clip(-127, 127).astype(np.int8)
+  return q.reshape(-1, channels)[:rows].reshape(a.shape), scale.astype(np.float32)
 
 
 def to_half(a, half):
