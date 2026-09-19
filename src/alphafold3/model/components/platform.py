@@ -1,10 +1,10 @@
 '''
 pick attention kernels and XLA flags from the actual device
 
-This is the portability matrix from ColabFold's AlphaFold3_of3.ipynb, moved out of
-a notebook cell and into tested code. It is knowledge that was expensive to
-acquire -- each row is a real failure someone hit -- and it should not have to be
-re-derived in every notebook that wants a fast kernel.
+This is the portability matrix from ColabFold's AlphaFold3_of3.ipynb, by Milot
+Mirdita, moved out of a notebook cell and into tested code. It is knowledge that
+was expensive to acquire -- each row is a real failure someone hit -- and it
+should not have to be re-derived in every notebook that wants a fast kernel.
 
 The headline rule: **every GPU gets a fused attention kernel; only the kernel
 differs.** Triton is the fastest on real datacenter cards (A100/H100); Ada and
@@ -127,6 +127,19 @@ def attention_config(device: str = None, cap: float | None = None) -> dict:
             'reason': 'no GPU: XLA attention, and prefer nojit to skip the compile'}
 
   if cap is not None and cap < 8.0:
+    # XLA gates Pallas/Triton at sm_80, cuDNN's SDPA needs SM80, and tokamax
+    # offers nothing here -- so XLA attention is the only thing this fork can
+    # currently run on a T4 or V100.
+    #
+    # It is NOT the only thing that exists. Milot Mirdita builds
+    # `colabfold-legacy-kernels` (sm_70/sm_75 CUDA kernels registered as XLA
+    # FFI targets: attention with a nonbatched bias, layer_norm, and a gated
+    # dual projection) and drives them from `alphafold/model/volta_attn.py` in
+    # alphafold-colabfold; ColabFold's AF2 path selects them below sm_80 as
+    # `cuda_legacy`, in float16, because Volta and Turing tensor cores have no
+    # bfloat16. Measured on a Colab T4 at our triangle-attention shape, they
+    # are 3.0-3.35x XLA (max|d| 1e-4). Wiring them in here is unstarted work,
+    # and it belongs to him.
     return {'attention': XLA, 'xla_flags': [NO_CUSTOM_KERNEL_FUSION],
             'nojit': False,
             'reason': f'pre-Ampere GPU (cc {cap}): no Triton support, and the '
