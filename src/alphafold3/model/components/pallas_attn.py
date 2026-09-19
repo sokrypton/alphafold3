@@ -76,6 +76,48 @@ def attention(q, k, v, *, mask, bias, scale):
   return out.astype(q.dtype)
 
 
+_GDP_BLOCK_M = 64      # tri_mul.gated_dual_proj's own default
+
+
+def _gdp_fits(k, c, itemsize):
+  """Will the GLU kernel's shared memory fit on this device?
+
+  IT DOES NOT ALWAYS. The kernel stages both weight matrices whole, so its
+  shared memory grows as the product of the channel counts while the activation
+  tile stays fixed -- and a Pallas launch failure is NOT catchable at trace
+  time, exactly like the tokamax problem this backend exists to route around.
+  protenix2 folds through a 256-wide pair stack (x [N,N,256], weights
+  [256,512]) and asked for 294912 B against an A10's 101376: the whole fold
+  died with RESOURCE_EXHAUSTED, while every other model here is 128-wide and
+  sits under the limit.
+
+  Measured on an A10 by probing the kernel directly -- the model is
+  `2*K*c + block_m*K` elements, and it predicts every observed request:
+
+      K=128 c=256  147456 B (measured 147456)     K=256 c=128  163840 (164096)
+      K=256 c=256  294912 B (measured 294912)     K=512 c=128  327680 (327936)
+
+  and the shapes that fit (K=c=64, K=c=128, K=256 c=64, K=64 c=256) all land
+  under the limit. The 256 B discrepancy is the bias operands; the +1024 below
+  covers it.
+  """
+  import jax  # pylint: disable=g-import-not-at-top
+
+  try:
+    limit = min(d.shared_memory_per_block_optin for d in jax.local_devices()
+                if d.platform == 'gpu')
+  except Exception:  # pylint: disable=broad-except
+    return False
+  if not limit:
+    return False
+  return itemsize * (2 * k * c + _GDP_BLOCK_M * k) + 1024 <= limit
+
+
+def _pow2(n):
+  """Triton lowers only power-of-two shapes; K=192 and K=160 raise at trace."""
+  return n > 0 and (n & (n - 1)) == 0
+
+
 def gated_dual_proj(x, w_proj, w_gate, mask):
   """TriangleMultiplication's GLU, fused, split and already channel-major.
 
@@ -94,6 +136,10 @@ def gated_dual_proj(x, w_proj, w_gate, mask):
   if x.dtype not in (jnp.bfloat16, jnp.float16):
     return None
   h = w_proj.shape[1] // 2
+  if not (_pow2(c) and _pow2(h)):
+    return None
+  if not _gdp_fits(c, h, jnp.dtype(x.dtype).itemsize):
+    return None
 
   from colabfold_kernels import tri_mul  # pylint: disable=g-import-not-at-top
 
