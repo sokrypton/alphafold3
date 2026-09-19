@@ -29,9 +29,13 @@ def timeit(fn, *a, iters=5, **kw):
 
 def main(model_name, length):
   from alphafold3.model import staged
+  from alphafold3.model import params as afp
   unit = 'ACDEFGHIKLMNPQRSTVWY'
   seq = (unit * (length // 20 + 1))[:length]
-  batch, params, config = fold_check.build_batch(model_name, seq)[:3]
+  # _fold_setup, not build_batch: the stages need the config and the weights
+  # too, and it is the one place the harness's featurisation conventions live.
+  batch, config, model_dir = fold_check._fold_setup(model_name, seq)
+  params = afp.get_model_haiku_params(model_dir=model_dir)
 
   stages = staged.make_stages(config)
   rng = jax.random.PRNGKey(1)
@@ -45,14 +49,19 @@ def main(model_name, length):
   out['trunk, ONE recycle'] = trunk
   emb = stages['trunk'](params, rng, batch, carry=carry)
 
-  cond = timeit(stages['diff_cond'], params, rng, batch, carry=emb)
-  out['diffusion conditioning'] = cond
+  try:
+    cond = timeit(stages['diff_cond'], params, rng, batch, carry=emb)
+    out['diffusion conditioning'] = cond
+  except Exception as e:      # the stage seam differs per model; say so
+    cond = float('nan')
+    out['diffusion conditioning'] = float('nan')
+    print('  diff_cond stage unavailable:', str(e)[:90])
 
   print(f'\n=== {model_name}, {length} residues')
   for k, v in out.items():
     print(f'  {k:34s} {v * 1000:9.1f} ms')
-  print(f'\n  a 10-recycle fold spends {trunk * 10:.2f} s in the trunk and '
-        f'{embed + cond:.2f} s in embed+cond before a single sampler step.')
+  print(f'\n  a 10-recycle fold spends {trunk * 10:.2f} s in the trunk; '
+        f'embed is {embed:.2f} s of one-off cost before any of it.')
 
 
 if __name__ == '__main__':
