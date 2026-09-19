@@ -464,16 +464,22 @@ class TriangleMultiplication(hk.Module):
     # LayerNorm hook and `gated_dual_proj` return the haiku path / None rather
     # than a wrong answer when the kernel is missing or the shape is outside
     # what it instantiates.
-    volta_ops = self.global_config.flash_attention_implementation == 'volta'
+    # 'auto' keeps the historical behaviour: the GLU follows the attention
+    # backend. Anything else names the GLU kernel outright -- see
+    # model_config.GlobalConfig.glu_kernel for why an A100 wants them apart.
+    glu = self.global_config.glu_kernel
+    if glu == 'auto':
+      glu = self.global_config.flash_attention_implementation
+    volta_ops = glu == 'volta'
     # The same two kernels exist for Ampere and newer, in Milot Mirdita's other
     # package (colabfold-kernels, Pallas). Only the GLU is taken: his fused
     # LayerNorm measures 0.164 ms against XLA's 0.166 on an A10, while the GLU
     # is 0.512 against tokamax's 0.872 and XLA's 0.941.
-    pallas_ops = self.global_config.flash_attention_implementation == 'pallas'
+    pallas_ops = glu == 'pallas'
 
     act = hm.LayerNorm(
         name='left_norm_input', kernel='volta' if volta_ops else None
-    )(act)
+    )(act)   # the fused LayerNorm pays on a T4 only: 0.164 vs XLA's 0.166 here
     input_act = act
 
     ab = None

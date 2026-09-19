@@ -437,6 +437,20 @@ _FLASH_ATTENTION_IMPLEMENTATION = flags.DEFINE_enum(
         " 'xla' is portable and the one every device has."
     ),
 )
+_GLU_KERNEL = flags.DEFINE_enum(
+    'glu_kernel',
+    default='auto',
+    enum_values=['auto', 'tokamax', 'pallas', 'volta'],
+    help=(
+        "Which GLU kernel the triangle multiplication uses. 'auto' (the"
+        ' default) follows --flash_attention_implementation, which is what'
+        ' every caller got before this flag existed. They are separable'
+        ' because an A100 wants them different: there the fused attentions are'
+        ' within noise of each other while tokamax\'s GLU is worth NOTHING'
+        " over plain XLA (1.013 ms against 1.009 at N=384) and Milot Mirdita's"
+        ' Pallas GLU is 1.20x at every size measured.'
+    ),
+)
 _NUM_RECYCLES = flags.DEFINE_integer(
     'num_recycles',
     10,
@@ -720,6 +734,7 @@ def _bfloat16_default() -> str:
 def make_model_config(
     *,
     flash_attention_implementation: tokamax.DotProductAttentionImplementation = 'triton',
+    glu_kernel: str = 'auto',
     num_diffusion_samples: int = 5,
     num_recycles: int = 10,
     return_embeddings: bool = False,
@@ -737,6 +752,7 @@ def make_model_config(
   config.global_config.flash_attention_implementation = (
       flash_attention_implementation
   )
+  config.global_config.glu_kernel = glu_kernel
   config.heads.diffusion.eval.num_samples = num_diffusion_samples
   config.num_recycles = num_recycles
   config.return_embeddings = return_embeddings
@@ -1920,6 +1936,7 @@ def main(_):
                   tokamax.DotProductAttentionImplementation,
                   _FLASH_ATTENTION_IMPLEMENTATION.value,
               ),
+              glu_kernel=_GLU_KERNEL.value,
               num_diffusion_samples=_NUM_DIFFUSION_SAMPLES.value,
               num_recycles=_NUM_RECYCLES.value,
               return_embeddings=_SAVE_EMBEDDINGS.value,

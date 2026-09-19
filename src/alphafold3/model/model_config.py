@@ -1001,6 +1001,15 @@ class GlobalConfig(base_config.BaseConfig):
   flash_attention_implementation: tokamax.DotProductAttentionImplementation = (
       'triton'
   )
+  # WHICH GLU KERNEL TriangleMultiplication USES, decoupled from the attention
+  # one. They were the same switch until an A100 said they should not be: there
+  # the three fused attentions are within noise of each other (triton 3.318 ms,
+  # pallas 3.265, the Anthropic kit 3.490 at N=768) while tokamax's GLU is worth
+  # NOTHING over plain XLA (1.013 ms against 1.009 at N=384, 4.026 against 4.021
+  # at N=768) and Milot Mirdita's Pallas GLU is 1.20x at both sizes. So the best
+  # A100 row is Triton attention with a Pallas GLU, which one switch cannot say.
+  # 'auto' follows the attention backend, which is what every caller got before.
+  glu_kernel: Literal['auto', 'tokamax', 'pallas', 'volta'] = 'auto'
   # Which model's weights/forward conventions this graph runs. One of MODELS
   # (alphafold3.model.model_config.MODELS): the single switch
   # every ported-family forward branch keys on, e.g.
