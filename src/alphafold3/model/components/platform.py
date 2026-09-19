@@ -37,6 +37,7 @@ import subprocess
 import sys
 
 XLA = 'xla'
+VOLTA = 'volta'
 TRITON = 'triton'
 CUDNN = 'cudnn'
 
@@ -99,11 +100,17 @@ def is_datacenter_gpu(cap: float | None) -> bool:
   return cap == 8.0 or cap >= 9.0
 
 
-def attention_config(device: str = None, cap: float | None = None) -> dict:
+def attention_config(device: str = None, cap: float | None = None,
+                     differentiable: bool = False) -> dict:
   '''attention implementation and XLA flags for a device
 
   Pass device/cap to reason about a machine you are not on (and to test this);
   omit them to detect the current one.
+
+  `differentiable=True` says this graph will be backpropagated through, which
+  rules out the pre-Ampere kernels: they are forward-only ("The FFI call to
+  `VoltaMma` cannot be differentiated"). The design path backprops through the
+  trunk and GridSelfAttention is in it, so a design caller MUST set this.
   '''
   if device is None:
     device, cap = detect_device()
@@ -125,6 +132,17 @@ def attention_config(device: str = None, cap: float | None = None) -> dict:
   if device == 'cpu':
     return {'attention': XLA, 'xla_flags': [], 'nojit': True,
             'reason': 'no GPU: XLA attention, and prefer nojit to skip the compile'}
+
+  if cap is not None and cap < 8.0 and not differentiable:
+    from alphafold3.model.components import volta_attn
+    if volta_attn.installed():
+      return {'attention': VOLTA, 'xla_flags': [NO_CUSTOM_KERNEL_FUSION],
+              'nojit': False,
+              'reason': f'pre-Ampere GPU (cc {cap}): the only fused attention '
+                        'this card can run is colabfold-legacy-kernels '
+                        "(Milot Mirdita's sm_70/sm_75 kernels) -- 3.0-3.35x "
+                        'the XLA path on a T4, in float16. Forward only, so '
+                        'a differentiable caller gets XLA instead.'}
 
   if cap is not None and cap < 8.0:
     # XLA gates Pallas/Triton at sm_80, cuDNN's SDPA needs SM80, and tokamax

@@ -35,6 +35,28 @@ def dot_product_attention(q, k, v, *, mask=None, bias=None, implementation=None,
   # picked anyway. Surfaced by folding with a real MSA at use_bfloat16=False:
   # the MSA axis is deep enough to cross the flash-attention length threshold,
   # which single-sequence design never does.
+  # sm_70/sm_75 have no fused attention at all otherwise -- cuDNN wants SM80,
+  # tokamax has no kernel, XLA gates Pallas/Triton at sm_80. `volta` is Milot
+  # Mirdita's colabfold-legacy-kernels, 3x the XLA path on a T4. It returns
+  # None rather than a wrong answer when the shapes are outside what it
+  # instantiates (a broadcast bias, an odd head dim), so this falls through.
+  # FORWARD ONLY: it cannot be differentiated, which is why nothing asks for
+  # it on a gradient path -- see platform.attention_config(differentiable=).
+  if implementation == 'volta':
+    from alphafold3.model.components import volta_attn
+    import jax
+    try:
+      cc = getattr(jax.devices()[0], 'compute_capability', None)
+    except Exception:  # pylint: disable=broad-except
+      cc = None
+    out = volta_attn.attention(
+        q, k, v, mask=mask, bias=bias,
+        scale=scale if scale is not None else q.shape[-1] ** -0.5,
+        cc=None if cc is None else int(float(cc) * 10))
+    if out is not None:
+      return out
+    implementation = 'xla'
+
   if implementation == 'cudnn' and q.dtype == jnp.float32:
     implementation = 'xla'
   if implementation == 'cudnn':

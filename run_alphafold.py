@@ -414,7 +414,7 @@ _BUCKETS = flags.DEFINE_list(
 _FLASH_ATTENTION_IMPLEMENTATION = flags.DEFINE_enum(
     'flash_attention_implementation',
     default='auto',
-    enum_values=['auto', 'triton', 'cudnn', 'xla'],
+    enum_values=['auto', 'triton', 'cudnn', 'xla', 'volta'],
     help=(
         "Flash attention implementation to use. 'auto' (the default) asks"
         ' alphafold3.model.components.platform, which picks per compute'
@@ -426,6 +426,9 @@ _FLASH_ATTENTION_IMPLEMENTATION = flags.DEFINE_enum(
         ' copy said XLA for Ada, costing 2.6x on triangle attention (11.89 ms'
         ' -> 4.50 ms at 384 tokens, bit-identical; 20% off a whole fold).'
         " 'triton' and 'cudnn' are the fused kernels and need Ampere or later;"
+        " 'volta' is Milot Mirdita's colabfold-legacy-kernels, the only fused"
+        ' attention sm_70/sm_75 can run (3x XLA on a T4, in float16, and'
+        ' FORWARD ONLY -- it cannot be differentiated);'
         " 'xla' is portable and the one every device has."
     ),
 )
