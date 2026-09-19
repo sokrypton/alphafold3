@@ -31,7 +31,10 @@ Pass flash_attention='xla' explicitly for bit-comparable differential tests.
 
 from __future__ import annotations
 
+import glob
+import os
 import subprocess
+import sys
 
 XLA = 'xla'
 TRITON = 'triton'
@@ -43,7 +46,31 @@ NO_CUSTOM_KERNEL_FUSION = '--xla_disable_hlo_passes=custom-kernel-fusion-rewrite
 
 
 def detect_device() -> tuple[str, float | None]:
-  '''("gpu", compute_capability) or ("cpu", None), via nvidia-smi'''
+  '''("gpu", compute_capability), ("tpu", None) or ("cpu", None)
+
+  A TPU HAS TO BE TOLD APART FROM A CPU, and nvidia-smi cannot do it: it is
+  simply absent on both. Colab offers TPU runtimes (v5e1, v6e1), and one
+  misread as a CPU takes the CPU row below -- which sets `nojit`. Measured on
+  a Colab TPU v5 lite: eager is **14.3x** the jit time. That is the whole cost
+  of one missing branch.
+
+  jax is asked first when it is ALREADY imported, because it is the authority
+  on the backend it will use; it is never imported here, since this module is
+  called from a notebook cell that wants an answer in milliseconds.
+  '''
+  jax = sys.modules.get('jax')
+  if jax is not None:
+    try:
+      backend = jax.default_backend()
+      if backend == 'tpu':
+        return 'tpu', None
+      if backend == 'gpu':
+        caps = [float(d.compute_capability) for d in jax.local_devices()
+                if getattr(d, 'compute_capability', None)]
+        if caps:
+          return 'gpu', min(caps)
+    except Exception:
+      pass
   try:
     out = subprocess.run(
         ['nvidia-smi', '--query-gpu=compute_cap', '--format=csv,noheader'],
@@ -53,6 +80,11 @@ def detect_device() -> tuple[str, float | None]:
       return 'gpu', min(caps)      # the weakest GPU sets the policy
   except Exception:
     pass
+  # No nvidia-smi is not the same as no accelerator. A TPU VM exposes its
+  # chips as /dev/accel*, and Colab sets these in the environment.
+  if (glob.glob('/dev/accel*') or os.environ.get('COLAB_TPU_ADDR')
+      or os.environ.get('TPU_WORKER_ID') or os.environ.get('TPU_ACCELERATOR_TYPE')):
+    return 'tpu', None
   return 'cpu', None
 
 
@@ -75,6 +107,18 @@ def attention_config(device: str = None, cap: float | None = None) -> dict:
   '''
   if device is None:
     device, cap = detect_device()
+
+  if device == 'tpu':
+    # NOT the CPU row. XLA attention is right -- neither Triton nor cuDNN has
+    # a TPU backend -- but `nojit` would be a disaster: measured on a Colab
+    # TPU v5 lite, eager is 14.3x the jit time. The xla_gpu_* flags are
+    # meaningless here, so none are passed.
+    return {'attention': XLA, 'xla_flags': [], 'nojit': False,
+            'reason': 'TPU: XLA attention (no CUDA kernel has a TPU backend), '
+                      'and jit stays ON -- eager measured 14.3x the jit time. '
+                      'NOTE: run_alphafold has no TPU backend, so the fold '
+                      'itself will fall back to this VM\'s CPU; use a GPU '
+                      'runtime.'}
 
   if device == 'cpu':
     return {'attention': XLA, 'xla_flags': [], 'nojit': True,
