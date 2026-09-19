@@ -20,9 +20,13 @@
 """Chemical Components found in PDB (CCD) constants."""
 
 from collections.abc import ItemsView, Iterator, KeysView, Mapping, Sequence, ValuesView
+import collections
 import dataclasses
 import functools
+import marshal
 import os
+import sys
+import zlib
 
 from alphafold3.common import resources
 from alphafold3.common import safe_pickle
@@ -34,11 +38,77 @@ _CCD_PICKLE_FILE = resources.filename(
 )
 
 
+# An index beside the pickle, `<pickle>.index` + `<pickle>.blobs`: each component
+# stored as zlib-compressed marshal, read on first use. A fold touches a few dozen
+# of the ~50k components, which the whole pickle takes seconds and gigabytes to load.
+_INDEX_VERSION = (1, sys.version_info[:2])
+
+
+def write_ccd_index(ccd: Mapping[str, Mapping[str, Sequence[str]]],
+                    pickle_path: os.PathLike[str]) -> None:
+  """Writes the index next to `pickle_path` for `ccd`, as that pickle holds it."""
+  offsets, offset = {}, 0
+  with open(f'{pickle_path}.blobs.tmp', 'wb') as f:
+    for code, entry in ccd.items():
+      blob = zlib.compress(marshal.dumps({k: list(v) for k, v in entry.items()}), 6)
+      f.write(blob)
+      offsets[code] = (offset, len(blob))
+      offset += len(blob)
+  with open(f'{pickle_path}.index.tmp', 'wb') as f:
+    marshal.dump((_INDEX_VERSION, offsets), f)
+  os.replace(f'{pickle_path}.blobs.tmp', f'{pickle_path}.blobs')
+  os.replace(f'{pickle_path}.index.tmp', f'{pickle_path}.index')
+
+
+class _IndexedCcd(Mapping[str, Mapping[str, Sequence[str]]]):
+  """The CCD pickle's contents, each component read from the index when asked for."""
+
+  def __init__(self, offsets, blobs_path):
+    self._offsets = offsets
+    self._fd = os.open(blobs_path, os.O_RDONLY)
+    self._cache = {}
+
+  def __getitem__(self, key):
+    entry = self._cache.get(key)
+    if entry is None:
+      offset, length = self._offsets[key]
+      entry = marshal.loads(zlib.decompress(os.pread(self._fd, length, offset)))
+      self._cache[key] = entry
+    return entry
+
+  def __contains__(self, key):
+    return key in self._offsets
+
+  def __iter__(self):
+    return iter(self._offsets)
+
+  def __len__(self):
+    return len(self._offsets)
+
+
+def _read_index(path):
+  """The index for the pickle at `path`, or None when it is absent, stale or foreign."""
+  index, blobs = f'{path}.index', f'{path}.blobs'
+  try:
+    if os.path.exists(path) and os.path.getmtime(index) < os.path.getmtime(path):
+      return None
+    with open(index, 'rb') as f:
+      version, offsets = marshal.load(f)
+    if version != _INDEX_VERSION or not os.path.exists(blobs):
+      return None
+    return _IndexedCcd(offsets, blobs)
+  except (OSError, EOFError, ValueError, TypeError):
+    return None
+
+
 @functools.cache
 def _load_ccd_pickle_cached(
     path: os.PathLike[str],
-) -> dict[str, Mapping[str, Sequence[str]]]:
-  """Loads the CCD pickle file and caches it so that it is only loaded once."""
+) -> Mapping[str, Mapping[str, Sequence[str]]]:
+  """Loads the CCD once: from its index when there is one, else the whole pickle."""
+  indexed = _read_index(path)
+  if indexed is not None:
+    return indexed
   with open(path, 'rb') as f:
     return safe_pickle.load(f)
 
@@ -79,7 +149,8 @@ class Ccd(Mapping[str, Mapping[str, Sequence[str]]]):
           key: value.to_dict()
           for key, value in cif_dict.parse_multi_data_cif(user_ccd).items()
       }
-      self._dict.update(user_ccd_cifs)
+      # layered over the cached dictionary rather than written into it
+      self._dict = collections.ChainMap(user_ccd_cifs, self._dict)
 
   def __getitem__(self, key: object) -> Mapping[str, Sequence[str]]:
     if not isinstance(key, str):
