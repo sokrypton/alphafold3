@@ -20,10 +20,12 @@
 """Data-side of the input features processing."""
 
 from collections.abc import Mapping, Sequence
+import copy
 import dataclasses
 import datetime
 import functools
 import itertools
+import os
 from typing import Any, Self, TypeAlias
 
 from absl import logging
@@ -1686,6 +1688,47 @@ def _get_reference_positions_from_ccd_cif(
   return np.array(pos, dtype=np.float32)
 
 
+def _reference_mol(res_name, chemical_components_data, ccd, quiet=False):
+  """The RDKit molecule and CCD cif `get_reference` builds a residue's conformer from."""
+  warn = (lambda *a: None) if quiet else logging.warning
+  info = (lambda *a: None) if quiet else logging.info
+  ccd_cif = ccd.get(res_name)
+
+  mol = None
+  if ccd_cif:
+    try:
+      mol = rdkit_utils.mol_from_ccd_cif(ccd_cif, remove_hydrogens=False)
+    except rdkit_utils.MolFromMmcifError:
+      warn('Failed to construct mol from ccd_cif for: %s', res_name)
+  else:  # No CCD entry, use SMILES from chemical components data.
+    if not (
+        chemical_components_data.chem_comp
+        and res_name in chemical_components_data.chem_comp
+        and chemical_components_data.chem_comp[res_name].pdbx_smiles
+    ):
+      raise ValueError(f'No CCD entry or SMILES for {res_name}.')
+    smiles_string = chemical_components_data.chem_comp[res_name].pdbx_smiles
+    info('Using SMILES for: %s - %s', res_name, smiles_string)
+
+    mol = Chem.MolFromSmiles(smiles_string)
+    if mol is None:
+      # In this case the model will not have any information about this molecule
+      # and will not be able to predict anything about it.
+      raise ValueError(
+          f'Failed to construct RDKit Mol for {res_name} from SMILES string: '
+          f'{smiles_string} . This is likely due to an issue with the SMILES '
+          'string. Note that the userCCD input format provides an alternative '
+          'way to define custom molecules directly without RDKit or SMILES.'
+      )
+    mol = Chem.AddHs(mol)
+    # No existing names, we assign them from the graph.
+    mol = rdkit_utils.assign_atom_names_from_graph(mol)
+    # Temporary CCD cif with just atom and bond information, no coordinates.
+    ccd_cif = rdkit_utils.mol_to_ccd_cif(mol, component_id='fake_cif')
+
+  return mol, ccd_cif
+
+
 def get_reference(
     res_name: str,
     chemical_components_data: struc_chem_comps.ChemicalComponentsData,
@@ -1714,39 +1757,7 @@ def get_reference(
     Mapping from atom names to features, from_atoms, dest_atoms.
   """
 
-  ccd_cif = ccd.get(res_name)
-
-  mol = None
-  if ccd_cif:
-    try:
-      mol = rdkit_utils.mol_from_ccd_cif(ccd_cif, remove_hydrogens=False)
-    except rdkit_utils.MolFromMmcifError:
-      logging.warning('Failed to construct mol from ccd_cif for: %s', res_name)
-  else:  # No CCD entry, use SMILES from chemical components data.
-    if not (
-        chemical_components_data.chem_comp
-        and res_name in chemical_components_data.chem_comp
-        and chemical_components_data.chem_comp[res_name].pdbx_smiles
-    ):
-      raise ValueError(f'No CCD entry or SMILES for {res_name}.')
-    smiles_string = chemical_components_data.chem_comp[res_name].pdbx_smiles
-    logging.info('Using SMILES for: %s - %s', res_name, smiles_string)
-
-    mol = Chem.MolFromSmiles(smiles_string)
-    if mol is None:
-      # In this case the model will not have any information about this molecule
-      # and will not be able to predict anything about it.
-      raise ValueError(
-          f'Failed to construct RDKit Mol for {res_name} from SMILES string: '
-          f'{smiles_string} . This is likely due to an issue with the SMILES '
-          'string. Note that the userCCD input format provides an alternative '
-          'way to define custom molecules directly without RDKit or SMILES.'
-      )
-    mol = Chem.AddHs(mol)
-    # No existing names, we assign them from the graph.
-    mol = rdkit_utils.assign_atom_names_from_graph(mol)
-    # Temporary CCD cif with just atom and bond information, no coordinates.
-    ccd_cif = rdkit_utils.mol_to_ccd_cif(mol, component_id='fake_cif')
+  mol, ccd_cif = _reference_mol(res_name, chemical_components_data, ccd)
 
   conformer = None
   atom_names = []
@@ -1843,6 +1854,36 @@ class Chirals:
     return {'chiral_centers': self.centers, 'chiral_angles': self.angles}
 
 
+def _prefetch_conformers(layout, ccd, chemical_components_data, random_state,
+                         conformer_max_iterations):
+  """Embeds every residue's conformer on threads before the serial loop asks for it.
+
+  The loop draws, per residue, a conformer seed (when a molecule exists) and then
+  the augmentation's rotation and translation; replaying those draws on a copy of
+  the random state gives each seed. A seed replayed wrongly only misses the cache.
+  """
+  state = copy.deepcopy(random_state)
+  mols, jobs, seen = {}, [], set()
+  try:
+    for idx in np.ndindex(layout.shape):
+      key = (layout.chain_id[idx], layout.res_id[idx])
+      if not layout.atom_name[idx] or key in seen:
+        continue
+      seen.add(key)
+      res_name = layout.res_name[idx]
+      if res_name not in mols:
+        mols[res_name] = _reference_mol(res_name, chemical_components_data, ccd, quiet=True)[0]
+      if mols[res_name] is not None:
+        seed = int(state.randint(1, 1 << 31))
+        jobs.append((Chem.Mol(mols[res_name]), seed, conformer_max_iterations, res_name))
+      state.normal(size=(2, 3))
+      state.normal(size=(3,))
+  except ValueError:
+    pass  # get_reference raises the same, and the embeds collected so far still hold
+  if len(jobs) > 1:
+    rdkit_utils.prefetch_conformers(jobs, max_workers=min(16, os.cpu_count() or 1))
+
+
 @dataclasses.dataclass(frozen=True)
 class RefStructure:
   """Contains ref structure information."""
@@ -1889,6 +1930,8 @@ class RefStructure:
     chain_ids_all = []
     res_ids_all = []
 
+    _prefetch_conformers(all_token_atoms_layout, ccd, chemical_components_data,
+                         random_state, conformer_max_iterations)
     # Cache reference conformations for each residue.
     conformations = {}
     ref_space_uids = {}
@@ -1977,6 +2020,7 @@ class RefStructure:
     else:
       adjusted_ligand_ligand_bonds = ligand_ligand_bonds
 
+    rdkit_utils.clear_prefetched_conformers()
     return cls(**result), adjusted_ligand_ligand_bonds
 
   @classmethod
