@@ -1,9 +1,13 @@
 """Where does a fold's time actually go? Stage by stage, measured.
 
-A 306-residue fold on an A10 is ~31 s warm. Fitting (recycles, samples) points
-attributes ~14 s to the trunk and ~8 s to the sampler and leaves **~9.6 s, a
-third of the fold, unaccounted for** -- neither trunk nor sampler. This times
-each stage `staged.make_stages` exposes, so that third has a name.
+Fitting (recycles, samples) points to a 306-residue A10 fold attributes ~14 s
+to the trunk and ~8 s to the sampler and leaves **~9.6 s, a third of the fold,
+unaccounted for**. This names that third by timing the seams
+`staged.staged_fold` drives, which are disjoint -- unlike the naive reading of
+`make_stages`, where `heads` falls through into the WHOLE sampler and
+`diff_cond` runs it too unless `sample_config.stepwise` is set. Measured that
+way the pieces summed to 49.9 s of a 31 s fold, which is how the mistake
+announces itself.
 
   PYTHONPATH=src:. python dev/oracles/stage_budget.py <model> [length]
 """
@@ -14,10 +18,10 @@ import jax
 import numpy as np
 
 sys.path.insert(0, '.')
-from dev.oracles import fold_check            # noqa: E402  (batch builder)
+from dev.oracles import fold_check            # noqa: E402
 
 
-def timeit(fn, *a, iters=5, **kw):
+def timeit(fn, *a, iters=3, **kw):
   o = fn(*a, **kw)
   jax.block_until_ready(o)
   t = time.time()
@@ -28,40 +32,77 @@ def timeit(fn, *a, iters=5, **kw):
 
 
 def main(model_name, length):
-  from alphafold3.model import staged
+  import haiku as hk
+  import jax.numpy as jnp
+  from alphafold3.model import model as af3_model
   from alphafold3.model import params as afp
+  from alphafold3.model import staged
+
   unit = 'ACDEFGHIKLMNPQRSTVWY'
   seq = (unit * (length // 20 + 1))[:length]
-  # _fold_setup, not build_batch: the stages need the config and the weights
-  # too, and it is the one place the harness's featurisation conventions live.
   batch, config, model_dir = fold_check._fold_setup(model_name, seq)
   params = afp.get_model_haiku_params(model_dir=model_dir)
-
-  stages = staged.make_stages(config)
+  # stepwise makes diff_cond HAND BACK the conditioning instead of sampling.
+  config.heads.diffusion.eval.stepwise = True
+  steps = config.heads.diffusion.eval.steps
+  samples = config.heads.diffusion.eval.num_samples
+  recycles = af3_model.num_trunk_passes(config.num_recycles,
+                                        config.global_config.model)
   rng = jax.random.PRNGKey(1)
-  out = {}
 
-  embed = timeit(stages['embed'], params, rng, batch)
-  out['embed (input + template + MSA)'] = embed
-  carry = stages['embed'](params, rng, batch)
+  def stage(name):
+    @hk.transform
+    def fn(b, carry=None, key=None, diffusion_state=None):
+      return af3_model.Model(config)(
+          b, key=key, use_dropout=False, recycle_carry=carry, stage=name,
+          diffusion_state=diffusion_state)
+    return jax.jit(fn.apply)
 
-  trunk = timeit(stages['trunk'], params, rng, batch, carry=carry)
-  out['trunk, ONE recycle'] = trunk
-  emb = stages['trunk'](params, rng, batch, carry=carry)
+  embed, trunk, cond, score = (stage('embed'), stage('trunk'),
+                               stage('diff_cond'), stage('score'))
+  t_embed = timeit(embed, params, rng, batch)
+  carry, key = embed(params, rng, batch)
+  t_trunk = timeit(trunk, params, rng, batch, carry=carry, key=key)
+  for _ in range(recycles):
+    carry, key, _ = trunk(params, rng, batch, carry=carry, key=key)
 
-  try:
-    cond = timeit(stages['diff_cond'], params, rng, batch, carry=emb)
-    out['diffusion conditioning'] = cond
-  except Exception as e:      # the stage seam differs per model; say so
-    cond = float('nan')
-    out['diffusion conditioning'] = float('nan')
-    print('  diff_cond stage unavailable:', str(e)[:90])
+  t_cond = timeit(cond, params, rng, batch, carry=carry, key=key)
+  st = cond(params, rng, batch, carry=carry, key=key)
 
-  print(f'\n=== {model_name}, {length} residues')
-  for k, v in out.items():
-    print(f'  {k:34s} {v * 1000:9.1f} ms')
-  print(f'\n  a 10-recycle fold spends {trunk * 10:.2f} s in the trunk; '
-        f'embed is {embed:.2f} s of one-off cost before any of it.')
+  # ONE denoise step, for all samples at once (the body is vmapped over them).
+  arrays, static = staged._split_static(st['atom_cond'])   # noqa: SLF001
+  @hk.transform
+  def denoise_fn(b, carry, key, dcarry, noise_level, pair_cond, atom_arrays):
+    return af3_model.Model(config)(
+        b, key=key, use_dropout=False, recycle_carry=carry, stage='denoise',
+        diffusion_state=(dcarry, noise_level, pair_cond,
+                         {**atom_arrays, **static}))
+  denoise = jax.jit(denoise_fn.apply)
+  levels = st['noise_levels']
+  xs = (levels[1], levels[0])
+  t_step = timeit(denoise, params, rng, batch, carry, key, st['init'], xs,
+                  st['pair_cond'], arrays)
+  out = denoise(params, rng, batch, carry, key, st['init'], xs,
+                st['pair_cond'], arrays)
+
+  # Scoring alone: hand it coordinates so it does NOT sample again.
+  pos = out['atom_positions']
+  t_score = timeit(score, params, rng, batch, carry=carry, key=key,
+                   diffusion_state=(pos,))
+
+  rows = [('embed (input + template + MSA init)', t_embed, 1),
+          ('trunk (one recycle)', t_trunk, recycles),
+          ('diffusion conditioning (once)', t_cond, 1),
+          ('denoise step (all samples)', t_step, steps),
+          ('confidence head + output', t_score, 1)]
+  print(f'\n=== {model_name}, {length} residues: '
+        f'{recycles} trunk passes, {steps} steps, {samples} samples')
+  total = 0.0
+  for label, secs, n in rows:
+    total += secs * n
+    print(f'  {label:38s} {secs * 1000:9.2f} ms x{n:<4d} = {secs * n:6.2f} s')
+  print(f'  {"":38s} {"":9s}          {"-" * 8}')
+  print(f'  {"total":38s} {"":9s}          {total:6.2f} s')
 
 
 if __name__ == '__main__':
