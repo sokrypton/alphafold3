@@ -1775,11 +1775,15 @@ def main(_):
                 ' https://developer.nvidia.com/cuda-gpus) the ENV XLA_FLAGS'
                 f' must include "{required_flag}".'
             )
-          if _FLASH_ATTENTION_IMPLEMENTATION.value != 'xla':
+          # 'volta' belongs here too: colabfold-legacy-kernels is the ONE
+          # fused attention a 7.x card can run, and this check predates it.
+          # Triton and cuDNN still cannot, so they still raise.
+          if _FLASH_ATTENTION_IMPLEMENTATION.value not in ('xla', 'volta'):
             raise ValueError(
                 'For devices with GPU compute capability 7.x (see'
                 ' https://developer.nvidia.com/cuda-gpus) the'
-                ' --flash_attention_implementation must be set to "xla".'
+                ' --flash_attention_implementation must be "xla", or "volta"'
+                ' with colabfold-legacy-kernels installed.'
             )
     else:
       raise ValueError(f'Unsupported JAX backend: {jax_backend}')
