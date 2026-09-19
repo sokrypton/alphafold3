@@ -135,9 +135,17 @@ def attention_config(device: str = None, cap: float | None = None,
     return {'attention': XLA, 'xla_flags': [], 'nojit': True,
             'reason': 'no GPU: XLA attention, and prefer nojit to skip the compile'}
 
-  if cap is not None and cap < 8.0 and not differentiable:
+  if cap is not None and cap < 8.0:
     from alphafold3.model.components import volta_attn
-    if volta_attn.installed():
+    # A DIFFERENTIABLE CALLER NEEDS A BACKWARD, and upstream's wheel has none:
+    # jax refuses with `The FFI call to VoltaMma cannot be differentiated`. The
+    # fork's sm_75 build does (dQ, dK, dV and dBias -- AF3 reaches the pair
+    # representation through the bias, so dBias is not optional), so a design
+    # run on a T4 keeps the kernel instead of falling back to XLA. sm_70 is
+    # forward only: the wmma kernel would need its own backward.
+    usable = volta_attn.installed() and (
+        not differentiable or volta_attn.bwd_installed(int(cap * 10)))
+    if usable:
       return {'attention': VOLTA, 'xla_flags': [NO_CUSTOM_KERNEL_FUSION],
               'nojit': False,
               'reason': f'pre-Ampere GPU (cc {cap}): the only fused attention '
@@ -145,8 +153,9 @@ def attention_config(device: str = None, cap: float | None = None,
                         "(Milot Mirdita's sm_70/sm_75 kernels) -- 3.0-3.35x "
                         'the XLA path on a T4, in float16. The same answer '
                         "also sends the triangle multiplication's input "
-                        'LayerNorm and GLU to that package. Forward only, so '
-                        'a differentiable caller gets XLA instead.'}
+                        'LayerNorm and GLU to that package.'
+                        + (' The fork build adds an sm_75 backward, so this '
+                           'serves a gradient too.' if differentiable else '')}
 
   if cap is not None and cap < 8.0:
     # XLA gates Pallas/Triton at sm_80, cuDNN's SDPA needs SM80, and tokamax
