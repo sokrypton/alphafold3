@@ -182,6 +182,14 @@ def attention_config(device: str = None, cap: float | None = None,
                         'only, so a differentiable caller gets cuDNN instead.'}
 
   if is_datacenter_gpu(cap):
+    # MEASURED, NOT ASSUMED: colabfold-kernels' Pallas attention is faster than
+    # tokamax's Triton on an A100 too -- 0.441 ms against 0.476 at N=384 and
+    # 0.969 against 1.195 at N=512, and its GLU takes the whole
+    # TriangleMultiplication 1.19-1.20x (tokamax's GLU is worth nothing there:
+    # 1.039 ms against XLA's 1.045). This row still says triton, because the
+    # fold does NOT move: 6LU7 at 306 tokens is 21.8 s warm under both. At this
+    # size the sampler dominates and an op that is 8% faster cannot show up. If
+    # a trunk-heavy workload ever wants it, the switch is one word.
     return {'attention': TRITON, 'xla_flags': [NO_TRITON_GEMM], 'nojit': False,
             'reason': f'datacenter GPU (cc {cap}): Triton flash attention, with '
                       'Triton GEMM disabled per AlphaFold 3 guidance'}
