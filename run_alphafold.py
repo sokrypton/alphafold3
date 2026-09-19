@@ -403,15 +403,20 @@ _BUCKETS = flags.DEFINE_list(
 )
 _FLASH_ATTENTION_IMPLEMENTATION = flags.DEFINE_enum(
     'flash_attention_implementation',
-    default='triton',
-    enum_values=['triton', 'cudnn', 'xla'],
+    default='auto',
+    enum_values=['auto', 'triton', 'cudnn', 'xla'],
     help=(
-        "Flash attention implementation to use. 'triton' and 'cudnn' uses a"
-        ' Triton and cuDNN flash attention implementation, respectively. The'
-        ' Triton kernel is fastest and has been tested more thoroughly. The'
-        " Triton and cuDNN kernels require Ampere GPUs or later. 'xla' uses an"
-        ' XLA attention implementation (no flash attention) and is portable'
-        ' across GPU devices.'
+        "Flash attention implementation to use. 'auto' (the default) asks"
+        ' alphafold3.model.components.platform, which picks per compute'
+        ' capability: Triton on A100/H100, cuDNN on Ada and consumer Ampere'
+        ' (which cannot launch the Triton kernels -- too little shared memory'
+        ' -- but run cuDNN fine), XLA below Ampere and on CPU. The old default'
+        " was 'triton', which is unrunnable on most of those cards, so every"
+        ' caller had to carry its own copy of that table -- and the notebook'
+        ' copy said XLA for Ada, costing 2.6x on triangle attention (11.89 ms'
+        ' -> 4.50 ms at 384 tokens, bit-identical; 20% off a whole fold).'
+        " 'triton' and 'cudnn' are the fused kernels and need Ampere or later;"
+        " 'xla' is portable and the one every device has."
     ),
 )
 _NUM_RECYCLES = flags.DEFINE_integer(
@@ -1691,6 +1696,22 @@ def main(_):
     raise
 
   jax_backend = _resolve_jax_backend() if _RUN_INFERENCE.value else None
+  if _RUN_INFERENCE.value and _FLASH_ATTENTION_IMPLEMENTATION.value == 'auto':
+    # Resolved HERE, after the backend is known and before the validation
+    # below, so an auto run lands on a value those checks already accept.
+    # `flags.FLAGS.<name> = v`, NOT `_HOLDER.value = v`: a FlagHolder's value
+    # is a read-only property, so the assignment form raises AttributeError.
+    # The CPU fallback below has always been written the second way, i.e. it
+    # would have raised the moment it ran.
+    if jax_backend == JaxBackend.CPU:
+      flags.FLAGS.flash_attention_implementation = 'xla'
+      print('--flash_attention_implementation=auto -> xla (no GPU)')
+    else:
+      from alphafold3.model.components import platform as _platform
+      _picked = _platform.attention_config()
+      flags.FLAGS.flash_attention_implementation = _picked['attention']
+      print(f'--flash_attention_implementation=auto -> '
+            f'{_picked["attention"]}: {_picked["reason"]}')
   if _RUN_INFERENCE.value:
     # Fail early on incompatible devices, but only if we're running inference.
     if jax_backend == JaxBackend.CPU:
@@ -1702,7 +1723,7 @@ def main(_):
               'Setting --flash_attention_implementation=xla, required for'
               ' CPU-only inference.'
           )
-          _FLASH_ATTENTION_IMPLEMENTATION.value = 'xla'
+          flags.FLAGS.flash_attention_implementation = 'xla'
         else:
           raise ValueError(
               'For CPU-only inference, the --flash_attention_implementation'

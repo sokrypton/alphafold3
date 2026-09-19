@@ -121,7 +121,13 @@ def _fold_setup(model_name, seq, model_dir=None, templates=None, seed=0,
                                  model_dir=model_dir, esm=esm, has_msa=False,
                                  fold_input=fold_input, lm_pair=lm_pair)
   cfg = af3_model.Model.Config()
-  cfg.global_config.flash_attention_implementation = 'xla'
+  # XLA by default because a gate has to be comparable across cards, and it is
+  # the one backend every card has. FLASH=cudnn to gate the fused kernel: it is
+  # 2.6x on triangle attention at N=384 and bit-identical on the op, but the
+  # fold is a 200-step chaotic sampler, so whether that survives to the
+  # structure is exactly what this gate is for.
+  cfg.global_config.flash_attention_implementation = os.environ.get(
+      'FLASH', 'xla')
   spec.configure(cfg)
   # BF16=none runs the trunk in float32. Worth having as a knob rather than a
   # constant: a model whose trunk is already marginal can be pushed over by
