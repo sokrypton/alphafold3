@@ -93,6 +93,7 @@ class JaxBackend(enum.StrEnum):
   AUTO = enum.auto()
   CPU = enum.auto()
   GPU = enum.auto()
+  TPU = enum.auto()
 
 
 # Input and output paths.
@@ -279,7 +280,16 @@ def _resolve_jax_backend() -> JaxBackend:
     has_gpu = False  # JAX has no GPU backend registered at all.
   if has_gpu:
     return JaxBackend.GPU
-  print('No JAX GPU backend found, falling back to CPU-only inference.')
+  # A TPU IS NOT A CPU. Without this the next line called a Colab TPU runtime
+  # "CPU-only", and everything below then placed the fold on the VM's CPU --
+  # with the accelerator sitting idle and nothing in the output saying so.
+  try:
+    has_tpu = bool(jax.local_devices(backend='tpu'))
+  except RuntimeError:
+    has_tpu = False
+  if has_tpu:
+    return JaxBackend.TPU
+  print('No JAX GPU or TPU backend found, falling back to CPU-only inference.')
   return JaxBackend.CPU
 
 
@@ -686,7 +696,13 @@ def _bfloat16_default() -> str:
   if env is not None:
     return 'all' if env not in ('', '0', 'false', 'False') else 'intermediate'
   try:
-    cc = str(getattr(jax.devices()[0], 'compute_capability', '') or '')
+    device = jax.devices()[0]
+    # A TPU has no compute_capability to read, and bfloat16 is its native
+    # matmul type -- 'intermediate' (the except branch's answer) would leave
+    # the sampler in f32 on the one accelerator built around bf16.
+    if device.platform == 'tpu':
+      return 'all'
+    cc = str(getattr(device, 'compute_capability', '') or '')
     major, _, minor = cc.partition('.')
     return 'all' if (int(major), int(minor or 0)) >= (8, 0) else 'intermediate'
   except Exception:
@@ -1729,6 +1745,11 @@ def main(_):
               'For CPU-only inference, the --flash_attention_implementation'
               ' must be set to "xla".'
           )
+    elif jax_backend == JaxBackend.TPU:
+      # Nothing to validate: the compute-capability rules below are CUDA's, and
+      # the only attention implementation with a TPU backend is XLA, which
+      # --flash_attention_implementation=auto already picks.
+      pass
     elif jax_backend == JaxBackend.GPU:
       gpu_devices = jax.local_devices(backend='gpu')
       if gpu_devices:
@@ -1841,6 +1862,9 @@ def main(_):
     if jax_backend == JaxBackend.CPU:
       device = devices[0]
       print(f'Found local CPU devices: {devices}, using device 0: {device}')
+    elif jax_backend == JaxBackend.TPU:
+      device = devices[0]
+      print(f'Found local TPU devices: {devices}, using device 0: {device}')
     elif jax_backend == JaxBackend.GPU:
       print(
           f'Found local GPU devices: {devices}, using device '

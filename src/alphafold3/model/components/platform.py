@@ -115,10 +115,8 @@ def attention_config(device: str = None, cap: float | None = None) -> dict:
     # meaningless here, so none are passed.
     return {'attention': XLA, 'xla_flags': [], 'nojit': False,
             'reason': 'TPU: XLA attention (no CUDA kernel has a TPU backend), '
-                      'and jit stays ON -- eager measured 14.3x the jit time. '
-                      'NOTE: run_alphafold has no TPU backend, so the fold '
-                      'itself will fall back to this VM\'s CPU; use a GPU '
-                      'runtime.'}
+                      'and jit stays ON -- eager measured 14.3x the jit '
+                      'time.'}
 
   if device == 'cpu':
     return {'attention': XLA, 'xla_flags': [], 'nojit': True,
