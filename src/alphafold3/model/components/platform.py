@@ -39,6 +39,7 @@ import sys
 XLA = 'xla'
 VOLTA = 'volta'
 PALLAS = 'pallas'
+TOKAMAX = 'tokamax'
 TRITON = 'triton'
 CUDNN = 'cudnn'
 
@@ -182,17 +183,31 @@ def attention_config(device: str = None, cap: float | None = None,
                         'only, so a differentiable caller gets cuDNN instead.'}
 
   if is_datacenter_gpu(cap):
-    # MEASURED, NOT ASSUMED: colabfold-kernels' Pallas attention is faster than
-    # tokamax's Triton on an A100 too -- 0.441 ms against 0.476 at N=384 and
-    # 0.969 against 1.195 at N=512, and its GLU takes the whole
-    # TriangleMultiplication 1.19-1.20x (tokamax's GLU is worth nothing there:
-    # 1.039 ms against XLA's 1.045). This row still says triton, because the
-    # fold does NOT move: 6LU7 at 306 tokens is 21.8 s warm under both. At this
-    # size the sampler dominates and an op that is 8% faster cannot show up. If
-    # a trunk-heavy workload ever wants it, the switch is one word.
-    return {'attention': TRITON, 'xla_flags': [NO_TRITON_GEMM], 'nojit': False,
+    # ATTENTION STAYS ON TRITON, THE GLU DOES NOT. Measured on a dedicated A100
+    # (not Colab): the three fused attentions are within noise of each other
+    # (triton 3.318 ms, Milot's pallas 3.265, the Anthropic kit 3.490 at
+    # N=768), so there is nothing to win by moving attention and tokamax is the
+    # better-tested path. tokamax's GLU, though, is worth NOTHING over plain
+    # XLA here -- 1.013 ms against 1.009 at N=384, 4.026 against 4.021 at
+    # N=768 -- while the Pallas GLU is 1.20x at both. End to end on a
+    # 768-residue fold, 10 recycles, warm, n=4 interleaved:
+    #     triton + tokamax GLU   31.96 31.96 31.96 31.93 s
+    #     triton + pallas  GLU   31.20 31.19 31.21 31.21 s   -2.35%
+    # Small, but 25x the spread, and free. Below 512 tokens it is invisible:
+    # 6LU7 at 306 is 21.8 s warm whatever the kernels.
+    glu = TOKAMAX
+    if not differentiable:
+      from alphafold3.model.components import pallas_attn
+      if pallas_attn.installed():
+        glu = PALLAS
+    return {'attention': TRITON, 'glu': glu, 'xla_flags': [NO_TRITON_GEMM],
+            'nojit': False,
             'reason': f'datacenter GPU (cc {cap}): Triton flash attention, with '
-                      'Triton GEMM disabled per AlphaFold 3 guidance'}
+                      'Triton GEMM disabled per AlphaFold 3 guidance'
+                      + ('; the triangle multiplication takes the Pallas GLU '
+                         "(Milot Mirdita's colabfold-kernels), 1.20x the op and "
+                         '-2.35% on a 768-residue fold, because tokamax\'s GLU '
+                         'is worth nothing over XLA here' if glu == PALLAS else '')}
 
   return {'attention': CUDNN, 'xla_flags': [NO_TRITON_GEMM], 'nojit': False,
           'reason': f'Ada/consumer GPU (cc {cap}): Triton kernels cannot launch '

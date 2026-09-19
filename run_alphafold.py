@@ -1752,6 +1752,12 @@ def main(_):
       flags.FLAGS.flash_attention_implementation = _picked['attention']
       print(f'--flash_attention_implementation=auto -> '
             f'{_picked["attention"]}: {_picked["reason"]}')
+      # The GLU is a SEPARATE choice from the attention one (an A100 wants
+      # Triton attention with a Pallas GLU), so the probe answers both. Only
+      # fill it in when the user left --glu_kernel alone.
+      if _GLU_KERNEL.value == 'auto' and _picked.get('glu'):
+        flags.FLAGS.glu_kernel = _picked['glu']
+        print(f'--glu_kernel=auto -> {_picked["glu"]}')
   if _RUN_INFERENCE.value:
     # Fail early on incompatible devices, but only if we're running inference.
     if jax_backend == JaxBackend.CPU:
