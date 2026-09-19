@@ -29,6 +29,7 @@ from alphafold3 import structure
 from alphafold3.common import base_config
 from alphafold3.common import folding_input
 from alphafold3.constants import chemical_components
+from alphafold3.constants import mmcif_names
 from alphafold3.model import feat_batch
 from alphafold3.model import features
 from alphafold3.model.pipeline import inter_chain_bonds
@@ -372,7 +373,13 @@ class WholePdbPipeline:
         )
     )
     deterministic_ref_structure = None
-    if self._config.deterministic_frames:
+    # Frames read reference positions for ligand tokens only, so without any this
+    # second, fixed-seed conformer set would never be used
+    frames_need_ref = any(
+        chain_type in mmcif_names.NON_POLYMER_CHAIN_TYPES
+        for chain_type in all_tokens.chain_type
+    )
+    if self._config.deterministic_frames and frames_need_ref:
       deterministic_ref_structure, _ = features.RefStructure.compute_features(
           all_token_atoms_layout=all_token_atoms_layout,
           ccd=ccd,
@@ -415,7 +422,7 @@ class WholePdbPipeline:
         all_token_atoms_layout=all_token_atoms_layout,
         ref_structure=(
             deterministic_ref_structure  # pyrefly: ignore[bad-argument-type]
-            if self._config.deterministic_frames
+            if deterministic_ref_structure is not None
             else batch_ref_structure
         ),
         padding_shapes=padding_shapes,
