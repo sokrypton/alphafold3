@@ -115,8 +115,12 @@ def attention_config(device: str = None, cap: float | None = None) -> dict:
     # meaningless here, so none are passed.
     return {'attention': XLA, 'xla_flags': [], 'nojit': False,
             'reason': 'TPU: XLA attention (no CUDA kernel has a TPU backend), '
-                      'and jit stays ON -- eager measured 14.3x the jit '
-                      'time.'}
+                      'and jit stays ON -- eager measured 14.3x the jit time. '
+                      'Worth having: on a Colab v5e, 1STP (121 tokens, 10 '
+                      'recycles, 5 samples, warm) took 7.45 s against an A10 '
+                      "+cuDNN's 17.5 s, and the structures agree to 0.018-"
+                      '0.030 A CA-RMSD at the same pTM 0.92. Verified with '
+                      'openbind0; the other models have not been run here.'}
 
   if device == 'cpu':
     return {'attention': XLA, 'xla_flags': [], 'nojit': True,
