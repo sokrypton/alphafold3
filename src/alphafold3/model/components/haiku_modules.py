@@ -72,6 +72,7 @@ class LayerNorm(hk.LayerNorm):
       name: str,
       param_axis: int | None = None,
       upcast: bool = True,
+      kernel: str | None = None,
   ):
     super().__init__(
         axis=axis,
@@ -85,6 +86,13 @@ class LayerNorm(hk.LayerNorm):
         param_axis=param_axis,
     )
     self.upcast = upcast
+    # 'volta' asks for colabfold-legacy-kernels' fused LayerNorm (Milot
+    # Mirdita's sm_70/sm_75 kernel), the only fused option a pre-Ampere card
+    # has. Only valid for a LAST-AXIS norm with both parameters; anything else
+    # -- including a machine where the kernel does not load -- silently takes
+    # the haiku path below. Forward only, so a differentiable caller must not
+    # ask for it.
+    self.kernel = kernel
     self._temp_create_scale = create_scale
     self._temp_create_offset = create_offset
 
@@ -112,6 +120,18 @@ class LayerNorm(hk.LayerNorm):
           'offset', param_shape, x.dtype, init=self.offset_init
       )
       offset = offset.reshape(param_broadcast_shape)
+
+    if self.kernel == 'volta' and scale is not None and offset is not None:
+      axis = self.axis if isinstance(self.axis, (tuple, list)) else (self.axis,)
+      last = (-1, x.ndim - 1)
+      if len(axis) == 1 and axis[0] in last and param_axis in last:
+        from alphafold3.model.components import volta_attn  # pylint: disable=g-import-not-at-top
+
+        out = volta_attn.layer_norm(
+            x, jnp.reshape(scale, (-1,)), jnp.reshape(offset, (-1,)),
+            eps=self.eps)
+        if out is not None:
+          return out.astype(dtype)
 
     out = super().__call__(x, scale=scale, offset=offset)
 

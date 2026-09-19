@@ -60,29 +60,58 @@ def _symbol(cc: int) -> str:
   return 'VoltaMma' if cc >= 75 else 'VoltaWmma'
 
 
-def available(cc) -> bool:
-  """dlopen the library for this device and register its FFI target."""
-  if cc is None:
-    return False
-  cc = int(cc)
-  sym = _symbol(cc)
-  key = (cc, sym)
+def _load(kernel: str, cc: int, symbols) -> bool:
+  """dlopen one kernel library for this device and register its FFI targets."""
+  key = (kernel, int(cc), tuple(symbols))
   if key in _LOADED:
     return _LOADED[key]
   ok = False
   try:
     import colabfold_legacy_kernels as clk
 
-    path = clk.library_path('attention', cc)
-    if os.path.exists(path):
+    path = clk.library_path(kernel, int(cc))
+    if path and os.path.exists(path):
       lib = ctypes.cdll.LoadLibrary(path)
-      jax.ffi.register_ffi_target(
-          sym, jax.ffi.pycapsule(getattr(lib, sym)), platform='CUDA')
+      for sym in symbols:
+        jax.ffi.register_ffi_target(
+            sym, jax.ffi.pycapsule(getattr(lib, sym)), platform='CUDA')
       ok = True
   except Exception:  # pylint: disable=broad-except
     ok = False
   _LOADED[key] = ok
   return ok
+
+
+def available(cc) -> bool:
+  """dlopen the attention library for this device and register its target."""
+  if cc is None:
+    return False
+  return _load('attention', int(cc), (_symbol(int(cc)),))
+
+
+def ops_available(cc) -> bool:
+  """dlopen the LayerNorm and gated-dual-projection libraries.
+
+  The LayerNorm kernel is Volta-capable; the CUTLASS gated dual projection is
+  sm_75+, and sm_70 gets a separate wmma build (Milot's `ops_available`).
+  """
+  if cc is None:
+    return False
+  cc = int(cc)
+  syms = ('VoltaLayerNorm', 'VoltaGdp') if cc >= 75 else ('VoltaLayerNorm',)
+  ok = _load('layer_norm', cc, syms)
+  if ok and cc < 75:
+    ok = _load('gated_dual_proj', cc, ('VoltaGdpWmma',))
+  return ok
+
+
+def device_cc():
+  """The compute capability of device 0 as an integer (75), or None."""
+  try:
+    cap = getattr(jax.devices()[0], 'compute_capability', None)
+  except Exception:  # pylint: disable=broad-except
+    return None
+  return None if cap is None else int(float(cap) * 10)
 
 
 @functools.partial(jax.jit, static_argnames=('sym', 'sm_scale', 'block_q', 'block_k'))
@@ -130,3 +159,92 @@ def attention(q, k, v, *, mask, bias, scale, cc, block_q=64, block_k=32):
               sym=_symbol(int(cc)), sm_scale=float(scale),
               block_q=block_q, block_k=block_k)
   return jnp.swapaxes(out, 1, 2).astype(in_dtype)     # back to [b, S, h, c]
+
+
+# ---------------------------------------------------------------------------
+# The other two kernels the same package ships: a fused LayerNorm and a masked,
+# sigmoid-gated dual projection. Both are Milot Mirdita's; the wrappers below
+# are his `volta_layer_norm` / `volta_gated_dual_proj`, adapted to this fork's
+# TriangleMultiplication, which is where they land: at N=384 that module spends
+# 0.321 ms in its input LayerNorm (39% of the card's bandwidth peak) and
+# 0.869 ms in the GLU, and tokamax's GLU -- which a T4 cannot launch anyway --
+# beats plain XLA there by only 7%.
+#
+# FORWARD ONLY, float16, like the attention kernel above.
+
+
+@functools.partial(jax.jit, static_argnames=('eps',))
+def _ln_call(x, scale, offset, *, eps):
+  m, c = x.shape
+  return jax.ffi.ffi_call(
+      'VoltaLayerNorm', jax.ShapeDtypeStruct((m, c), jnp.float16),
+      vmap_method='sequential')(x, scale, offset, eps=np.float32(eps))
+
+
+def layer_norm(x, scale, offset, *, eps=1e-5, cc=None):
+  """LayerNorm over the LAST axis. None -- never a wrong answer -- if it cannot.
+
+  scale/offset are [c] vectors; the kernel wants them in float32 and the
+  activations in float16, and gives back the caller's dtype.
+  """
+  if x.ndim < 2 or scale is None or offset is None:
+    return None
+  c = x.shape[-1]
+  if scale.size != c or offset.size != c:
+    return None
+  cc = device_cc() if cc is None else cc
+  if not ops_available(cc):
+    return None
+  out = _ln_call(x.reshape(-1, c).astype(jnp.float16),
+                 jnp.reshape(scale, (c,)).astype(jnp.float32),
+                 jnp.reshape(offset, (c,)).astype(jnp.float32), eps=float(eps))
+  return out.reshape(x.shape).astype(x.dtype)
+
+
+@functools.partial(jax.jit, static_argnames=('sym',))
+def _gdp_call(x, wp, bp, wg, bg, mask, *, sym):
+  m, n = x.shape[0], wp.shape[1]
+  return jax.ffi.ffi_call(sym, jax.ShapeDtypeStruct((m, n), jnp.float16),
+                          vmap_method='sequential')(x, wp, bp, wg, bg, mask)
+
+
+def gated_dual_proj(x, w_proj, w_gate, mask, *, cc=None):
+  """TriangleMultiplication's GLU, fused, split and already channel-major.
+
+  Computes `mask * (x @ w_proj) * sigmoid(x @ w_gate)` -- the projection and
+  the gate in one kernel, so the [M, 2h] intermediates are never materialised
+  -- and returns the a/b pair the triangle einsum consumes, each [h, *spatial].
+
+  The split is INTERLEAVED, not contiguous: this fork transposes the [.., 2h]
+  projection to [2h, ..] and reshapes it to [h, 2, ..], so `a` is the even
+  output channels and `b` the odd ones. (Milot's own wrapper splits
+  contiguously, which is AF2's layout.) Neither linear has a bias here --
+  hm.Linear is use_bias=False -- so the kernel's bias operands are zeros.
+
+  Returns None for anything outside what the kernel instantiates.
+  """
+  if x.ndim < 2 or w_proj.shape != w_gate.shape:
+    return None
+  c = x.shape[-1]
+  if w_proj.shape[0] != c or w_proj.shape[1] % 2:
+    return None
+  h = w_proj.shape[1] // 2
+  if c % 8 or h % 8:      # fp16 tensor-core alignment
+    return None
+  cc = device_cc() if cc is None else cc
+  if not ops_available(cc):
+    return None
+  sym = 'VoltaGdp' if cc >= 75 else 'VoltaGdpWmma'
+  spatial = tuple(x.shape[:-1])
+  m = int(np.prod(spatial))
+  f16 = lambda t: t.astype(jnp.float16)
+  xf = f16(x.reshape(m, c))
+  maskf = f16(jnp.reshape(mask, (m,)))
+  zeros = jnp.zeros((h,), jnp.float16)
+  out = []
+  for off in (0, 1):
+    half = _gdp_call(xf, f16(w_proj[:, off::2]), zeros,
+                     f16(w_gate[:, off::2]), zeros, maskf, sym=sym)
+    # [M, h] -> [h, *spatial], which is what the 'cik,cjk->cij' einsum wants.
+    out.append(jnp.swapaxes(half, 0, 1).reshape((h,) + spatial).astype(x.dtype))
+  return out[0], out[1]

@@ -457,9 +457,21 @@ class TriangleMultiplication(hk.Module):
         'kjc,kic->ijc': 'ckj,cki->cij',
     }[self.config.equation]
 
-    act = hm.LayerNorm(name='left_norm_input')(act)
+    # A pre-Ampere card (T4, V100) can launch none of the fused kernels this
+    # module reaches for -- tokamax's GLU included -- so on `volta` the input
+    # LayerNorm and the GLU go to colabfold-legacy-kernels instead (Milot
+    # Mirdita's sm_70/sm_75 CUDA kernels). Both fall back silently: the
+    # LayerNorm hook and `gated_dual_proj` return the haiku path / None rather
+    # than a wrong answer when the kernel is missing or the shape is outside
+    # what it instantiates.
+    volta_ops = self.global_config.flash_attention_implementation == 'volta'
+
+    act = hm.LayerNorm(
+        name='left_norm_input', kernel='volta' if volta_ops else None
+    )(act)
     input_act = act
 
+    ab = None
     if self.config.use_glu_kernel:
       weights_projection, _ = hm.haiku_linear_get_params(
           act, num_output=hidden_dim * 2, name='projection'
@@ -470,6 +482,17 @@ class TriangleMultiplication(hk.Module):
           initializer=self.global_config.final_init,
           name='gate',
       )
+      if volta_ops:
+        from alphafold3.model.components import volta_attn  # pylint: disable=g-import-not-at-top
+
+        # Already channel-major and already split into the a/b the einsum wants.
+        ab = volta_attn.gated_dual_proj(
+            act, weights_projection, weights_gate, mask[0]
+        )
+
+    if ab is not None:
+      a, b = ab
+    elif self.config.use_glu_kernel:
       weights_glu = jnp.stack([weights_gate, weights_projection], axis=1)
 
       projection = tokamax.gated_linear_unit(
@@ -491,9 +514,10 @@ class TriangleMultiplication(hk.Module):
       gate = jnp.transpose(gate, (2, 0, 1))
       projection *= jax.nn.sigmoid(gate)
 
-    projection = projection.reshape(hidden_dim, 2, *projection.shape[1:])
-    a, b = jnp.split(projection, 2, axis=1)
-    a, b = jnp.squeeze(a, axis=1), jnp.squeeze(b, axis=1)
+    if ab is None:
+      projection = projection.reshape(hidden_dim, 2, *projection.shape[1:])
+      a, b = jnp.split(projection, 2, axis=1)
+      a, b = jnp.squeeze(a, axis=1), jnp.squeeze(b, axis=1)
     act = jnp.einsum(equation, a, b)
     # rf3 divides by the sequence length here, and it is NOT a no-op in front of
     # a LayerNorm because of the norm's epsilon -- see
