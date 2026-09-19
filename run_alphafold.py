@@ -414,7 +414,7 @@ _BUCKETS = flags.DEFINE_list(
 _FLASH_ATTENTION_IMPLEMENTATION = flags.DEFINE_enum(
     'flash_attention_implementation',
     default='auto',
-    enum_values=['auto', 'triton', 'cudnn', 'xla', 'volta'],
+    enum_values=['auto', 'triton', 'cudnn', 'xla', 'volta', 'pallas'],
     help=(
         "Flash attention implementation to use. 'auto' (the default) asks"
         ' alphafold3.model.components.platform, which picks per compute'
@@ -429,6 +429,11 @@ _FLASH_ATTENTION_IMPLEMENTATION = flags.DEFINE_enum(
         " 'volta' is Milot Mirdita's colabfold-legacy-kernels, the only fused"
         ' attention sm_70/sm_75 can run (3x XLA on a T4, in float16, and'
         ' FORWARD ONLY -- it cannot be differentiated);'
+        " 'pallas' is his colabfold-kernels, a Pallas flash attention with a"
+        ' non-batched bias that sizes its blocks to the device, so it launches'
+        ' on the Ada and consumer-Ampere cards tokamax refuses -- 3.3x cuDNN'
+        ' and 11.9x XLA on an A10, and FORWARD ONLY for the same reason (a'
+        ' Pallas call has no VJP);'
         " 'xla' is portable and the one every device has."
     ),
 )
