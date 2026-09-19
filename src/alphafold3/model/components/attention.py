@@ -42,6 +42,23 @@ def dot_product_attention(q, k, v, *, mask=None, bias=None, implementation=None,
   # instantiates (a broadcast bias, an odd head dim), so this falls through.
   # FORWARD ONLY: it cannot be differentiated, which is why nothing asks for
   # it on a gradient path -- see platform.attention_config(differentiable=).
+  # Milot Mirdita's Pallas kernel (colabfold-kernels): a flash attention with a
+  # non-batched bias that sizes its blocks against the device, so it runs on the
+  # Ada / consumer-Ampere cards where tokamax's Triton arm answers 'Not
+  # supported on NVIDIA A10' -- and at 0.723 ms against cuDNN's 2.409 at
+  # N=384 it is 3.3x the backend those cards use today. Forward only (a Pallas
+  # call has no VJP), which is why platform.attention_config never answers
+  # 'pallas' to a differentiable caller. Falls through to XLA on any shape it
+  # does not take.
+  if implementation == 'pallas':
+    from alphafold3.model.components import pallas_attn
+    out = pallas_attn.attention(
+        q, k, v, mask=mask, bias=bias,
+        scale=scale if scale is not None else q.shape[-1] ** -0.5)
+    if out is not None:
+      return out
+    implementation = 'xla'
+
   if implementation == 'volta':
     from alphafold3.model.components import volta_attn
     import jax

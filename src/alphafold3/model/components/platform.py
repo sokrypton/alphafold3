@@ -38,6 +38,7 @@ import sys
 
 XLA = 'xla'
 VOLTA = 'volta'
+PALLAS = 'pallas'
 TRITON = 'triton'
 CUDNN = 'cudnn'
 
@@ -164,6 +165,21 @@ def attention_config(device: str = None, cap: float | None = None,
             'nojit': False,
             'reason': f'pre-Ampere GPU (cc {cap}): no Triton support, and the '
                       'custom-kernel fusion pass has to be disabled'}
+
+  if cap is not None and not is_datacenter_gpu(cap) and not differentiable:
+    from alphafold3.model.components import pallas_attn
+    if pallas_attn.installed():
+      # The Ada / consumer-Ampere row, where tokamax refuses to launch at all.
+      # Measured on an A10 at this model's triangle-attention shape (N=384):
+      # XLA 8.635 ms, cuDNN 2.409, this 0.723 -- 3.3x the cuDNN this row used
+      # to take. The datacenter row is NOT sent here: tokamax's Triton does
+      # launch there and has not been compared against this yet.
+      return {'attention': PALLAS, 'xla_flags': [NO_TRITON_GEMM], 'nojit': False,
+              'reason': f'Ada/consumer GPU (cc {cap}): colabfold-kernels '
+                        "(Milot Mirdita's Pallas flash attention) sizes its "
+                        'blocks to the device, so it runs where tokamax will '
+                        'not -- 3.3x cuDNN and 11.9x XLA on an A10. Forward '
+                        'only, so a differentiable caller gets cuDNN instead.'}
 
   if is_datacenter_gpu(cap):
     return {'attention': TRITON, 'xla_flags': [NO_TRITON_GEMM], 'nojit': False,

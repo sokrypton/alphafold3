@@ -465,6 +465,11 @@ class TriangleMultiplication(hk.Module):
     # than a wrong answer when the kernel is missing or the shape is outside
     # what it instantiates.
     volta_ops = self.global_config.flash_attention_implementation == 'volta'
+    # The same two kernels exist for Ampere and newer, in Milot Mirdita's other
+    # package (colabfold-kernels, Pallas). Only the GLU is taken: his fused
+    # LayerNorm measures 0.164 ms against XLA's 0.166 on an A10, while the GLU
+    # is 0.512 against tokamax's 0.872 and XLA's 0.941.
+    pallas_ops = self.global_config.flash_attention_implementation == 'pallas'
 
     act = hm.LayerNorm(
         name='left_norm_input', kernel='volta' if volta_ops else None
@@ -487,6 +492,12 @@ class TriangleMultiplication(hk.Module):
 
         # Already channel-major and already split into the a/b the einsum wants.
         ab = volta_attn.gated_dual_proj(
+            act, weights_projection, weights_gate, mask[0]
+        )
+      elif pallas_ops:
+        from alphafold3.model.components import pallas_attn  # pylint: disable=g-import-not-at-top
+
+        ab = pallas_attn.gated_dual_proj(
             act, weights_projection, weights_gate, mask[0]
         )
 
