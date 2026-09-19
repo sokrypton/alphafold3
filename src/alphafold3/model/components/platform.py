@@ -141,7 +141,9 @@ def attention_config(device: str = None, cap: float | None = None,
               'reason': f'pre-Ampere GPU (cc {cap}): the only fused attention '
                         'this card can run is colabfold-legacy-kernels '
                         "(Milot Mirdita's sm_70/sm_75 kernels) -- 3.0-3.35x "
-                        'the XLA path on a T4, in float16. Forward only, so '
+                        'the XLA path on a T4, in float16. The same answer '
+                        "also sends the triangle multiplication's input "
+                        'LayerNorm and GLU to that package. Forward only, so '
                         'a differentiable caller gets XLA instead.'}
 
   if cap is not None and cap < 8.0:
