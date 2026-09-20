@@ -25,6 +25,46 @@ import tokamax
 _NEG = 1e8
 
 
+_TOKAMAX_ADA = {'done': False}
+
+
+def _enable_tokamax_on_ada():
+  """Let tokamax's Triton kernels run on Ada / consumer Ampere.
+
+  See the note at the call site. Idempotent, and a no-op on any card tokamax
+  already accepts, so a datacenter run is untouched.
+  """
+  _TOKAMAX_ADA['done'] = True
+  try:
+    import jax
+
+    from tokamax._src import gpu_utils
+
+    caps = [float(d.compute_capability) for d in jax.local_devices()
+            if getattr(d, 'compute_capability', None)]
+    if not caps or all(c == 8.0 or c >= 9.0 for c in caps):
+      return                       # tokamax accepts these already
+    real = gpu_utils.has_triton_support
+
+    def _allow(device=None):
+      if real(device):
+        return True
+      dev = device
+      if dev is None:
+        try:
+          dev = jax.local_devices()[0]
+        except Exception:  # pylint: disable=broad-except
+          return False
+      cap = getattr(dev, 'compute_capability', None)
+      return cap is not None and 8.0 <= float(cap) < 9.0
+    gpu_utils.has_triton_support = _allow
+    # the op reads it through its own module reference
+    from tokamax._src.ops.attention import pallas_triton as _pt
+    _pt.gpu_utils.has_triton_support = _allow
+  except Exception:  # pylint: disable=broad-except
+    pass
+
+
 def dot_product_attention(q, k, v, *, mask=None, bias=None, implementation=None,
                           scale=None):
   '''tokamax.dot_product_attention, guarded so cuDNN backprop works at odd lengths.'''
@@ -50,6 +90,20 @@ def dot_product_attention(q, k, v, *, mask=None, bias=None, implementation=None,
   # call has no VJP), which is why platform.attention_config never answers
   # 'pallas' to a differentiable caller. Falls through to XLA on any shape it
   # does not take.
+  # TOKAMAX REFUSES ADA BY NAME, AND THE PREMISE IS WRONG FOR OUR SHAPES.
+  # `gpu_utils.has_triton_support` answers `cc == 8.0 or cc >= 9.0`, commented
+  # "Ada/L4 lack shared memory". Every shape this model uses launches there --
+  # see platform.attention_config's differentiable branch for the map and the
+  # numbers -- and a GRADIENT on Ada needs it: cuDNN's backward wants 22.96 GiB
+  # at 384 residues where the flash backward runs in 4.2 s.
+  #
+  # Patched once per process, and only when Triton was actually asked for on a
+  # card tokamax would refuse. The refusal is a NotImplementedError at TRACE
+  # time, so the caller below can fall back; a shared-memory failure at LAUNCH
+  # could not be caught, which is why the shapes were mapped first.
+  if implementation == 'triton' and not _TOKAMAX_ADA['done']:
+    _enable_tokamax_on_ada()
+
   if implementation == 'pallas':
     from alphafold3.model.components import pallas_attn
     out = pallas_attn.attention(

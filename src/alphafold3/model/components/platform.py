@@ -218,6 +218,34 @@ def attention_config(device: str = None, cap: float | None = None,
                          '-2.35% on a 768-residue fold, because tokamax\'s GLU '
                          'is worth nothing over XLA here' if glu == PALLAS else '')}
 
+  if differentiable:
+    # A GRADIENT ON ADA GOES TO TRITON, NOT cuDNN -- and the reason is memory,
+    # not speed. tokamax refuses this card through a blanket
+    # `cc == 8.0 or cc >= 9.0` in gpu_utils.has_triton_support, commented
+    # "Ada/L4 lack shared memory". That premise does not hold for any shape
+    # this model uses: with the gate bypassed, triangle attention at
+    # c=16/32/64/128, the diffusion transformer's h=16/c=48, the ESM tower's
+    # h=20/c=64 and sequences to 1024 all launch, forward AND backward, on an
+    # A10. Measured, gradient through one trunk pass:
+    #
+    #     150 residues   cuDNN 0.643 s   triton 0.554 s
+    #     300 residues   cuDNN 3.352 s   triton 2.609 s
+    #     384 residues   cuDNN OOM (22.96 GiB)   triton 4.201 s
+    #
+    # cuDNN's backward materialises what a flash backward does not, so on a
+    # 23 GB card a 384-residue design step is impossible with it and fine with
+    # Triton. The op-level gap is larger (4.921 ms against 10.364 at N=384)
+    # and, as ever, does not survive to the end-to-end measure.
+    #
+    # attention.py enables tokamax for this case and falls back to cuDNN if it
+    # refuses -- the refusal is a NotImplementedError at TRACE time, which is
+    # catchable; a shared-memory failure at launch would not be.
+    return {'attention': TRITON, 'xla_flags': [NO_TRITON_GEMM], 'nojit': False,
+            'reason': f'Ada/consumer GPU (cc {cap}), differentiable: Triton. '
+                      "tokamax's blanket refusal of this card does not hold "
+                      'for any shape here, and cuDNN\'s backward OOMs at 384 '
+                      'residues where Triton runs in 4.2 s.'}
+
   return {'attention': CUDNN, 'xla_flags': [NO_TRITON_GEMM], 'nojit': False,
           'reason': f'Ada/consumer GPU (cc {cap}): Triton kernels cannot launch '
                     '(shared memory too small), but cuDNN fused attention can and '
