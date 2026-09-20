@@ -522,6 +522,14 @@ _FEATURISE = {
     **{m: dict(atom_keys_subset_size=192, lm_pair=True,
                dedupe_self_msa=not os.environ.get('AF3_NO_ESM_DEDUPE_MSA'),
                esmfold2_ref_pos=not os.environ.get('AF3_NO_ESM_REF_POS'),
+               # DIAGNOSTIC: AF3_ESM_PTM_ONE_TOKEN=1 keeps a modified residue
+               # as ONE token holding all its atoms (boltz2's convention)
+               # instead of atomising it. esmfold2 places a residue's atoms
+               # correctly when they are WITHIN a token and ~1.7x too far apart
+               # when they are separate tokens, so this says whether the fault
+               # is cross-token geometry itself.
+               **(dict(modified_as_one_token=True)
+                  if os.environ.get('AF3_ESM_PTM_ONE_TOKEN') else {}),
                **({} if os.environ.get('AF3_NO_ESM_DROP_OXT')
                   else dict(drop_atoms=('OXT',))))
        for m in model_config.ESMFOLD2_FAMILY},

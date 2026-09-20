@@ -451,6 +451,17 @@ _GLU_KERNEL = flags.DEFINE_enum(
         ' Pallas GLU is 1.20x at every size measured.'
     ),
 )
+_NUM_SAMPLING_STEPS = flags.DEFINE_integer(
+    'num_sampling_steps',
+    None,
+    'Denoising steps the diffusion sampler takes. None keeps the model\'s own'
+    " default, which is what every released number was measured at. It is a"
+    ' flag because step count is a REAL variable when something is placed'
+    ' wrongly: a group that gets worse with more steps is being pushed by the'
+    ' loop, and one that is flat is not short of budget. ESMFold2 defaults to'
+    ' 15, AF3 to 200.',
+    lower_bound=1,
+)
 _NUM_RECYCLES = flags.DEFINE_integer(
     'num_recycles',
     10,
@@ -736,6 +747,7 @@ def make_model_config(
     flash_attention_implementation: tokamax.DotProductAttentionImplementation = 'triton',
     glu_kernel: str = 'auto',
     num_diffusion_samples: int = 5,
+    num_sampling_steps: int | None = None,
     num_recycles: int = 10,
     return_embeddings: bool = False,
     return_distogram: bool = False,
@@ -759,6 +771,12 @@ def make_model_config(
   config.return_distogram = return_distogram
   config.global_config.bfloat16 = _bfloat16_default()
   model_registry.get(model_name).configure(config)
+  # AFTER configure(), NOT BEFORE. The model spec sets its own sampler
+  # constants -- ESMFold2's 15 steps, AF3's 200 -- so an assignment made before
+  # it is silently overwritten, and a sweep at 5/15/60 steps then returns three
+  # IDENTICAL structures, which is how this was caught.
+  if num_sampling_steps is not None:
+    config.heads.diffusion.eval.steps = num_sampling_steps
   # HOW MANY MSA ROWS THE TRUNK SEES. Featurisation always hands over a fixed
   # 16384-row buffer (pipeline.msa_crop_size) and the trunk subsamples to this,
   # keeping the query at row 0. Lowering it is the one MSA knob a user can turn.
@@ -1944,6 +1962,7 @@ def main(_):
               ),
               glu_kernel=_GLU_KERNEL.value,
               num_diffusion_samples=_NUM_DIFFUSION_SAMPLES.value,
+              num_sampling_steps=_NUM_SAMPLING_STEPS.value,
               num_recycles=_NUM_RECYCLES.value,
               return_embeddings=_SAVE_EMBEDDINGS.value,
               return_distogram=_SAVE_DISTOGRAM.value,
