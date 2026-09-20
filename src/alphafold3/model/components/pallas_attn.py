@@ -33,7 +33,10 @@ from __future__ import annotations
 
 import importlib.util
 
+import jax
 import jax.numpy as jnp
+
+from alphafold3.model.components import volta_attn
 
 _NEG = -1e9      # the kernel reads mask_bias > -1e3 as "this key is real"
 
@@ -118,6 +121,30 @@ def _pow2(n):
   return n > 0 and (n & (n - 1)) == 0
 
 
+def _gdp_impl(x, w_proj, w_gate, mask):
+  from colabfold_kernels import tri_mul  # pylint: disable=g-import-not-at-top
+
+  c = x.shape[-1]
+  h = w_proj.shape[1] // 2
+  pack = lambda w: jnp.concatenate([w[:, 0::2], w[:, 1::2]], axis=-1)
+  zeros = jnp.zeros((2 * h,), x.dtype)
+  spatial = tuple(x.shape[:-1])
+  left, right = tri_mul.gated_dual_proj(
+      x.reshape(-1, c), pack(w_proj), zeros, pack(w_gate), zeros,
+      jnp.reshape(mask, (-1,)).astype(x.dtype), split=True, channel_major=True)
+  return (left.reshape((h,) + spatial), right.reshape((h,) + spatial))
+
+
+# A bare `pallas_call` HAS NO VJP, so this would die under jax.grad exactly as
+# the volta one did. Same remedy, and the same reasoning: see
+# `volta_attn.xla_vjp`. It costs one recomputation of a forward that is
+# cheaper than the XLA path it replaces.
+_gdp_diff = jax.custom_vjp(_gdp_impl)
+_gdp_diff.defvjp(
+    lambda x, wp, wg, m: (_gdp_impl(x, wp, wg, m), (x, wp, wg, m)),
+    volta_attn.xla_vjp(volta_attn.gdp_reference))
+
+
 def gated_dual_proj(x, w_proj, w_gate, mask):
   """TriangleMultiplication's GLU, fused, split and already channel-major.
 
@@ -141,12 +168,4 @@ def gated_dual_proj(x, w_proj, w_gate, mask):
   if not _gdp_fits(c, h, jnp.dtype(x.dtype).itemsize):
     return None
 
-  from colabfold_kernels import tri_mul  # pylint: disable=g-import-not-at-top
-
-  pack = lambda w: jnp.concatenate([w[:, 0::2], w[:, 1::2]], axis=-1)
-  zeros = jnp.zeros((2 * h,), x.dtype)
-  spatial = tuple(x.shape[:-1])
-  left, right = tri_mul.gated_dual_proj(
-      x.reshape(-1, c), pack(w_proj), zeros, pack(w_gate), zeros,
-      jnp.reshape(mask, (-1,)).astype(x.dtype), split=True, channel_major=True)
-  return (left.reshape((h,) + spatial), right.reshape((h,) + spatial))
+  return _gdp_diff(x, w_proj, w_gate, mask)

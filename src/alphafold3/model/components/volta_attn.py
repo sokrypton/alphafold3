@@ -304,7 +304,42 @@ def attention(q, k, v, *, mask, bias, scale, cc, block_q=64, block_k=32):
 # 0.869 ms in the GLU, and tokamax's GLU -- which a T4 cannot launch anyway --
 # beats plain XLA there by only 7%.
 #
-# FORWARD ONLY, float16, like the attention kernel above.
+# float16, like the attention kernel above. Neither has a backward kernel, so
+# both take their gradient from an XLA recomputation -- see `xla_vjp`.
+
+
+def xla_vjp(ref):
+  """A backward that is `jax.vjp` of a plain-XLA twin of the kernel.
+
+  Public because pallas_attn's GLU needs exactly the same treatment, and
+  `gdp_reference` below is the same math for both packages.
+
+  THE FUSED GLU AND LAYERNORM HAVE NO BACKWARD KERNEL, in either of Milot's
+  packages (his Pallas GLU is a bare `pallas_call`, these are bare `ffi_call`s).
+  A raw call is not differentiable at all, so a design run that reached one died
+  with `The FFI call to VoltaLayerNorm cannot be differentiated` -- and
+  `glu_kernel='auto'` FOLLOWS the attention pick, so enabling the attention
+  backward on a pre-Ampere card armed exactly that.
+
+  Recomputing the forward in XLA to get the gradient is what a remat would do
+  anyway, and it keeps the fused kernel on the forward pass inside a design
+  step. It also makes the gradient the exact one of the fp32 reference rather
+  than of the fp16 kernel, which is the better of the two.
+  """
+  def bwd(*args):
+    res, cotangent = args[-2], args[-1]
+    static = args[:-2]
+    _, vjp = jax.vjp(lambda *a: ref(*a, *static), *res)
+    return vjp(cotangent)
+  return bwd
+
+
+def _ln_ref(x, scale, offset, eps):
+  xf = x.astype(jnp.float32)
+  mu = jnp.mean(xf, -1, keepdims=True)
+  var = jnp.mean((xf - mu) ** 2, -1, keepdims=True)
+  norm = (xf - mu) * jax.lax.rsqrt(var + eps)
+  return (norm * scale + offset).astype(x.dtype)
 
 
 @functools.partial(jax.jit, static_argnames=('eps',))
@@ -313,6 +348,18 @@ def _ln_call(x, scale, offset, *, eps):
   return jax.ffi.ffi_call(
       'VoltaLayerNorm', jax.ShapeDtypeStruct((m, c), jnp.float16),
       vmap_method='sequential')(x, scale, offset, eps=np.float32(eps))
+
+
+def _ln_impl(x, scale, offset, eps):
+  c = x.shape[-1]
+  out = _ln_call(x.reshape(-1, c).astype(jnp.float16),
+                 scale.astype(jnp.float32), offset.astype(jnp.float32), eps=eps)
+  return out.reshape(x.shape).astype(x.dtype)
+
+
+_ln_diff = jax.custom_vjp(_ln_impl, nondiff_argnums=(3,))
+_ln_diff.defvjp(lambda x, s, o, eps: (_ln_impl(x, s, o, eps), (x, s, o)),
+                xla_vjp(_ln_ref))
 
 
 def layer_norm(x, scale, offset, *, eps=1e-5, cc=None):
@@ -329,10 +376,8 @@ def layer_norm(x, scale, offset, *, eps=1e-5, cc=None):
   cc = device_cc() if cc is None else cc
   if not ops_available(cc):
     return None
-  out = _ln_call(x.reshape(-1, c).astype(jnp.float16),
-                 jnp.reshape(scale, (c,)).astype(jnp.float32),
-                 jnp.reshape(offset, (c,)).astype(jnp.float32), eps=float(eps))
-  return out.reshape(x.shape).astype(x.dtype)
+  return _ln_diff(x, jnp.reshape(scale, (c,)), jnp.reshape(offset, (c,)),
+                  float(eps))
 
 
 @functools.partial(jax.jit, static_argnames=('sym',))
@@ -340,6 +385,45 @@ def _gdp_call(x, wp, bp, wg, bg, mask, *, sym):
   m, n = x.shape[0], wp.shape[1]
   return jax.ffi.ffi_call(sym, jax.ShapeDtypeStruct((m, n), jnp.float16),
                           vmap_method='sequential')(x, wp, bp, wg, bg, mask)
+
+
+def gdp_reference(x, w_proj, w_gate, mask):
+  """The kernel's own math in plain XLA: mask * proj * sigmoid(gate)."""
+  c = x.shape[-1]
+  h = w_proj.shape[1] // 2
+  spatial = tuple(x.shape[:-1])
+  xf = x.reshape(-1, c).astype(jnp.float32)
+  m = jnp.reshape(mask, (-1,)).astype(jnp.float32)[:, None]
+  out = []
+  for off in (0, 1):
+    proj = xf @ w_proj[:, off::2].astype(jnp.float32)
+    gate = xf @ w_gate[:, off::2].astype(jnp.float32)
+    o = m * proj * jax.nn.sigmoid(gate)
+    out.append(jnp.swapaxes(o, 0, 1).reshape((h,) + spatial).astype(x.dtype))
+  return out[0], out[1]
+
+
+def _gdp_impl(x, w_proj, w_gate, mask, sym):
+  c = x.shape[-1]
+  h = w_proj.shape[1] // 2
+  spatial = tuple(x.shape[:-1])
+  f16 = lambda t: t.astype(jnp.float16)
+  xf = f16(x.reshape(-1, c))
+  maskf = f16(jnp.reshape(mask, (-1,)))
+  zeros = jnp.zeros((h,), jnp.float16)
+  out = []
+  for off in (0, 1):
+    half = _gdp_call(xf, f16(w_proj[:, off::2]), zeros,
+                     f16(w_gate[:, off::2]), zeros, maskf, sym=sym)
+    # [M, h] -> [h, *spatial], which is what the 'cik,cjk->cij' einsum wants.
+    out.append(jnp.swapaxes(half, 0, 1).reshape((h,) + spatial).astype(x.dtype))
+  return out[0], out[1]
+
+
+_gdp_diff = jax.custom_vjp(_gdp_impl, nondiff_argnums=(4,))
+_gdp_diff.defvjp(
+    lambda x, wp, wg, m, sym: (_gdp_impl(x, wp, wg, m, sym), (x, wp, wg, m)),
+    xla_vjp(lambda x, wp, wg, m, sym: gdp_reference(x, wp, wg, m)))
 
 
 def gated_dual_proj(x, w_proj, w_gate, mask, *, cc=None):
@@ -369,16 +453,4 @@ def gated_dual_proj(x, w_proj, w_gate, mask, *, cc=None):
   if not ops_available(cc):
     return None
   sym = 'VoltaGdp' if cc >= 75 else 'VoltaGdpWmma'
-  spatial = tuple(x.shape[:-1])
-  m = int(np.prod(spatial))
-  f16 = lambda t: t.astype(jnp.float16)
-  xf = f16(x.reshape(m, c))
-  maskf = f16(jnp.reshape(mask, (m,)))
-  zeros = jnp.zeros((h,), jnp.float16)
-  out = []
-  for off in (0, 1):
-    half = _gdp_call(xf, f16(w_proj[:, off::2]), zeros,
-                     f16(w_gate[:, off::2]), zeros, maskf, sym=sym)
-    # [M, h] -> [h, *spatial], which is what the 'cik,cjk->cij' einsum wants.
-    out.append(jnp.swapaxes(half, 0, 1).reshape((h,) + spatial).astype(x.dtype))
-  return out[0], out[1]
+  return _gdp_diff(x, w_proj, w_gate, mask, sym)
