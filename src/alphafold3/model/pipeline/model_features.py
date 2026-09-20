@@ -19,6 +19,8 @@ stays untouched and stock AlphaFold 3 is byte-identical to before.
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 
 
@@ -372,8 +374,32 @@ def _override_ref_conformers(batch, conformers):
       chr(int(c) + 32) if 0 <= c < 64 else '' for c in row).strip()
 
   names_3 = residue_names.POLYMER_TYPES_WITH_UNKNOWN_AND_GAP
+
+  # NEVER SUBSTITUTE INTO AN ATOMISED RESIDUE. AF3 atomises a modified residue
+  # into one token per atom and gives every one of them the PARENT restype -- so
+  # a phospho-serine's ten tokens all say SER, and a table keyed on restype
+  # happily rewrites the six atoms SER has (N, CA, CB, OG, C, O) while the
+  # phosphate (P, O1P, O2P, O3P) keeps its CCD coordinates. The result is one
+  # conformer stitched from two frames that do not align: measured on SEP, the
+  # OG-P bond in ref_pos comes out at 0.43 A against a 1.61 ideal -- a ratio of
+  # 0.268 -- while CB-OG, whose atoms come from the same side of the seam, is
+  # fine. The model is then asked to place a group whose reference geometry is
+  # already broken.
+  #
+  # An atomised residue is exactly "more than one token sharing (asym_id,
+  # residue_index)", which is the convention that defines it.
+  asym = np.asarray(batch['asym_id']).reshape(-1)
+  resi_all = np.asarray(batch['residue_index']).reshape(-1)
+  counts = {}
+  for key in zip(asym.tolist(), resi_all.tolist()):
+    counts[key] = counts.get(key, 0) + 1
+  atomised = np.array([counts[k] > 1 for k in zip(asym.tolist(),
+                                                  resi_all.tolist())])
+
   n_replaced = 0
   for t in range(pos.shape[0]):
+    if atomised[t]:
+      continue
     code = names_3[int(aatype[t])] if int(aatype[t]) < len(names_3) else None
     entry = conformers.get(code)
     if entry is None:
@@ -713,7 +739,12 @@ def apply(batch, spec, *, refeaturise=None, model_dir=None, esm=None,
     # coordinate it already had rather than being zeroed.
     from alphafold3.constants import esmfold2_ref_pos
     _override_ref_conformers(batch, esmfold2_ref_pos.as_conformers())
-  if knobs.get('atom_keys_subset_size'):
+  if knobs.get('atom_keys_subset_size') and not os.environ.get(
+      'AF3_NO_ESM_WIDE_KEYS'):
+    # AF3_NO_ESM_WIDE_KEYS=1 is the A/B for this fidelity fix, in the style of
+    # AF3_NO_ESM_REF_POS and AF3_NO_ESM_DROP_OXT -- the key subset is the only
+    # atom-side feature that differs between esmfold2 and the models that place
+    # an atomised entity correctly, so it has to be separable from them.
     _wide_key_window(batch, knobs['atom_keys_subset_size'])
   if knobs.get('qblock_keys'):
     _key_window(batch, 'slide_qblock')
