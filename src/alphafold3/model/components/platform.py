@@ -139,10 +139,11 @@ def attention_config(device: str = None, cap: float | None = None,
     from alphafold3.model.components import volta_attn
     # A DIFFERENTIABLE CALLER NEEDS A BACKWARD, and upstream's wheel has none:
     # jax refuses with `The FFI call to VoltaMma cannot be differentiated`. The
-    # fork's sm_75 build does (dQ, dK, dV and dBias -- AF3 reaches the pair
+    # fork's build does (dQ, dK, dV and dBias -- AF3 reaches the pair
     # representation through the bias, so dBias is not optional), so a design
-    # run on a T4 keeps the kernel instead of falling back to XLA. sm_70 is
-    # forward only: the wmma kernel would need its own backward.
+    # run on a T4 or a V100 keeps the kernel instead of falling back to XLA.
+    # Both families are covered: `VoltaMmaBwd` for sm_75 and `VoltaWmmaBwd`
+    # for sm_70.
     usable = volta_attn.installed() and (
         not differentiable or volta_attn.bwd_installed(int(cap * 10)))
     if usable:

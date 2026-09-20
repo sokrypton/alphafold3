@@ -20,15 +20,22 @@ fork's own triangle-attention shape, against that XLA path:
     N=384   7.294 ms vs 21.965 ms   3.01x   max|d| 0.0001
     N=512  17.230 ms vs 57.740 ms   3.35x   max|d| 0.0001
 
-FORWARD ONLY -- THIS CANNOT BE DIFFERENTIATED. The libraries export no backward
-symbol, and jax says so plainly:
+UPSTREAM IS FORWARD ONLY. Its libraries export no backward symbol, and jax says
+so plainly:
 
     ValueError: The FFI call to `VoltaMma` cannot be differentiated.
 
-The design path backprops through the trunk, and GridSelfAttention is in the
-trunk, so this must never be selected for a differentiable call. That is why
-`platform.attention_config` takes `differentiable=` and never answers 'volta'
-when it is set.
+The design path backprops through the trunk and GridSelfAttention is in the
+trunk, so on such a wheel this must never be selected for a differentiable
+call -- which is why `platform.attention_config` takes `differentiable=` and
+consults `bwd_installed` before it answers 'volta'.
+
+The FORK's wheel does have one, for both families: `VoltaMmaBwd` (sm_75) and
+`VoltaWmmaBwd` (sm_70), returning dQ, dK, dV and dBias. dBias is the point --
+AF3 reaches the pair representation through the attention bias. `attention()`
+below takes the differentiable path whenever those symbols load, and the
+forward-only one otherwise, so a caller never has to know which wheel is
+installed.
 
 FLOAT16, not bfloat16: Volta and Turing tensor cores have no bf16. Inputs are
 cast in and the result is cast back to the caller's dtype.
@@ -58,6 +65,12 @@ def installed() -> bool:
 def _symbol(cc: int) -> str:
   """sm_75+ gets the CUTLASS mma kernel; sm_70 the wmma one."""
   return 'VoltaMma' if cc >= 75 else 'VoltaWmma'
+
+
+def _symbols_diff(cc: int) -> tuple[str, str]:
+  """The forward-with-lse and backward symbols of this card's family."""
+  base = _symbol(cc)
+  return base + 'Fwd', base + 'Bwd'
 
 
 def _load(kernel: str, cc: int, symbols) -> bool:
@@ -90,13 +103,13 @@ def available(cc) -> bool:
 
 
 def bwd_installed(cc) -> bool:
-  """True if this wheel carries the sm_75 backward library. No jax, no dlopen.
+  """True if this wheel carries a backward library for this card. No dlopen.
 
   `platform.attention_config` is called from notebook cells that want an answer
   in milliseconds and before anything has claimed the GPU, so it cannot dlopen
   to find out -- the same reason `installed()` is a find_spec.
   """
-  if cc is None or int(cc) < 75:
+  if cc is None or int(cc) < 70:
     return False
   try:
     import colabfold_legacy_kernels as clk
@@ -107,7 +120,7 @@ def bwd_installed(cc) -> bool:
 
 
 def bwd_available(cc) -> bool:
-  """dlopen the sm_75 backward library, if this wheel carries one.
+  """dlopen the backward library of this card's family, if the wheel has one.
 
   UPSTREAM HAS NO BACKWARD -- the libraries export no such symbol and jax says
   `The FFI call to VoltaMma cannot be differentiated`, which is why every
@@ -117,10 +130,12 @@ def bwd_available(cc) -> bool:
 
       github.com/sokrypton/colabfold-legacy-kernels, branch `backward`
 
-  sm_70 is forward only: the wmma kernel would need its own backward. A wheel
-  without these symbols simply answers False and the caller keeps XLA.
+  Both families have one: `VoltaWmmaBwd` is the sm_70 twin, which cannot reuse
+  the mma trick of feeding a computed tile straight into the next GEMM and
+  round-trips P and dS through shared memory instead. A wheel without these
+  symbols simply answers False and the caller keeps XLA.
   """
-  if cc is None or int(cc) < 75:
+  if cc is None or int(cc) < 70:
     return False
   cc = int(cc)
   # TWO LIBRARIES, not one. VoltaMmaFwd is in the attention library (it is the
@@ -131,8 +146,9 @@ def bwd_available(cc) -> bool:
   # the caller. It passed locally only because that test patched `_load` with
   # a loader that opened both files: it was testing the kernels, not the
   # wiring.
-  return (_load('attention', cc, ('VoltaMmaFwd',))
-          and _load('attention_bwd', cc, ('VoltaMmaBwd',)))
+  sym_fwd, sym_bwd = _symbols_diff(cc)
+  return (_load('attention', cc, (sym_fwd,))
+          and _load('attention_bwd', cc, (sym_bwd,)))
 
 
 def ops_available(cc) -> bool:
@@ -171,12 +187,13 @@ def _call(q, k, v, bias, kmask, *, sym, sm_scale, block_q, block_k):
       block_q=np.int64(block_q), block_k=np.int64(block_k))
 
 
-@functools.partial(jax.jit, static_argnames=('sm_scale', 'block_q', 'block_k'))
-def _call_fwd(q, k, v, bias, kmask, *, sm_scale, block_q, block_k):
-  """VoltaMmaFwd: the forward, plus `lse` in the log2 domain."""
+@functools.partial(jax.jit,
+                   static_argnames=('sym', 'sm_scale', 'block_q', 'block_k'))
+def _call_fwd(q, k, v, bias, kmask, *, sym, sm_scale, block_q, block_k):
+  """Volta{Mma,Wmma}Fwd: the forward, plus `lse` in the log2 domain."""
   n, h, sq, d = q.shape
   return jax.ffi.ffi_call(
-      'VoltaMmaFwd',
+      sym,
       (jax.ShapeDtypeStruct((n, h, sq, d), jnp.float16),
        jax.ShapeDtypeStruct((n, h, sq), jnp.float32)),
       vmap_method='sequential')(
@@ -184,14 +201,15 @@ def _call_fwd(q, k, v, bias, kmask, *, sm_scale, block_q, block_k):
           block_q=np.int64(block_q), block_k=np.int64(block_k))
 
 
-@functools.partial(jax.jit, static_argnames=('sm_scale', 'block_q', 'block_k'))
-def _call_bwd(q, k, v, bias, kmask, dout, lse, delta, *, sm_scale, block_q,
+@functools.partial(jax.jit,
+                   static_argnames=('sym', 'sm_scale', 'block_q', 'block_k'))
+def _call_bwd(q, k, v, bias, kmask, dout, lse, delta, *, sym, sm_scale, block_q,
               block_k):
-  """VoltaMmaBwd: dQ, dK, dV and dBias (the last summed over the batch)."""
+  """Volta{Mma,Wmma}Bwd: dQ, dK, dV and dBias (summed over the batch)."""
   n, h, sq, d = q.shape
   sk = k.shape[2]
   return jax.ffi.ffi_call(
-      'VoltaMmaBwd',
+      sym,
       (jax.ShapeDtypeStruct(q.shape, jnp.float16),
        jax.ShapeDtypeStruct(k.shape, jnp.float16),
        jax.ShapeDtypeStruct(v.shape, jnp.float16),
@@ -204,13 +222,13 @@ def _call_bwd(q, k, v, bias, kmask, dout, lse, delta, *, sm_scale, block_q,
 @functools.partial(jax.custom_vjp, nondiff_argnums=(5, 6, 7, 8))
 def _attention_diff(q, k, v, bias, kmask, sym, sm_scale, block_q, block_k):
   """[b, h, S, c] float16 attention that can be differentiated."""
-  out, _ = _call_fwd(q, k, v, bias, kmask, sm_scale=sm_scale,
+  out, _ = _call_fwd(q, k, v, bias, kmask, sym=sym + 'Fwd', sm_scale=sm_scale,
                      block_q=block_q, block_k=block_k)
   return out
 
 
 def _attention_diff_fwd(q, k, v, bias, kmask, sym, sm_scale, block_q, block_k):
-  out, lse = _call_fwd(q, k, v, bias, kmask, sm_scale=sm_scale,
+  out, lse = _call_fwd(q, k, v, bias, kmask, sym=sym + 'Fwd', sm_scale=sm_scale,
                        block_q=block_q, block_k=block_k)
   return out, (q, k, v, bias, kmask, out, lse)
 
@@ -222,7 +240,7 @@ def _attention_diff_bwd(sym, sm_scale, block_q, block_k, res, dout):
   delta = jnp.sum(out.astype(jnp.float32) * dout.astype(jnp.float32), axis=-1)
   dq, dk, dv, dbias = _call_bwd(
       q, k, v, bias, kmask, dout.astype(jnp.float16), lse, delta,
-      sm_scale=sm_scale, block_q=block_q, block_k=block_k)
+      sym=sym + 'Bwd', sm_scale=sm_scale, block_q=block_q, block_k=block_k)
   # dBias comes back [h, Sq, Sk] and summed over the batch, which is the
   # gradient of a bias that WAS broadcast over it -- so it re-enters with the
   # leading axis the caller passed in.
