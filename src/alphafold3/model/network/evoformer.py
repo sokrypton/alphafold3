@@ -56,7 +56,8 @@ def _stack(num_layer, fn, remat):
   return hk.experimental.layer_stack(num_layer)(fn)
 
 
-def token_bond_matrix(batch, symmetrize: bool = False) -> jnp.ndarray:
+def token_bond_matrix(batch, symmetrize: bool = False,
+                      link_atomised_residues: bool = False) -> jnp.ndarray:
   """(num_tokens, num_tokens) 0/1 matrix of inter-token bonds.
 
   Factored out of Evoformer._embed_bonds so the confidence head can build the same
@@ -97,6 +98,41 @@ def token_bond_matrix(batch, symmetrize: bool = False) -> jnp.ndarray:
   contact_matrix = contact_matrix.at[
       gather_idxs[:, 0], gather_idxs[:, 1]
   ].set(1.0)
+
+  if link_atomised_residues:
+    # THE PEPTIDE BONDS THAT TIE AN ATOMISED RESIDUE TO ITS CHAIN.
+    #
+    # AF3 leaves polymer connectivity implicit -- consecutive residue_index in
+    # the relative encoding says it -- so its bond layout carries none of it,
+    # and a modified residue atomised into one token per atom ends up with NO
+    # bond to the residues on either side. The vendor's own featuriser marks
+    # both (its N token to the previous residue, its C token to the next): 2
+    # bonds our matrix had 0 of, on the job in ESMFOLD2_PTM.md.
+    #
+    # Built here rather than in featurisation because this is the one place the
+    # token layout and the atom names are both in hand, and because it must not
+    # change the models whose gates were measured without it.
+    tf = batch.token_features
+    asym = tf.asym_id[:, None] == tf.asym_id[None, :]
+    resi = tf.residue_index
+    same_res = asym & (resi[:, None] == resi[None, :])
+    # an atomised residue is more than one token sharing (asym, residue_index)
+    atomised = same_res.sum(axis=1) > 1
+    chars = batch.ref_structure.atom_name_chars      # (tokens, atoms, 4)
+    first = chars[:, 0, :]                           # an atomised token has one
+    def _named(letter):
+      code = ord(letter) - 32
+      return (first[:, 0] == code) & (first[:, 1] == 0) & (first[:, 2] == 0)
+    is_n, is_c = _named('N'), _named('C')
+    prev_res = asym & (resi[None, :] == resi[:, None] - 1)
+    next_res = asym & (resi[None, :] == resi[:, None] + 1)
+    # the neighbour side: a whole residue (one token) or that residue's C / N
+    whole = ~atomised
+    to_prev = (atomised & is_n)[:, None] & prev_res & (whole | is_c)[None, :]
+    to_next = (atomised & is_c)[:, None] & next_res & (whole | is_n)[None, :]
+    links = (to_prev | to_next).astype(contact_matrix.dtype)
+    contact_matrix = jnp.maximum(contact_matrix, links)
+    contact_matrix = jnp.maximum(contact_matrix, links.T)
 
   if symmetrize:
     # OF3 weights (and boltz-2) were trained with a symmetric bond matrix (both
@@ -419,6 +455,8 @@ class Evoformer(hk.Module):
         symmetrize=(self.global_config.model in model_config.OPENFOLD3_LINEAGE
                     or self.global_config.model
                     in model_config.SYMMETRIC_TOKEN_BONDS),
+        link_atomised_residues=(self.global_config.model
+                                in model_config.SYMMETRIC_TOKEN_BONDS),
     )
     bonds_act = hm.Linear(self.config.pair_channel, name='bond_embedding')(
         contact_matrix[:, :, None].astype(pair_activations.dtype)

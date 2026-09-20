@@ -522,6 +522,13 @@ _FEATURISE = {
     **{m: dict(atom_keys_subset_size=192, lm_pair=True,
                dedupe_self_msa=not os.environ.get('AF3_NO_ESM_DEDUPE_MSA'),
                esmfold2_ref_pos=not os.environ.get('AF3_NO_ESM_REF_POS'),
+               # An atomised residue is UNKNOWN to ESMFold2, not its parent.
+               # Its featuriser (esm 3.4.1 prepare_esmfold2_input) puts
+               # PROTEIN_UNK_RES_TYPE = 22 on all ten tokens of a
+               # phospho-serine where we put SER -- the same convention
+               # rosettafold3 already needs, and for the same reason.
+               atomized_unknown_restype=not os.environ.get(
+                   'AF3_NO_ESM_ATOMIZED_UNK'),
                # DIAGNOSTIC: AF3_ESM_PTM_ONE_TOKEN=1 keeps a modified residue
                # as ONE token holding all its atoms (boltz2's convention)
                # instead of atomising it. esmfold2 places a residue's atoms
