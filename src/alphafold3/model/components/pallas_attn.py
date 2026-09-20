@@ -46,6 +46,38 @@ def installed() -> bool:
   return importlib.util.find_spec('colabfold_kernels') is not None
 
 
+def _attention_impl(q, k, v, mask_bias, nb_bias, scale):
+  from colabfold_kernels import tri_flash  # pylint: disable=g-import-not-at-top
+
+  out = tri_flash.pallas_attention(q, k, v, mask_bias, nb_bias, scale,
+                                   seq_major=True)
+  return out.astype(q.dtype)
+
+
+def _attention_no_bwd(scale, res, cotangent):
+  del scale, res, cotangent
+  raise NotImplementedError(
+      "the Pallas attention kernel has no backward: colabfold-kernels' "
+      'tri_flash is a bare pallas_call, which jax cannot differentiate. '
+      "Use flash_attention_implementation='triton' for a graph you will "
+      'backpropagate through -- tokamax gives it a real flash VJP, and '
+      'platform.attention_config(differentiable=True) already picks it. '
+      '(The GLU took a custom_vjp over an XLA twin instead; that does not '
+      'work here, because an XLA twin of attention materialises the [Sq, Sk] '
+      'matrix this kernel exists to avoid.)')
+
+
+# WITHOUT THIS the failure is `ValueError: Too few leaves for PyTreeDef;
+# expected 4, got 3` from inside the pallas lowering, which says nothing about
+# what went wrong or what to do. A custom_vjp whose backward raises turns that
+# into one sentence, at jax.grad time, and costs the forward nothing.
+_attention_diff = jax.custom_vjp(_attention_impl, nondiff_argnums=(5,))
+_attention_diff.defvjp(
+    lambda q, k, v, mb, nb, scale: (_attention_impl(q, k, v, mb, nb, scale),
+                                    None),
+    _attention_no_bwd)
+
+
 def attention(q, k, v, *, mask, bias, scale):
   """This fork's attention contract, on the Pallas kernel. None if it cannot.
 
@@ -65,8 +97,6 @@ def attention(q, k, v, *, mask, bias, scale):
   if bias is not None and (bias.shape[-3:] != (h, sq, sk) or bias.shape[0] != 1):
     return None
 
-  from colabfold_kernels import tri_flash  # pylint: disable=g-import-not-at-top
-
   # The kernel takes AF2's additive mask_bias [b, 1, 1, sk], which it reduces
   # back to a boolean; ours is the boolean itself, broadcast over the key axis.
   m = jnp.broadcast_to(
@@ -74,9 +104,7 @@ def attention(q, k, v, *, mask, bias, scale):
       (b, sk))
   mask_bias = jnp.where(m, 0.0, _NEG).astype(jnp.float32)[:, None, None, :]
   nb_bias = None if bias is None else jnp.reshape(bias, (h, sq, sk))
-  out = tri_flash.pallas_attention(q, k, v, mask_bias, nb_bias, float(scale),
-                                   seq_major=True)
-  return out.astype(q.dtype)
+  return _attention_diff(q, k, v, mask_bias, nb_bias, float(scale))
 
 
 _GDP_BLOCK_M = 64      # tri_mul.gated_dual_proj's own default
