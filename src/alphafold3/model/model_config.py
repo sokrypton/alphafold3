@@ -684,6 +684,26 @@ LM_PAIR_DROPOUT = {m: (0.25 if m in ESMFOLD2_SSM_RECYCLE else 0.0)
 
 # Models whose sampler rigid-aligns the noisy coordinates onto the denoised
 # prediction before the Euler step. See diffusion_head._kabsch.
+# Models whose token-bond matrix is SYMMETRIC, and which mark the peptide
+# bonds that tie an ATOMISED residue to its chain neighbours.
+#
+# Both read off the vendor's own featuriser (esm 3.4.1,
+# `prepare_esmfold2_input`) on a phospho-serine + glycerol job, against ours on
+# the same input:
+#
+#                              native   ours
+#     inside the SEP block       18       9      <- exactly half: unsymmetrised
+#     inside the glycerol        10       5      <- the same
+#     SEP <-> its neighbours      2       0      <- missing entirely
+#
+# It matters here and not elsewhere because ESMFold2's atom attention has NO
+# pair bias -- this matrix is its only signal that two atom TOKENS are bonded,
+# where an AF3-lineage model can fall back on the reference-conformer offsets
+# in its atom pair features. Measured: symmetrising alone takes a glycerol from
+# 1.229-1.291 to 0.982-0.996 (the vendor reads 0.986).
+SYMMETRIC_TOKEN_BONDS = ESMFOLD2_FAMILY
+
+
 REALIGN_SAMPLER = ESMFOLD2_FAMILY
 
 
