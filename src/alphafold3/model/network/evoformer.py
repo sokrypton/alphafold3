@@ -416,7 +416,9 @@ class Evoformer(hk.Module):
     """Embeds bond features and merges into pair activations."""
     contact_matrix = token_bond_matrix(
         batch,
-        symmetrize=self.global_config.model in model_config.OPENFOLD3_LINEAGE,
+        symmetrize=(self.global_config.model in model_config.OPENFOLD3_LINEAGE
+                    or self.global_config.model
+                    in model_config.SYMMETRIC_TOKEN_BONDS),
     )
     bonds_act = hm.Linear(self.config.pair_channel, name='bond_embedding')(
         contact_matrix[:, :, None].astype(pair_activations.dtype)
