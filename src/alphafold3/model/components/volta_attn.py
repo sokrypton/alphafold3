@@ -122,7 +122,17 @@ def bwd_available(cc) -> bool:
   """
   if cc is None or int(cc) < 75:
     return False
-  return _load('attention', int(cc), ('VoltaMmaFwd', 'VoltaMmaBwd'))
+  cc = int(cc)
+  # TWO LIBRARIES, not one. VoltaMmaFwd is in the attention library (it is the
+  # same kernel with one more result); VoltaMmaBwd is its own. Asking for both
+  # from 'attention' makes getattr fail, this return False, and the wrapper
+  # silently take the forward-only path -- which is exactly what a real T4
+  # did, with `The FFI call to VoltaMma cannot be differentiated` landing in
+  # the caller. It passed locally only because that test patched `_load` with
+  # a loader that opened both files: it was testing the kernels, not the
+  # wiring.
+  return (_load('attention', cc, ('VoltaMmaFwd',))
+          and _load('attention_bwd', cc, ('VoltaMmaBwd',)))
 
 
 def ops_available(cc) -> bool:
