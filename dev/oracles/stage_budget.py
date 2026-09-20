@@ -1,5 +1,19 @@
 """Where does a fold's time actually go? Stage by stage, measured.
 
+READ THIS BEFORE TRUSTING A NUMBER HERE. Only `heads` and `score` consume the
+carry you pass; EVERY OTHER STAGE FALLS THROUGH TO A BRANCH THAT RE-RUNS THE
+TRUNK (model.py, the `else: num_iter = num_trunk_passes(...)` arm). So
+`diff_cond` timed naively reports trunk + conditioning, and it reported the
+conditioning as 9.6 s / 31% of a fold when the conditioning is 16 ms:
+
+    one trunk pass                          871.3 ms
+    diff_cond, 11 trunk passes             9621.8 ms
+    diff_cond,  2 trunk passes             1758.6 ms      -> 874 ms a pass
+
+The tell was arithmetic, not the harness: the pair half of that "conditioning"
+is ~7 ms of flops, and 9.27 s is a thousand times too slow for it. The stage is
+now differenced against the trunk it re-runs.
+
 Fitting (recycles, samples) points to a 306-residue A10 fold attributes ~14 s
 to the trunk and ~8 s to the sampler and leaves **~9.6 s, a third of the fold,
 unaccounted for**. This names that third by timing the seams
@@ -66,11 +80,22 @@ def main(model_name, length):
   for _ in range(recycles):
     carry, key, _ = trunk(params, rng, batch, carry=carry, key=key)
 
-  t_cond = timeit(cond, params, rng, batch, carry=carry, key=key)
+  # DIFFERENCED: the stage re-runs the trunk before it reaches the
+  # conditioning, so subtract the passes it just paid for.
+  t_cond_raw = timeit(cond, params, rng, batch, carry=carry, key=key)
+  t_cond = max(t_cond_raw - recycles * t_trunk, 0.0)
   st = cond(params, rng, batch, carry=carry, key=key)
 
   # ONE denoise step, for all samples at once (the body is vmapped over them).
-  arrays, static = staged._split_static(st['atom_cond'])   # noqa: SLF001
+  # staged_fold's _split_static, which is nested inside it: the atom
+  # conditioning carries Python flags (swa_rope) that drive control flow, so
+  # they must be closed over, not traced. A 0-d numpy bool has a `shape`, which
+  # is why "hasattr(v, 'shape')" alone files a flag as data.
+  arrays, static = {}, {}
+  for _k, _v in st['atom_cond'].items():
+    _flag = isinstance(_v, bool) or (
+        np.ndim(_v) == 0 and np.asarray(_v).dtype == np.bool_)
+    (static if _flag or not hasattr(_v, 'shape') else arrays)[_k] = _v
   @hk.transform
   def denoise_fn(b, carry, key, dcarry, noise_level, pair_cond, atom_arrays):
     return af3_model.Model(config)(
@@ -92,7 +117,7 @@ def main(model_name, length):
 
   rows = [('embed (input + template + MSA init)', t_embed, 1),
           ('trunk (one recycle)', t_trunk, recycles),
-          ('diffusion conditioning (once)', t_cond, 1),
+          ('diffusion conditioning (once, differenced)', t_cond, 1),
           ('denoise step (all samples)', t_step, steps),
           ('confidence head + output', t_score, 1)]
   print(f'\n=== {model_name}, {length} residues: '
@@ -103,6 +128,10 @@ def main(model_name, length):
     print(f'  {label:38s} {secs * 1000:9.2f} ms x{n:<4d} = {secs * n:6.2f} s')
   print(f'  {"":38s} {"":9s}          {"-" * 8}')
   print(f'  {"total":38s} {"":9s}          {total:6.2f} s')
+  print(f'\n  (diff_cond raw was {t_cond_raw:.2f} s, of which '
+        f'{recycles * t_trunk:.2f} s is the trunk it re-runs)')
+  print('  Compare against a real warm fold at the same settings: a gap means\n'
+        '  a stage is still measuring something other than what it is named.')
 
 
 if __name__ == '__main__':
