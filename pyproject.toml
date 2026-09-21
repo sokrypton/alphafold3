@@ -26,10 +26,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# alphafold3.py2Dmol (vendored, see its PROVENANCE.md) imports gemmi at module
-# scope and draws through IPython. Neither belongs in the runtime dependencies
-# of a folding CLI, so the viewer asks for them separately.
-viewer = ["gemmi", "ipython"]
 gcsfs = [
   # Use `uv sync --extra gcsfs` to enable GCS paths for inputs and outputs
   "gcsfs",
