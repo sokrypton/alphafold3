@@ -208,7 +208,8 @@ class DataPipelineTest(parameterized.TestCase):
           folding_input.Input.from_json(f.read())
 
   def test_config(self):
-    model_config = run_alphafold.make_model_config()
+    # pin bfloat16 for test stability
+    model_config = run_alphafold.make_model_config(bfloat16='all')
     model_config_as_str = json.dumps(
         model_config.as_dict(), sort_keys=True, indent=2
     )

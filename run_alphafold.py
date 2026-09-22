@@ -642,6 +642,7 @@ def make_model_config(
     return_embeddings: bool = False,
     return_distogram: bool = False,
     model_name: str = 'alphafold3',
+    bfloat16: str | None = None,
 ) -> model.Model.Config:
   """Returns a model config with some defaults overridden.
 
@@ -657,7 +658,7 @@ def make_model_config(
   config.num_recycles = num_recycles
   config.return_embeddings = return_embeddings
   config.return_distogram = return_distogram
-  config.global_config.bfloat16 = _bfloat16_default()
+  config.global_config.bfloat16 = bfloat16 or _bfloat16_default()
   model_registry.get(model_name).configure(config)
   return config
 

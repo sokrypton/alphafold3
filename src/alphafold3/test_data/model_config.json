@@ -1,11 +1,62 @@
 {
   "evoformer": {
+    "coda": {
+      "num_layer": 0,
+      "pair_attention": {
+        "dual_output": false,
+        "num_head": 4,
+        "qkv_dim": null
+      },
+      "pair_transition": {
+        "num_intermediate_factor": 4,
+        "use_glu_kernel": true
+      },
+      "shard_transition_blocks": true,
+      "single_attention": null,
+      "single_transition": null,
+      "triangle_multiplication_incoming": {
+        "equation": "kjc,kic->ijc",
+        "hidden_dim": null,
+        "use_glu_kernel": true
+      },
+      "triangle_multiplication_outgoing": {
+        "equation": "ikc,jkc->ijc",
+        "hidden_dim": null,
+        "use_glu_kernel": true
+      }
+    },
+    "lm_encoder": {
+      "num_layer": 0,
+      "pair_attention": {
+        "dual_output": false,
+        "num_head": 4,
+        "qkv_dim": null
+      },
+      "pair_transition": {
+        "num_intermediate_factor": 4,
+        "use_glu_kernel": true
+      },
+      "shard_transition_blocks": true,
+      "single_attention": null,
+      "single_transition": null,
+      "triangle_multiplication_incoming": {
+        "equation": "kjc,kic->ijc",
+        "hidden_dim": null,
+        "use_glu_kernel": true
+      },
+      "triangle_multiplication_outgoing": {
+        "equation": "ikc,jkc->ijc",
+        "hidden_dim": null,
+        "use_glu_kernel": true
+      }
+    },
     "max_relative_chain": 2,
     "max_relative_idx": 32,
     "msa_channel": 64,
     "msa_stack": {
       "msa_attention": {
-        "num_head": 8
+        "num_head": 8,
+        "value_dim": null
       },
       "msa_transition": {
         "num_intermediate_factor": 4,
@@ -17,7 +68,9 @@
         "num_outer_channel": 32
       },
       "pair_attention": {
-        "num_head": 4
+        "dual_output": false,
+        "num_head": 4,
+        "qkv_dim": null
       },
       "pair_transition": {
         "num_intermediate_factor": 4,
@@ -26,20 +79,24 @@
       "shard_transition_blocks": true,
       "triangle_multiplication_incoming": {
         "equation": "kjc,kic->ijc",
+        "hidden_dim": null,
         "use_glu_kernel": true
       },
       "triangle_multiplication_outgoing": {
         "equation": "ikc,jkc->ijc",
+        "hidden_dim": null,
         "use_glu_kernel": true
       }
     },
     "num_msa": 1024,
     "pair_channel": 128,
     "pairformer": {
-      "block_remat": false,
+      "block_remat": true,
       "num_layer": 48,
       "pair_attention": {
-        "num_head": 4
+        "dual_output": false,
+        "num_head": 4,
+        "qkv_dim": null
       },
       "pair_transition": {
         "num_intermediate_factor": 4,
@@ -58,10 +115,12 @@
       },
       "triangle_multiplication_incoming": {
         "equation": "kjc,kic->ijc",
+        "hidden_dim": null,
         "use_glu_kernel": true
       },
       "triangle_multiplication_outgoing": {
         "equation": "ikc,jkc->ijc",
+        "hidden_dim": null,
         "use_glu_kernel": true
       }
     },
@@ -90,7 +149,9 @@
       "template_stack": {
         "num_layer": 2,
         "pair_attention": {
-          "num_head": 4
+          "dual_output": false,
+          "num_head": 4,
+          "qkv_dim": null
         },
         "pair_transition": {
           "num_intermediate_factor": 2,
@@ -101,10 +162,12 @@
         "single_transition": null,
         "triangle_multiplication_incoming": {
           "equation": "kjc,kic->ijc",
+          "hidden_dim": null,
           "use_glu_kernel": true
         },
         "triangle_multiplication_outgoing": {
           "equation": "ikc,jkc->ijc",
+          "hidden_dim": null,
           "use_glu_kernel": true
         }
       }
@@ -114,7 +177,8 @@
     "bfloat16": "all",
     "final_init": "zeros",
     "flash_attention_implementation": "triton",
-    "of3_weights": false,
+    "half_dtype": "bfloat16",
+    "model": "alphafold3",
     "pair_attention_chunk_size": [
       [
         1536,
@@ -149,12 +213,15 @@
       "num_plddt_bins": 50,
       "pae": {
         "max_error_bin": 31.0,
-        "num_bins": 64
+        "num_bins": 64,
+        "reembed_dist_bins": 64
       },
       "pairformer": {
         "num_layer": 4,
         "pair_attention": {
-          "num_head": 4
+          "dual_output": false,
+          "num_head": 4,
+          "qkv_dim": null
         },
         "pair_transition": {
           "num_intermediate_factor": 4,
@@ -172,13 +239,16 @@
         },
         "triangle_multiplication_incoming": {
           "equation": "kjc,kic->ijc",
+          "hidden_dim": null,
           "use_glu_kernel": true
         },
         "triangle_multiplication_outgoing": {
           "equation": "ikc,jkc->ijc",
+          "hidden_dim": null,
           "use_glu_kernel": true
         }
-      }
+      },
+      "reembed_dist_bins": 64
     },
     "diffusion": {
       "atom_transformer": {
@@ -198,8 +268,13 @@
       "eval": {
         "gamma_0": 0.8,
         "gamma_min": 1.0,
+        "max_sigma": 0.0,
         "noise_scale": 1.003,
         "num_samples": 5,
+        "return_trajectory": false,
+        "rho": 7.0,
+        "sigma_max": 160.0,
+        "sigma_min": 0.0004,
         "step_scale": 1.5,
         "steps": 200
       },
@@ -214,7 +289,7 @@
           "num_head": 16,
           "value_dim": null
         },
-        "block_remat": false,
+        "block_remat": true,
         "num_blocks": 24,
         "num_intermediate_factor": 2,
         "super_block_size": 4
