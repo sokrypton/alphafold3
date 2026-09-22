@@ -11,19 +11,21 @@ and forward+backward, timed TWICE (tokamax autotunes on pass 1).
 
 ANSWERED, and the answer is no -- ms, min of 2 passes x 5 calls:
 
-    A100 (cc 8.0)            fwd   fwd+bwd        A10 (cc 8.6)    fwd  fwd+bwd
-      N=384  tokamax       1.046     3.105          tokamax     2.432    6.895
-             pallas        0.881     4.246          pallas      1.943   10.325
-             off           0.997     3.027          off         2.527    7.427
-      N=768  tokamax       4.076    12.115
-             pallas        3.384    15.799
-             off           3.831    11.514
-      N=1024 tokamax       7.458    21.498
-             pallas        6.183    27.342
-             off           7.041    21.181
+                A100 (cc 8.0)          A10 (cc 8.6)
+                  fwd   fwd+bwd            fwd   fwd+bwd
+      N=384   tokamax   1.046     3.105    2.432     6.895
+              pallas    0.881     4.246    1.943    10.325
+              off       0.997     3.027    2.527     7.427
+      N=768   tokamax   4.076    12.115   10.988    31.207
+              pallas    3.384    15.799    8.756    44.563
+              off       3.831    11.514   10.940    32.658
+      N=1024  tokamax   7.458    21.498   19.821    56.766
+              pallas    6.183    27.342   17.203    80.465
+              off       7.041    21.181   19.671    59.277
 
 The Pallas GLU has the fastest FORWARD everywhere (1.19-1.25x tokamax) and the
-slowest gradient everywhere (1.37x on the A100, 1.50x on the A10), because its
+slowest gradient everywhere (1.27-1.37x on the A100, 1.42-1.50x on the A10),
+because its
 backward is a recomputation of the forward in XLA where tokamax ships a real
 VJP kernel. So the platform table stays as it is: `glu: pallas` for prediction,
 tokamax for a differentiable caller. Note also that NO GLU KERNEL AT ALL is
