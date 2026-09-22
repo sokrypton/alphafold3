@@ -137,13 +137,14 @@ def attention_config(device: str = None, cap: float | None = None,
 
   if cap is not None and cap < 8.0:
     from alphafold3.model.components import volta_attn
-    # A DIFFERENTIABLE CALLER NEEDS A BACKWARD, and upstream's wheel has none:
-    # jax refuses with `The FFI call to VoltaMma cannot be differentiated`. The
-    # fork's build does (dQ, dK, dV and dBias -- AF3 reaches the pair
-    # representation through the bias, so dBias is not optional), so a design
-    # run on a T4 or a V100 keeps the kernel instead of falling back to XLA.
-    # Both families are covered: `VoltaMmaBwd` for sm_75 and `VoltaWmmaBwd`
-    # for sm_70.
+    # A DIFFERENTIABLE CALLER NEEDS A BACKWARD, and wheels before 0.4.0 have
+    # none: jax refuses with `The FFI call to VoltaMma cannot be
+    # differentiated`. 0.4.0 ships one for both families -- `VoltaMmaBwd`
+    # (sm_75) and `VoltaWmmaBwd` (sm_70), each giving dQ, dK, dV and dBias,
+    # and AF3 reaches the pair representation through the bias, so dBias is
+    # not optional -- so a design run on a T4 or a V100 keeps the kernel
+    # instead of falling back to XLA. An older wheel answers False below and
+    # this row is not taken.
     usable = volta_attn.installed() and (
         not differentiable or volta_attn.bwd_installed(int(cap * 10)))
     if usable:
@@ -155,8 +156,9 @@ def attention_config(device: str = None, cap: float | None = None,
                         'the XLA path on a T4, in float16. The same answer '
                         "also sends the triangle multiplication's input "
                         'LayerNorm and GLU to that package.'
-                        + (' The fork build adds an sm_75 backward, so this '
-                           'serves a gradient too.' if differentiable else '')}
+                        + (' colabfold-legacy-kernels 0.4.0 added the '
+                           'backward for both families, so this serves a '
+                           'gradient too.' if differentiable else '')}
 
   if cap is not None and cap < 8.0:
     # XLA gates Pallas/Triton at sm_80, cuDNN's SDPA needs SM80, and tokamax
@@ -185,12 +187,31 @@ def attention_config(device: str = None, cap: float | None = None,
       # XLA 8.635 ms, cuDNN 2.409, this 0.723 -- 3.3x the cuDNN this row used
       # to take. The datacenter row is NOT sent here: tokamax's Triton does
       # launch there and has not been compared against this yet.
+      #
+      # `not differentiable` IS NO LONGER A CAPABILITY LIMIT, IT IS A
+      # MEASUREMENT. colabfold-kernels 0.4.0 gave this kernel a real flash
+      # backward (dQ/dK/dV and dBias through atomics), so it CAN be
+      # backpropagated through -- gated here on an A10 at 3.1e-03 to 6.3e-03
+      # against an fp32 XLA reference. It is simply slower at it than the
+      # Triton the differentiable branch below picks, at the triangle shape
+      # this model actually runs (forward+backward, ms, min of 5, A10):
+      #
+      #     N=256   triton  2.351   pallas  3.897   cudnn  3.925
+      #     N=384   triton  7.085   pallas 12.605   cudnn 11.702
+      #     N=512   triton 15.193   pallas 30.130   cudnn 27.760
+      #
+      # while its FORWARD is the faster of the two (1.484 vs 1.722 at N=384).
+      # So the split stays: pallas predicts, triton differentiates -- and the
+      # backward is now insurance rather than a hole, because a graph that
+      # reaches it under jax.grad returns a gradient instead of raising.
       return {'attention': PALLAS, 'xla_flags': [NO_TRITON_GEMM], 'nojit': False,
               'reason': f'Ada/consumer GPU (cc {cap}): colabfold-kernels '
                         "(Milot Mirdita's Pallas flash attention) sizes its "
                         'blocks to the device, so it runs where tokamax will '
-                        'not -- 3.3x cuDNN and 11.9x XLA on an A10. Forward '
-                        'only, so a differentiable caller gets cuDNN instead.'}
+                        'not -- 3.3x cuDNN and 11.9x XLA on an A10. It can '
+                        'serve a gradient since 0.4.0, but Triton is 1.8x '
+                        'faster at one, so a differentiable caller is sent '
+                        'there instead.'}
 
   if is_datacenter_gpu(cap):
     # ATTENTION STAYS ON TRITON, THE GLU DOES NOT. Measured on a dedicated A100

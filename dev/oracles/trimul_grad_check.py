@@ -55,7 +55,7 @@ ROWS = {'volta70': ('volta', 70, jnp.float32),
 # change and not the kernel (it read 1.49 relative before this was fixed).
 # Swapping just the two entry points keeps every other op identical.
 def _ln_reference(x, scale, offset, *, eps=1e-5, cc=None):
-  return volta_attn._ln_ref(  # pylint: disable=protected-access
+  return volta_attn.ln_reference(
       x, jnp.reshape(scale, (x.shape[-1],)),
       jnp.reshape(offset, (x.shape[-1],)), eps)
 

@@ -1,12 +1,13 @@
 """sm_70 / sm_75 fused attention: the only one a T4 or V100 can run.
 
-THE KERNELS AND THE WRAPPER THIS IS ADAPTED FROM ARE MILOT MIRDITA'S.
-`colabfold-legacy-kernels` (MIT, (c) 2026 The ColabFold Development Team) ships
-prebuilt sm_70/sm_75 CUDA kernels registered as XLA FFI targets, and
-`alphafold/model/volta_attn.py` in alphafold-colabfold 2.3.20 (Apache-2.0)
-drives them; ColabFold's AF2 path selects them below sm_80 as `cuda_legacy`.
-This file is that wrapper, narrowed to the one op this fork needs and adapted
-to its calling convention.
+THE KERNELS AND THE WRAPPER BELOW THEM ARE MILOT MIRDITA'S. Two packages, both
+MIT: `colabfold-legacy-kernels` ships the prebuilt sm_70/sm_75 CUDA libraries
+(registered as XLA FFI targets), and `colabfold-kernels` (pure Python) carries
+`colabfold_kernels.volta`, the wrapper that dlopens them, registers the
+symbols and holds the `custom_vjp`. THIS FILE IS ONLY THE ADAPTER between that
+wrapper and this fork's calling convention -- the plumbing it used to duplicate
+now lives upstream, which is where head dims, tilings and symbol names are
+decided.
 
 WHY IT EXISTS HERE. On compute capability 7.x every fused path we have refuses:
 cuDNN's SDPA wants SM80 ("SDPA FP16/BF16 requires SM80 (Ampere) or newer"),
@@ -20,22 +21,21 @@ fork's own triangle-attention shape, against that XLA path:
     N=384   7.294 ms vs 21.965 ms   3.01x   max|d| 0.0001
     N=512  17.230 ms vs 57.740 ms   3.35x   max|d| 0.0001
 
-UPSTREAM IS FORWARD ONLY. Its libraries export no backward symbol, and jax says
-so plainly:
+THE BACKWARD IS UPSTREAM AS OF 0.4.0 (2026-09-22), for both families:
+`VoltaMmaBwd` (sm_75) and `VoltaWmmaBwd` (sm_70), each giving dQ, dK, dV and
+dBias. dBias is the point -- AF3 reaches the pair representation through the
+attention bias, so a design step on a T4 needs it and ColabFold never did. It
+began here (this fork wrote both kernels, and both commits are in
+mirditalab/colabfold-legacy-kernels main), and it is now released, refactored
+and tested there; 0.4.0 also widened the head dims to AF3's 24/48/96 and pads
+on the wmma side, so more of this model's shapes take the kernel than before.
 
-    ValueError: The FFI call to `VoltaMma` cannot be differentiated.
-
-The design path backprops through the trunk and GridSelfAttention is in the
-trunk, so on such a wheel this must never be selected for a differentiable
-call -- which is why `platform.attention_config` takes `differentiable=` and
-consults `bwd_installed` before it answers 'volta'.
-
-The FORK's wheel does have one, for both families: `VoltaMmaBwd` (sm_75) and
-`VoltaWmmaBwd` (sm_70), returning dQ, dK, dV and dBias. dBias is the point --
-AF3 reaches the pair representation through the attention bias. `attention()`
-below takes the differentiable path whenever those symbols load, and the
-forward-only one otherwise, so a caller never has to know which wheel is
-installed.
+An OLDER wheel has no backward at all, and jax says so plainly --
+`ValueError: The FFI call to VoltaMma cannot be differentiated`. The design
+path backprops through the trunk and GridSelfAttention is in the trunk, so on
+such a wheel this must never be selected for a differentiable call, which is
+why `platform.attention_config` takes `differentiable=` and consults
+`bwd_installed` before it answers 'volta'.
 
 FLOAT16, not bfloat16: Volta and Turing tensor cores have no bf16. Inputs are
 cast in and the result is cast back to the caller's dtype.
@@ -43,63 +43,41 @@ cast in and the result is cast back to the caller's dtype.
 
 from __future__ import annotations
 
-import ctypes
-import functools
 import importlib.util
 import os
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 
-# Head dims the kernels instantiate (Milot's _HEAD_DIMS_MMA / _HEAD_DIMS_WMMA).
-_HEAD_DIMS = (8, 16, 32, 64)
-_LOADED = {}
+
+def _volta():
+  """Milot's wrapper module. Imports jax, so never at module scope."""
+  from colabfold_kernels import volta  # pylint: disable=g-import-not-at-top
+  return volta
+
+
+def _grads():
+  from colabfold_kernels import grads  # pylint: disable=g-import-not-at-top
+  return grads
 
 
 def installed() -> bool:
-  """True if the kernel package is importable. No jax, no dlopen."""
-  return importlib.util.find_spec('colabfold_legacy_kernels') is not None
+  """True if both packages are importable. No jax, no dlopen.
 
-
-def _symbol(cc: int) -> str:
-  """sm_75+ gets the CUTLASS mma kernel; sm_70 the wmma one."""
-  return 'VoltaMma' if cc >= 75 else 'VoltaWmma'
-
-
-def _symbols_diff(cc: int) -> tuple[str, str]:
-  """The forward-with-lse and backward symbols of this card's family."""
-  base = _symbol(cc)
-  return base + 'Fwd', base + 'Bwd'
-
-
-def _load(kernel: str, cc: int, symbols) -> bool:
-  """dlopen one kernel library for this device and register its FFI targets."""
-  key = (kernel, int(cc), tuple(symbols))
-  if key in _LOADED:
-    return _LOADED[key]
-  ok = False
-  try:
-    import colabfold_legacy_kernels as clk
-
-    path = clk.library_path(kernel, int(cc))
-    if path and os.path.exists(path):
-      lib = ctypes.cdll.LoadLibrary(path)
-      for sym in symbols:
-        jax.ffi.register_ffi_target(
-            sym, jax.ffi.pycapsule(getattr(lib, sym)), platform='CUDA')
-      ok = True
-  except Exception:  # pylint: disable=broad-except
-    ok = False
-  _LOADED[key] = ok
-  return ok
+  BOTH: the libraries live in `colabfold_legacy_kernels` and the wrapper that
+  loads them in `colabfold_kernels`. The second is pure Python and tiny, but a
+  wheel-only install (which is what ColabFold's own AF2 path had) satisfies the
+  first and not the second.
+  """
+  return all(importlib.util.find_spec(m) is not None
+             for m in ('colabfold_legacy_kernels', 'colabfold_kernels'))
 
 
 def available(cc) -> bool:
   """dlopen the attention library for this device and register its target."""
-  if cc is None:
+  if cc is None or not installed():
     return False
-  return _load('attention', int(cc), (_symbol(int(cc)),))
+  return bool(_volta().available(int(cc)))
 
 
 def bwd_installed(cc) -> bool:
@@ -107,12 +85,14 @@ def bwd_installed(cc) -> bool:
 
   `platform.attention_config` is called from notebook cells that want an answer
   in milliseconds and before anything has claimed the GPU, so it cannot dlopen
-  to find out -- the same reason `installed()` is a find_spec.
+  to find out -- the same reason `installed()` is a find_spec. An 0.2.0 wheel
+  has no `attention_bwd` entry at all and raises KeyError here, not
+  FileNotFoundError, which is why both are caught.
   """
-  if cc is None or int(cc) < 70:
+  if cc is None or int(cc) < 70 or not installed():
     return False
   try:
-    import colabfold_legacy_kernels as clk
+    import colabfold_legacy_kernels as clk  # pylint: disable=g-import-not-at-top
 
     return os.path.exists(clk.library_path('attention_bwd', int(cc)))
   except Exception:  # pylint: disable=broad-except
@@ -122,49 +102,25 @@ def bwd_installed(cc) -> bool:
 def bwd_available(cc) -> bool:
   """dlopen the backward library of this card's family, if the wheel has one.
 
-  UPSTREAM HAS NO BACKWARD -- the libraries export no such symbol and jax says
-  `The FFI call to VoltaMma cannot be differentiated`, which is why every
-  gradient path on a T4 falls back to XLA. `VoltaMmaBwd` (dQ, dK, dV and
-  dBias) and `VoltaMmaFwd` (the forward plus the softmax statistic the backward
-  needs) come from the fork:
-
-      github.com/sokrypton/colabfold-legacy-kernels, branch `backward`
-
-  Both families have one: `VoltaWmmaBwd` is the sm_70 twin, which cannot reuse
-  the mma trick of feeding a computed tile straight into the next GEMM and
-  round-trips P and dS through shared memory instead. A wheel without these
-  symbols simply answers False and the caller keeps XLA.
+  A wheel without those symbols answers False and the caller keeps XLA. Note
+  that 0.4.0 folded the forward-with-lse into the FORWARD symbol (one
+  `want_lse` attribute) rather than exporting a second one, so there is nothing
+  to load here but the backward library itself.
   """
-  if cc is None or int(cc) < 70:
+  if cc is None or int(cc) < 70 or not installed():
     return False
-  cc = int(cc)
-  # TWO LIBRARIES, not one. VoltaMmaFwd is in the attention library (it is the
-  # same kernel with one more result); VoltaMmaBwd is its own. Asking for both
-  # from 'attention' makes getattr fail, this return False, and the wrapper
-  # silently take the forward-only path -- which is exactly what a real T4
-  # did, with `The FFI call to VoltaMma cannot be differentiated` landing in
-  # the caller. It passed locally only because that test patched `_load` with
-  # a loader that opened both files: it was testing the kernels, not the
-  # wiring.
-  sym_fwd, sym_bwd = _symbols_diff(cc)
-  return (_load('attention', cc, (sym_fwd,))
-          and _load('attention_bwd', cc, (sym_bwd,)))
+  return bool(_volta().bwd_available(int(cc)))
 
 
 def ops_available(cc) -> bool:
   """dlopen the LayerNorm and gated-dual-projection libraries.
 
   The LayerNorm kernel is Volta-capable; the CUTLASS gated dual projection is
-  sm_75+, and sm_70 gets a separate wmma build (Milot's `ops_available`).
+  sm_75+, and sm_70 gets a separate wmma build.
   """
-  if cc is None:
+  if cc is None or not installed():
     return False
-  cc = int(cc)
-  syms = ('VoltaLayerNorm', 'VoltaGdp') if cc >= 75 else ('VoltaLayerNorm',)
-  ok = _load('layer_norm', cc, syms)
-  if ok and cc < 75:
-    ok = _load('gated_dual_proj', cc, ('VoltaGdpWmma',))
-  return ok
+  return bool(_volta().ops_available(int(cc)))
 
 
 def device_cc():
@@ -176,80 +132,6 @@ def device_cc():
   return None if cap is None else int(float(cap) * 10)
 
 
-@functools.partial(jax.jit, static_argnames=('sym', 'sm_scale', 'block_q', 'block_k'))
-def _call(q, k, v, bias, kmask, *, sym, sm_scale, block_q, block_k):
-  n, h, sq, d = q.shape
-  # sequential: the handlers take a fixed rank, so a vmap must not add one.
-  return jax.ffi.ffi_call(sym, jax.ShapeDtypeStruct((n, h, sq, d), jnp.float16),
-                          vmap_method='sequential')(
-      q, k, v, bias, kmask,
-      scale=np.float32(sm_scale),
-      block_q=np.int64(block_q), block_k=np.int64(block_k))
-
-
-@functools.partial(jax.jit,
-                   static_argnames=('sym', 'sm_scale', 'block_q', 'block_k'))
-def _call_fwd(q, k, v, bias, kmask, *, sym, sm_scale, block_q, block_k):
-  """Volta{Mma,Wmma}Fwd: the forward, plus `lse` in the log2 domain."""
-  n, h, sq, d = q.shape
-  return jax.ffi.ffi_call(
-      sym,
-      (jax.ShapeDtypeStruct((n, h, sq, d), jnp.float16),
-       jax.ShapeDtypeStruct((n, h, sq), jnp.float32)),
-      vmap_method='sequential')(
-          q, k, v, bias, kmask, scale=np.float32(sm_scale),
-          block_q=np.int64(block_q), block_k=np.int64(block_k))
-
-
-@functools.partial(jax.jit,
-                   static_argnames=('sym', 'sm_scale', 'block_q', 'block_k'))
-def _call_bwd(q, k, v, bias, kmask, dout, lse, delta, *, sym, sm_scale, block_q,
-              block_k):
-  """Volta{Mma,Wmma}Bwd: dQ, dK, dV and dBias (summed over the batch)."""
-  n, h, sq, d = q.shape
-  sk = k.shape[2]
-  return jax.ffi.ffi_call(
-      sym,
-      (jax.ShapeDtypeStruct(q.shape, jnp.float16),
-       jax.ShapeDtypeStruct(k.shape, jnp.float16),
-       jax.ShapeDtypeStruct(v.shape, jnp.float16),
-       jax.ShapeDtypeStruct((h, sq, sk), jnp.float32)),
-      vmap_method='sequential')(
-          q, k, v, bias, kmask, dout, lse, delta, scale=np.float32(sm_scale),
-          block_q=np.int64(block_q), block_k=np.int64(block_k))
-
-
-@functools.partial(jax.custom_vjp, nondiff_argnums=(5, 6, 7, 8))
-def _attention_diff(q, k, v, bias, kmask, sym, sm_scale, block_q, block_k):
-  """[b, h, S, c] float16 attention that can be differentiated."""
-  out, _ = _call_fwd(q, k, v, bias, kmask, sym=sym + 'Fwd', sm_scale=sm_scale,
-                     block_q=block_q, block_k=block_k)
-  return out
-
-
-def _attention_diff_fwd(q, k, v, bias, kmask, sym, sm_scale, block_q, block_k):
-  out, lse = _call_fwd(q, k, v, bias, kmask, sym=sym + 'Fwd', sm_scale=sm_scale,
-                       block_q=block_q, block_k=block_k)
-  return out, (q, k, v, bias, kmask, out, lse)
-
-
-def _attention_diff_bwd(sym, sm_scale, block_q, block_k, res, dout):
-  q, k, v, bias, kmask, out, lse = res
-  # rowsum(dout * out): one line of XLA, so the kernel does not spend a launch
-  # on it and the backward keeps a single entry point.
-  delta = jnp.sum(out.astype(jnp.float32) * dout.astype(jnp.float32), axis=-1)
-  dq, dk, dv, dbias = _call_bwd(
-      q, k, v, bias, kmask, dout.astype(jnp.float16), lse, delta,
-      sym=sym + 'Bwd', sm_scale=sm_scale, block_q=block_q, block_k=block_k)
-  # dBias comes back [h, Sq, Sk] and summed over the batch, which is the
-  # gradient of a bias that WAS broadcast over it -- so it re-enters with the
-  # leading axis the caller passed in.
-  return dq, dk, dv, dbias.reshape(bias.shape).astype(bias.dtype), None
-
-
-_attention_diff.defvjp(_attention_diff_fwd, _attention_diff_bwd)
-
-
 def attention(q, k, v, *, mask, bias, scale, cc, block_q=64, block_k=32):
   """This fork's attention contract, on the legacy kernel. None if it cannot.
 
@@ -257,12 +139,22 @@ def attention(q, k, v, *, mask, bias, scale, cc, block_q=64, block_k=32):
   boolean and broadcasts over the key axis. Returns None -- never a wrong
   answer -- when the shapes are outside what the kernel instantiates, so the
   caller can fall back to XLA.
+
+  The kernel is differentiable whenever the backward library loads, and the
+  forward pays for it only by writing one extra [n, h, sq] float (the softmax
+  statistic), so no caller has to declare in advance whether someone will
+  differentiate the graph it builds.
   """
   if bias is None or mask is None or q.ndim != 4:
     return None
   b, sq, h, c = q.shape
   sk = k.shape[1]
-  if c not in _HEAD_DIMS or c != v.shape[-1]:
+  if c != v.shape[-1] or not available(cc):
+    return None
+  # WHICH HEAD DIMS EXIST IS THE PACKAGE'S ANSWER, NOT OURS. 0.4.0 instantiates
+  # AF3's 24/48/96 as well as AF2's 8/16/32/64, and on the wmma side pads up to
+  # the next one it has; a hardcoded list here went stale the day it shipped.
+  if not _volta().supports(int(c), int(cc)):
     return None
   # A broadcast bias (AF2's MSA column attention passes (batch, 1, 1, seq))
   # is not what the kernel indexes; it wants one [h, sq, sk] slab.
@@ -270,56 +162,44 @@ def attention(q, k, v, *, mask, bias, scale, cc, block_q=64, block_k=32):
     return None
   if mask.shape[-1] != sk:
     return None
-  if not available(cc):
-    return None
-  if cc >= 75 and c == 64 and (block_q, block_k) == (64, 32):
-    block_k = 64      # the mma kernel has no (64, 64, 32) instantiation
   in_dtype = q.dtype
   f16 = lambda t: jnp.swapaxes(t, 1, 2).astype(jnp.float16)   # -> [b, h, S, c]
-  kmask = jnp.broadcast_to(
+  # Their entry point takes AF2's additive mask_bias [b, 1, 1, sk] and reduces
+  # it back to a boolean itself (`> -1e3`); ours is the boolean.
+  m = jnp.broadcast_to(
       jnp.reshape(mask.astype(jnp.bool_), mask.shape[:1] + (-1,))[:, -sk:],
-      (b, sk)).astype(jnp.uint8)
-  fbias = jnp.reshape(bias, (h, sq, sk)).astype(jnp.float16)
-  # WHENEVER THE WHEEL HAS A BACKWARD, take the differentiable path. It is the
-  # same forward kernel with one extra [n, h, sq] float output (the softmax
-  # statistic), so a prediction-only caller pays almost nothing for it, and no
-  # caller has to declare in advance whether someone will differentiate the
-  # graph it builds.
-  if bwd_available(cc):
-    out = _attention_diff(f16(q), f16(k), f16(v), fbias, kmask,
-                          _symbol(int(cc)), float(scale), block_q, block_k)
-  else:
-    out = _call(f16(q), f16(k), f16(v), fbias, kmask,
-                sym=_symbol(int(cc)), sm_scale=float(scale),
-                block_q=block_q, block_k=block_k)
+      (b, sk))
+  mask_bias = jnp.where(m, 0.0, -1e4).astype(jnp.float16)[:, None, None, :]
+  out = _volta().volta_attention(
+      f16(q), f16(k), f16(v), mask_bias,
+      jnp.reshape(bias, (h, sq, sk)).astype(jnp.float16), float(scale),
+      int(cc), block_q=block_q, block_k=block_k)
   return jnp.swapaxes(out, 1, 2).astype(in_dtype)     # back to [b, S, h, c]
 
 
 # ---------------------------------------------------------------------------
 # The other two kernels the same package ships: a fused LayerNorm and a masked,
 # sigmoid-gated dual projection. Both are Milot Mirdita's; the wrappers below
-# are his `volta_layer_norm` / `volta_gated_dual_proj`, adapted to this fork's
-# TriangleMultiplication, which is where they land: at N=384 that module spends
-# 0.321 ms in its input LayerNorm (39% of the card's bandwidth peak) and
-# 0.869 ms in the GLU, and tokamax's GLU -- which a T4 cannot launch anyway --
-# beats plain XLA there by only 7%.
+# adapt them to this fork's TriangleMultiplication, which is where they land:
+# at N=384 that module spends 0.321 ms in its input LayerNorm (39% of the
+# card's bandwidth peak) and 0.869 ms in the GLU, and tokamax's GLU -- which a
+# T4 cannot launch anyway -- beats plain XLA there by only 7%.
 #
-# float16, like the attention kernel above. Neither has a backward kernel, so
-# both take their gradient from an XLA recomputation -- see `xla_vjp`.
+# float16, like the attention kernel. NEITHER HAS A BACKWARD KERNEL in either
+# of Milot's packages, so both take their gradient from a recomputation in XLA
+# -- `colabfold_kernels.grads` now holds that wrapper (it used to be `xla_vjp`
+# here), and it is what makes a design run on a pre-Ampere card survive
+# `glu_kernel='auto'` following the attention pick: a raw ffi_call is not
+# differentiable at all, and a design run that reached one died with
+# `The FFI call to VoltaLayerNorm cannot be differentiated`.
 
 
 def xla_vjp(ref):
   """A backward that is `jax.vjp` of a plain-XLA twin of the kernel.
 
-  Public because pallas_attn's GLU needs exactly the same treatment, and
-  `gdp_reference` below is the same math for both packages.
-
-  THE FUSED GLU AND LAYERNORM HAVE NO BACKWARD KERNEL, in either of Milot's
-  packages (his Pallas GLU is a bare `pallas_call`, these are bare `ffi_call`s).
-  A raw call is not differentiable at all, so a design run that reached one died
-  with `The FFI call to VoltaLayerNorm cannot be differentiated` -- and
-  `glu_kernel='auto'` FOLLOWS the attention pick, so enabling the attention
-  backward on a pre-Ampere card armed exactly that.
+  Kept because pallas_attn's GLU wraps its own forward (an interleaved,
+  channel-major split Milot's wrapper does not have) and so cannot use
+  `colabfold_kernels.grads` directly.
 
   Recomputing the forward in XLA to get the gradient is what a remat would do
   anyway, and it keeps the fused kernel on the forward pass inside a design
@@ -334,32 +214,18 @@ def xla_vjp(ref):
   return bwd
 
 
-def _ln_ref(x, scale, offset, eps):
+def ln_reference(x, scale, offset, eps=1e-5):
+  """The LayerNorm kernel's math in plain XLA, in float32.
+
+  Public for the same reason `gdp_reference` is: `dev/oracles/trimul_grad_check`
+  substitutes it for the kernel to get a reference that differs from the real
+  module in nothing BUT the kernel.
+  """
   xf = x.astype(jnp.float32)
   mu = jnp.mean(xf, -1, keepdims=True)
   var = jnp.mean((xf - mu) ** 2, -1, keepdims=True)
   norm = (xf - mu) * jax.lax.rsqrt(var + eps)
   return (norm * scale + offset).astype(x.dtype)
-
-
-@functools.partial(jax.jit, static_argnames=('eps',))
-def _ln_call(x, scale, offset, *, eps):
-  m, c = x.shape
-  return jax.ffi.ffi_call(
-      'VoltaLayerNorm', jax.ShapeDtypeStruct((m, c), jnp.float16),
-      vmap_method='sequential')(x, scale, offset, eps=np.float32(eps))
-
-
-def _ln_impl(x, scale, offset, eps):
-  c = x.shape[-1]
-  out = _ln_call(x.reshape(-1, c).astype(jnp.float16),
-                 scale.astype(jnp.float32), offset.astype(jnp.float32), eps=eps)
-  return out.reshape(x.shape).astype(x.dtype)
-
-
-_ln_diff = jax.custom_vjp(_ln_impl, nondiff_argnums=(3,))
-_ln_diff.defvjp(lambda x, s, o, eps: (_ln_impl(x, s, o, eps), (x, s, o)),
-                xla_vjp(_ln_ref))
 
 
 def layer_norm(x, scale, offset, *, eps=1e-5, cc=None):
@@ -376,19 +242,17 @@ def layer_norm(x, scale, offset, *, eps=1e-5, cc=None):
   cc = device_cc() if cc is None else cc
   if not ops_available(cc):
     return None
-  return _ln_diff(x, jnp.reshape(scale, (c,)), jnp.reshape(offset, (c,)),
-                  float(eps))
-
-
-@functools.partial(jax.jit, static_argnames=('sym',))
-def _gdp_call(x, wp, bp, wg, bg, mask, *, sym):
-  m, n = x.shape[0], wp.shape[1]
-  return jax.ffi.ffi_call(sym, jax.ShapeDtypeStruct((m, n), jnp.float16),
-                          vmap_method='sequential')(x, wp, bp, wg, bg, mask)
+  fn = _grads().differentiable_layer_norm(_volta().volta_layer_norm)
+  out = fn(x.reshape(-1, c), jnp.reshape(scale, (c,)),
+           jnp.reshape(offset, (c,)), eps=float(eps))
+  return out.reshape(x.shape)
 
 
 def gdp_reference(x, w_proj, w_gate, mask):
-  """The kernel's own math in plain XLA: mask * proj * sigmoid(gate)."""
+  """The kernel's own math in plain XLA: mask * proj * sigmoid(gate).
+
+  Still here because pallas_attn's GLU takes its gradient from it.
+  """
   c = x.shape[-1]
   h = w_proj.shape[1] // 2
   spatial = tuple(x.shape[:-1])
@@ -403,29 +267,6 @@ def gdp_reference(x, w_proj, w_gate, mask):
   return out[0], out[1]
 
 
-def _gdp_impl(x, w_proj, w_gate, mask, sym):
-  c = x.shape[-1]
-  h = w_proj.shape[1] // 2
-  spatial = tuple(x.shape[:-1])
-  f16 = lambda t: t.astype(jnp.float16)
-  xf = f16(x.reshape(-1, c))
-  maskf = f16(jnp.reshape(mask, (-1,)))
-  zeros = jnp.zeros((h,), jnp.float16)
-  out = []
-  for off in (0, 1):
-    half = _gdp_call(xf, f16(w_proj[:, off::2]), zeros,
-                     f16(w_gate[:, off::2]), zeros, maskf, sym=sym)
-    # [M, h] -> [h, *spatial], which is what the 'cik,cjk->cij' einsum wants.
-    out.append(jnp.swapaxes(half, 0, 1).reshape((h,) + spatial).astype(x.dtype))
-  return out[0], out[1]
-
-
-_gdp_diff = jax.custom_vjp(_gdp_impl, nondiff_argnums=(4,))
-_gdp_diff.defvjp(
-    lambda x, wp, wg, m, sym: (_gdp_impl(x, wp, wg, m, sym), (x, wp, wg, m)),
-    xla_vjp(lambda x, wp, wg, m, sym: gdp_reference(x, wp, wg, m)))
-
-
 def gated_dual_proj(x, w_proj, w_gate, mask, *, cc=None):
   """TriangleMultiplication's GLU, fused, split and already channel-major.
 
@@ -435,9 +276,11 @@ def gated_dual_proj(x, w_proj, w_gate, mask, *, cc=None):
 
   The split is INTERLEAVED, not contiguous: this fork transposes the [.., 2h]
   projection to [2h, ..] and reshapes it to [h, 2, ..], so `a` is the even
-  output channels and `b` the odd ones. (Milot's own wrapper splits
-  contiguously, which is AF2's layout.) Neither linear has a bias here --
-  hm.Linear is use_bias=False -- so the kernel's bias operands are zeros.
+  output channels and `b` the odd ones. (Milot's own `split=True` is
+  contiguous, which is AF2's layout, so this calls his kernel once per half
+  with a strided weight slice instead -- the slicing is an ordinary jnp op and
+  transposes for free.) Neither linear has a bias here -- hm.Linear is
+  use_bias=False -- so the kernel's bias operands are zeros.
 
   Returns None for anything outside what the kernel instantiates.
   """
@@ -452,5 +295,15 @@ def gated_dual_proj(x, w_proj, w_gate, mask, *, cc=None):
   cc = device_cc() if cc is None else cc
   if not ops_available(cc):
     return None
-  sym = 'VoltaGdp' if cc >= 75 else 'VoltaGdpWmma'
-  return _gdp_diff(x, w_proj, w_gate, mask, sym)
+  fwd = lambda *a, **kw: _volta().volta_gated_dual_proj(*a, cc=int(cc), **kw)
+  fn = _grads().differentiable_gated_dual_proj(fwd, jax.nn.sigmoid)
+  spatial = tuple(x.shape[:-1])
+  xf = x.reshape(-1, c)
+  maskf = jnp.reshape(mask, (-1,))
+  zeros = jnp.zeros((h,), x.dtype)
+  out = []
+  for off in (0, 1):
+    half = fn(xf, w_proj[:, off::2], zeros, w_gate[:, off::2], zeros, maskf)
+    # [M, h] -> [h, *spatial], which is what the 'cik,cjk->cij' einsum wants.
+    out.append(jnp.swapaxes(half, 0, 1).reshape((h,) + spatial).astype(x.dtype))
+  return out[0], out[1]

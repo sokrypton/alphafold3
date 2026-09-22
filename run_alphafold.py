@@ -429,13 +429,15 @@ _FLASH_ATTENTION_IMPLEMENTATION = flags.DEFINE_enum(
         ' -> 4.50 ms at 384 tokens, bit-identical; 20% off a whole fold).'
         " 'triton' and 'cudnn' are the fused kernels and need Ampere or later;"
         " 'volta' is Milot Mirdita's colabfold-legacy-kernels, the only fused"
-        ' attention sm_70/sm_75 can run (3x XLA on a T4, in float16, and'
-        ' FORWARD ONLY -- it cannot be differentiated);'
+        ' attention sm_70/sm_75 can run (3x XLA on a T4, in float16);'
         " 'pallas' is his colabfold-kernels, a Pallas flash attention with a"
         ' non-batched bias that sizes its blocks to the device, so it launches'
         ' on the Ada and consumer-Ampere cards tokamax refuses -- 3.3x cuDNN'
-        ' and 11.9x XLA on an A10, and FORWARD ONLY for the same reason (a'
-        ' Pallas call has no VJP);'
+        ' and 11.9x XLA on an A10. Both grew a BACKWARD in the 0.4.0 releases'
+        ' (dQ/dK/dV and dBias), so either can now serve a gradient; on Ada'
+        " tokamax's Triton is still the faster one to backpropagate through"
+        ' (7.1 ms against pallas 12.6 at N=384), which is what the platform'
+        ' table picks for a design run;'
         " 'xla' is portable and the one every device has."
     ),
 )

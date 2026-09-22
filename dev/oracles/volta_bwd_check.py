@@ -9,15 +9,22 @@ itself.
 
   PYTHONPATH=src python dev/oracles/volta_bwd_check.py [70 [75 ...]]
 
-ON A CARD THAT IS NEITHER. Both kernels run on any newer arch, so build them
-for the local one and shim them in under the name of the arch you want to test:
+ON A CARD THAT IS NEITHER. The published wheels are cubin-only -- their sm_75
+libraries raise `no kernel image is available for execution on the device` on
+anything newer -- but the SOURCE builds for any arch, so build it for the local
+one and shim it in under the name of the arch you want to test:
 
-  cd ~/colabfold-legacy-kernels
+  cd ~/colabfold-legacy-kernels          # main, which is upstream's
   ALLOW_NEW_FFI=1 ARCH=86 bash scripts/build_kernels.sh /tmp/clk_build
   mkdir -p /tmp/clk_shim/colabfold_legacy_kernels/kernels
   cp src/colabfold_legacy_kernels/*.py /tmp/clk_shim/colabfold_legacy_kernels/
   cp -r /tmp/clk_build/sm86 /tmp/clk_shim/colabfold_legacy_kernels/kernels/sm70
-  CLK_SHIM=/tmp/clk_shim PYTHONPATH=src python dev/oracles/volta_bwd_check.py 70
+  cp -r /tmp/clk_build/sm86 /tmp/clk_shim/colabfold_legacy_kernels/kernels/sm75
+  CLK_SHIM=/tmp/clk_shim PYTHONPATH=src python dev/oracles/volta_bwd_check.py 70 75
+
+`colabfold_kernels` must also be importable: since 0.4.0 the dlopen, the FFI
+registration and the custom_vjp live in `colabfold_kernels.volta`, and this
+file's `volta_attn` is only the adapter over it.
 """
 import os
 import sys

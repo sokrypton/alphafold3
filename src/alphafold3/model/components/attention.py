@@ -80,16 +80,16 @@ def dot_product_attention(q, k, v, *, mask=None, bias=None, implementation=None,
   # Mirdita's colabfold-legacy-kernels, 3x the XLA path on a T4. It returns
   # None rather than a wrong answer when the shapes are outside what it
   # instantiates (a broadcast bias, an odd head dim), so this falls through.
-  # FORWARD ONLY: it cannot be differentiated, which is why nothing asks for
-  # it on a gradient path -- see platform.attention_config(differentiable=).
+  # Both grew a BACKWARD in the 0.4.0 releases (dQ/dK/dV and dBias), so a
+  # gradient reaching either returns one instead of raising; which backend a
+  # differentiable caller is actually sent to is a speed decision now, made in
+  # platform.attention_config(differentiable=).
   # Milot Mirdita's Pallas kernel (colabfold-kernels): a flash attention with a
   # non-batched bias that sizes its blocks against the device, so it runs on the
   # Ada / consumer-Ampere cards where tokamax's Triton arm answers 'Not
   # supported on NVIDIA A10' -- and at 0.723 ms against cuDNN's 2.409 at
-  # N=384 it is 3.3x the backend those cards use today. Forward only (a Pallas
-  # call has no VJP), which is why platform.attention_config never answers
-  # 'pallas' to a differentiable caller. Falls through to XLA on any shape it
-  # does not take.
+  # N=384 it is 3.3x the backend those cards use today. Falls through to XLA on
+  # any shape it does not take.
   # TOKAMAX REFUSES ADA BY NAME, AND THE PREMISE IS WRONG FOR OUR SHAPES.
   # `gpu_utils.has_triton_support` answers `cc == 8.0 or cc >= 9.0`, commented
   # "Ada/L4 lack shared memory". Every shape this model uses launches there --

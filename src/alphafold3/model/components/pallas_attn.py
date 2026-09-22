@@ -24,9 +24,12 @@ M=147456, K=128 -- tokamax's GLU is worth only 7% over plain XLA there.
 The fused LayerNorm is deliberately NOT wired: 0.164 ms against XLA's 0.166 on
 the same tensor. XLA already reaches the card's bandwidth.
 
-FORWARD ONLY. A Pallas call has no VJP, so `platform.attention_config` never
-answers 'pallas' to a differentiable caller -- the same rule as the sm_70/75
-kernels.
+DIFFERENTIABLE SINCE colabfold-kernels 0.4.0, which added a Pallas flash
+BACKWARD (dQ/dK/dV and dBias, the last through atomics) and its own
+`custom_vjp` over it. Before that a Pallas call had no VJP at all and this file
+answered a gradient with a raised NotImplementedError; `bwd_installed()` below
+tells the two apart, because the older package is still on PyPI and still
+installs. dBias is the part ColabFold never needed and AF3 cannot do without.
 """
 
 from __future__ import annotations
@@ -46,6 +49,23 @@ def installed() -> bool:
   return importlib.util.find_spec('colabfold_kernels') is not None
 
 
+def bwd_installed() -> bool:
+  """True if the installed kernel package can be differentiated.
+
+  0.4.0 added `tri_flash_bwd` and wrapped the forward in a `custom_vjp`; 0.1.0
+  is still on PyPI and has neither, so this is a capability check rather than a
+  version comparison -- a source checkout on PYTHONPATH has no version metadata
+  to compare.
+  """
+  if not installed():
+    return False
+  try:
+    from colabfold_kernels import tri_flash  # pylint: disable=g-import-not-at-top
+  except Exception:  # pylint: disable=broad-except
+    return False
+  return hasattr(tri_flash, 'tri_flash_bwd')
+
+
 def _attention_impl(q, k, v, mask_bias, nb_bias, scale):
   from colabfold_kernels import tri_flash  # pylint: disable=g-import-not-at-top
 
@@ -57,22 +77,21 @@ def _attention_impl(q, k, v, mask_bias, nb_bias, scale):
 def _attention_no_bwd(scale, res, cotangent):
   del scale, res, cotangent
   raise NotImplementedError(
-      "the Pallas attention kernel has no backward: colabfold-kernels' "
-      'tri_flash is a bare pallas_call, which jax cannot differentiate. '
-      "Use flash_attention_implementation='triton' for a graph you will "
-      'backpropagate through -- tokamax gives it a real flash VJP, and '
-      'platform.attention_config(differentiable=True) already picks it. '
-      '(The GLU took a custom_vjp over an XLA twin instead; that does not '
-      'work here, because an XLA twin of attention materialises the [Sq, Sk] '
-      'matrix this kernel exists to avoid.)')
+      'this colabfold-kernels has no Pallas attention backward: its '
+      '`tri_flash` is a bare pallas_call, which jax cannot differentiate. '
+      'Upgrade to colabfold-kernels >= 0.4.0, which ships one (and a '
+      "custom_vjp over it), or ask for flash_attention_implementation='triton' "
+      '-- platform.attention_config(differentiable=True) picks a backend that '
+      'can serve a gradient on this device either way.')
 
 
-# WITHOUT THIS the failure is `ValueError: Too few leaves for PyTreeDef;
-# expected 4, got 3` from inside the pallas lowering, which says nothing about
-# what went wrong or what to do. A custom_vjp whose backward raises turns that
-# into one sentence, at jax.grad time, and costs the forward nothing.
-_attention_diff = jax.custom_vjp(_attention_impl, nondiff_argnums=(5,))
-_attention_diff.defvjp(
+# ONLY REACHED ON A PRE-0.4.0 PACKAGE, where the failure is otherwise
+# `ValueError: Too few leaves for PyTreeDef; expected 4, got 3` from inside the
+# pallas lowering, which says neither what went wrong nor what to do. A
+# custom_vjp whose backward raises turns that into one sentence, at jax.grad
+# time, and costs the forward nothing.
+_attention_no_grad = jax.custom_vjp(_attention_impl, nondiff_argnums=(5,))
+_attention_no_grad.defvjp(
     lambda q, k, v, mb, nb, scale: (_attention_impl(q, k, v, mb, nb, scale),
                                     None),
     _attention_no_bwd)
@@ -104,7 +123,10 @@ def attention(q, k, v, *, mask, bias, scale):
       (b, sk))
   mask_bias = jnp.where(m, 0.0, _NEG).astype(jnp.float32)[:, None, None, :]
   nb_bias = None if bias is None else jnp.reshape(bias, (h, sq, sk))
-  return _attention_diff(q, k, v, mask_bias, nb_bias, float(scale))
+  # 0.4.0+ carries its own custom_vjp, so call the kernel wrapper directly
+  # and let it serve the gradient; older packages keep the raising stub.
+  impl = _attention_impl if bwd_installed() else _attention_no_grad
+  return impl(q, k, v, mask_bias, nb_bias, float(scale))
 
 
 _GDP_BLOCK_M = 64      # tri_mul.gated_dual_proj's own default
