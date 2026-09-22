@@ -110,7 +110,10 @@ def gumbel_argsort_sample_idx(
   # This construction is equivalent to jnp.argsort, but using a non stable sort,
   # since stable sort's aren't supported by jax2tf
   axis = len(logits.shape) - 1
-  iota = jax.lax.broadcasted_iota(jnp.int64, logits.shape, axis)
+  # int32, not int64: these are sort indices over the last axis, and JAX
+  # without x64 truncates the request anyway -- which it says, once per
+  # fold, as a UserWarning from this line. Same values, no warning.
+  iota = jax.lax.broadcasted_iota(jnp.int32, logits.shape, axis)
   _, perm = jax.lax.sort_key_val(
       logits + z, iota, dimension=-1, is_stable=False
   )
