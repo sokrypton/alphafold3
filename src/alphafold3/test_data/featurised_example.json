@@ -14,6 +14,7 @@
     "is_protein": "569b0e93b5f77c1a9d430b643f29e600c7db6f44ded72b96ab1dd25351d26075",
     "is_rna": "1d83518b897b14e2943990eff655838246cc0207a7c95a5f3dfccc2e395f8bbf",
     "is_water": "1d83518b897b14e2943990eff655838246cc0207a7c95a5f3dfccc2e395f8bbf",
+    "ligand_ligand_bond_order": "c627509ccf94752ee33ec49b0166e5733b8eff18f05fde4f614b093ed917b8d4",
     "ligand_ligand_bonds": "<<None>>",
     "msa": "871c93669d8a7dd046f8ba6a1ea7b9fc52e1a2e040c8d9bdc4ae73a77f95d3f7",
     "msa_mask": "13a46a8a2c5305d2a07bb9587ad092d97749d2b2a2d10ad5d64474a4f0f4c803",

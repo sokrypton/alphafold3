@@ -43,7 +43,7 @@ jobs:
     - name: Fetch components.cif
       run: |
         mkdir -p "$RUNNER_TEMP/libcifpp"
-        curl -fsSL https://s3.rcsb.org/pub/pdb/data/monomers/components.cif.gz \
+        curl -fsSL https://pdbsnapshots.s3.us-west-2.amazonaws.com/20260101/pub/pdb/data/monomers/components.cif.gz \
           | gunzip > "$RUNNER_TEMP/libcifpp/components.cif"
         echo "LIBCIFPP_DATA_DIR=$RUNNER_TEMP/libcifpp" >> "$GITHUB_ENV"
 
