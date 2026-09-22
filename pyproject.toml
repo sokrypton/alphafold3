@@ -72,6 +72,7 @@ wheel.exclude = [
     # the fat GitHub-release build. A source install is complete by default,
     # which is what a source install should be.
     "var/**",
+    "lib64/**",
     "lib/**",
     "include/**",
     "etc/**",
