@@ -668,6 +668,15 @@ _FRAME_CALLBACK = [None]
 # slowest.
 _LIVE_CHUNK = [10]
 
+_NUM_EXTRA_MSA = flags.DEFINE_integer(
+    'num_extra_msa',
+    None,
+    "AlphaFold 2 ONLY: rows for its second, 'extra' MSA stack -- the cheap"
+    ' pass over sequences the clustered stack did not take (default 1024).'
+    ' AlphaFold 3 has one MSA stack and no equivalent, so this is ignored'
+    ' there. Like --num_msa it is a memory dial rather than a speed one, and'
+    ' a different value is a different compiled executable.',
+)
 _NUM_MSA = flags.DEFINE_integer(
     'num_msa',
     None,
@@ -1829,11 +1838,29 @@ def main(_):
       af2_templates = any(getattr(c, 'templates', None)
                           for fi in fold_inputs for c in fi.chains)
       print('Building AlphaFold 2 from scratch...')
+      # 🔴 THREE THINGS THIS DID NOT PASS, AND --num_msa WAS ONE OF THEM.
+      # AF2ModelRunner takes num_msa and num_extra_msa and this named
+      # neither, so `--num_msa 64` lowered AF3's memory and did nothing at
+      # all for AF2 -- a flag that looks like a control and is not, which is
+      # the fourth of those in this file's history. Passed only when SET, so
+      # the runner's own 512/1024 remain the defaults.
+      #
+      # AND THE RECYCLE DEFAULT IS THE MODEL'S, NOT THE FLAG'S. --num_recycles
+      # defaults to 10, which is AlphaFold 3's number; AlphaFold 2's is 3, and
+      # ten passes of it is three times the work for a model that converged
+      # seven passes ago. An explicit --num_recycles still wins, which is what
+      # `.present` asks.
+      _af2_kw = {}
+      if _NUM_MSA.value is not None:
+        _af2_kw['num_msa'] = _NUM_MSA.value
+      if _NUM_EXTRA_MSA.value is not None:
+        _af2_kw['num_extra_msa'] = _NUM_EXTRA_MSA.value
       model_runner = af2_inference.AF2ModelRunner(
           spec, device=device, model_dir=model_dir,
-          num_recycles=_NUM_RECYCLES.value,
+          num_recycles=(_NUM_RECYCLES.value if _NUM_RECYCLES.present else 3),
           use_templates=af2_templates,
           use_dropout=_DROPOUT.value,
+          **_af2_kw,
       )
     else:
       # Idempotent after the first run: a directory that already holds a blob is
