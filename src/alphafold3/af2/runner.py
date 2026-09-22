@@ -313,6 +313,19 @@ class AF2Runner:
       self.model_names = names[:len(model_params)]
     else:
       self.model_names = model_names or [f'model_{i}' for i in range(len(model_params))]
+      # SUPPLIED params get the same treatment as loaded ones. Handing a monomer
+      # param set straight to the multimer graph fails as `preprocess_1d/weights
+      # with retrieved shape (22, 256) does not match shape=(21, 256)`, which
+      # reads like a corrupt checkpoint rather than a missing conversion -- and
+      # it is exactly what a caller sharing weights with ColabDesign v1 does,
+      # since v1 runs a monomer model on the monomer graph and never converts.
+      # Keyed on SHAPE so it is idempotent: params already on the multimer graph
+      # are left alone, and converting twice (which would drop a second restype
+      # row) cannot happen.
+      if self.on_multimer_graph:
+        from .convert import convert_monomer_params, looks_monomer_shaped
+        model_params = [convert_monomer_params(p) if looks_monomer_shaped(p)
+                        else p for p in model_params]
     self.model_params = model_params
 
     # BindCraft's sample_models: optimise against a different AF2 model each step

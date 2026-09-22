@@ -40,6 +40,22 @@ def _np(x):
   return np.asarray(x)
 
 
+def looks_monomer_shaped(p: dict) -> bool:
+  '''True if these params are for the MONOMER graph and still need converting.
+
+  Shape, not a flag: `preprocess_1d` takes a 22-wide target_feat on the monomer
+  graph and 21 on the multimer one, and convert_monomer_params drops the first
+  row to get there. So 22 means "monomer, unconverted", 21 means "already on the
+  multimer graph" -- whether it arrived from a multimer checkpoint or from this
+  function. That makes the check idempotent, which a boolean argument would not
+  be: converting twice would silently drop a second restype row.
+  '''
+  entry = p.get(_EVO + 'preprocess_1d')
+  if not entry or 'weights' not in entry:
+    return False
+  return int(_np(entry['weights']).shape[0]) == 22
+
+
 def convert_monomer_params(p: dict) -> dict:
   '''monomer param dict -> multimer-graph-shaped param dict (in memory)'''
   out = {}
