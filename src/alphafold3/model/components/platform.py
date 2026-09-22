@@ -226,6 +226,19 @@ def attention_config(device: str = None, cap: float | None = None,
     #     triton + pallas  GLU   31.20 31.19 31.21 31.21 s   -2.35%
     # Small, but 25x the spread, and free. Below 512 tokens it is invisible:
     # 6LU7 at 306 is 21.8 s warm whatever the kernels.
+    # AND `not differentiable` HERE IS ALSO A MEASUREMENT NOW. The gate was
+    # written when the Pallas GLU had no VJP; it has one (an XLA
+    # recomputation), so the question became whether that beats tokamax's real
+    # VJP kernel. It does not -- dev/bench/glu_grad.py, A100, TriangleMulti-
+    # plication forward+backward, ms:
+    #
+    #     N=384    tokamax  3.105   pallas  4.246   no GLU kernel  3.027
+    #     N=768    tokamax 12.115   pallas 15.799   no GLU kernel 11.514
+    #     N=1024   tokamax 21.498   pallas 27.342   no GLU kernel 21.181
+    #
+    # even though the Pallas FORWARD is the fastest of the three everywhere
+    # (0.881 against 1.046 at N=384). An A10 says the same, harder: 10.325
+    # against 6.895 at N=384. Same answer on both cards, so the row stands.
     glu = TOKAMAX
     if not differentiable:
       from alphafold3.model.components import pallas_attn
