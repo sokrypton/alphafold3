@@ -652,6 +652,17 @@ _STEPWISE_RECYCLES = flags.DEFINE_bool(
 # notebook to draw the structure as it converges. Left None, costs nothing.
 _TRUNK_CALLBACK = [None]
 
+# ...and its sibling, for the frames themselves: a callable(kind, index, data)
+# with kind 'recycle' or 'diffusion', which is what staged_fold's `on_frame`
+# takes. _TRUNK_CALLBACK has existed for the notebook all along and this had
+# not, so an in-process caller could observe the trunk and not the sampler --
+# and the notebook therefore drove staged_fold ITSELF, reimplementing
+# featurisation, extraction and the output writing around it. That is where
+# `__identifier__`, the batch's invalid types, the compile cache and the
+# sample count each went missing once. With this it calls process_fold_input
+# like everything else.
+_FRAME_CALLBACK = [None]
+
 # How many denoise steps go in one dispatch. Frames still arrive one per step;
 # this only decides how often the host is involved. 1 is the finest and the
 # slowest.
@@ -798,7 +809,8 @@ class ModelRunner:
     uses -- and the duplicate trunk trace it was meant to remove stayed.
     """
     run = self.live_model()
-    return lambda rng_key, batch: run(rng_key, batch)
+    return lambda rng_key, batch: run(rng_key, batch,
+                                      on_frame=_FRAME_CALLBACK[0])
 
   @functools.cached_property
   def _model(
