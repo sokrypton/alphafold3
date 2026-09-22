@@ -1,0 +1,5 @@
+64	NATIVE-RF3 first  24.45s | steady 14.728s | all [24.45, 14.73, 14.68]
+128	NATIVE-RF3 first  26.35s | steady 16.700s | all [26.35, 16.7, 16.62]
+192	NATIVE-RF3 first  31.49s | steady 22.407s | all [31.49, 22.31, 22.41]
+256	NATIVE-RF3 first  41.28s | steady 32.014s | all [41.28, 32.01, 32.01]
+384	NATIVE-RF3 first  70.29s | steady 61.495s | all [70.29, 61.41, 61.5]

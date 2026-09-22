@@ -1,0 +1,5 @@
+64	NATIVE L=64 recycles=3 steps=200 kernels=False: first   7.80s (incl warmup) | steady  7.594s (median 7.598, n=3)
+128	NATIVE L=128 recycles=3 steps=200 kernels=False: first   8.85s (incl warmup) | steady  8.669s (median 8.689, n=3)
+192	NATIVE L=192 recycles=3 steps=200 kernels=False: first  11.82s (incl warmup) | steady 11.639s (median 11.663, n=3)
+256	NATIVE L=256 recycles=3 steps=200 kernels=False: first  17.28s (incl warmup) | steady 17.151s (median 17.157, n=3)
+384	NATIVE L=384 recycles=3 steps=200 kernels=False: first  38.69s (incl warmup) | steady 38.686s (median 38.799, n=3)

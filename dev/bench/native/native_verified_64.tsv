@@ -1,0 +1,7 @@
+model	L	native_s	note
+boltz2	64	7.590	forward-only
+opendde	64	8.425	torch kernels; cueq 8.478 (no real difference)
+protenix2	64	10.398	torch kernels; cueq 11.612
+rosettafold3	64	11.867	forward-only (featurisation 2.836 subtracted)
+openfold3	64	12.880	forward-only
+chai1	256	28.394	model-only, at its 256 bucket boundary

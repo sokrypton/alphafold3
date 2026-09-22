@@ -1,0 +1,4 @@
+NATIVE-PROTENIX2 L=64 kernels=torch WARM first  11.02s | steady 10.398s | all [11.02, 10.46, 10.4]
+NATIVE-PROTENIX2 L=64 kernels=cuequivariance WARM first  15.27s | steady 11.612s | all [15.27, 11.64, 11.61]
+NATIVE-OPENDDE L=64 kernels=torch WARM first   8.89s | steady  8.425s | all [8.89, 8.41, 8.42]
+NATIVE-OPENDDE L=64 kernels=cuequivariance WARM first   9.87s | steady  8.478s | all [9.87, 8.62, 8.48]

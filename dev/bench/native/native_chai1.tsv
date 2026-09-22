@@ -1,0 +1,1 @@
+NATIVE-CHAI1 L=256 bucket=256 first  87.02s | steady 53.662s | model 28.394s | outside-model 25.268s | all [87.02, 52.4, 53.66]
