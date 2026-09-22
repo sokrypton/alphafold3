@@ -4,75 +4,29 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
-    inputs:
-      all_platforms:
-        description: >-
-          Build the full matrix (cp312/313/314 x linux-x86_64, linux-aarch64,
-          macOS-arm64) instead of just Colab's cp313 manylinux x86_64. Nine
-          wheels and ~12 minutes against one and ~3.5. Use it for a release
-          anyone other than Colab installs.
-        type: boolean
-        default: false
+
 jobs:
   build-wheel:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runs_on }}
-    # COLAB ONLY by default. Colab is Python 3.13 on linux x86_64, and every
-    # other leg of the matrix cost ~8 minutes per build to serve nobody we are
-    # currently shipping to. `all_platforms` brings the other eight back.
-    # The MATRIX decides, not a job-level `if`. A job-level `if` cannot see the
-    # `matrix` context (only github / needs / vars / inputs), so
-    # `if: inputs.all_platforms || matrix.colab != ''` made the whole file
-    # invalid -- GitHub created no jobs at all and reported "workflow file
-    # issue", which is why the v3.1.11 tag built nothing. `strategy` CAN see
-    # `inputs`, so the leg list is chosen here instead.
     strategy:
       fail-fast: false
       matrix:
-        include: >-
-          ${{ fromJSON(inputs.all_platforms
-          && '[{"name":"linux-x86_64","runs_on":"ubuntu-latest","build":"cp312-manylinux_x86_64 cp313-manylinux_x86_64 cp314-manylinux_x86_64"},{"name":"linux-aarch64","runs_on":"ubuntu-24.04-arm","build":"cp312-manylinux_aarch64 cp313-manylinux_aarch64 cp314-manylinux_aarch64"},{"name":"macos-arm64","runs_on":"macos-14","build":"cp312-macosx_arm64 cp313-macosx_arm64 cp314-macosx_arm64"}]'
-          || '[{"name":"linux-x86_64","runs_on":"ubuntu-latest","build":"cp313-manylinux_x86_64"}]') }}
+        include:
+          - name: linux-x86_64
+            runs_on: ubuntu-latest
+            build: "cp312-manylinux_x86_64 cp313-manylinux_x86_64 cp314-manylinux_x86_64"
+          - name: linux-aarch64
+            runs_on: ubuntu-24.04-arm
+            build: "cp312-manylinux_aarch64 cp313-manylinux_aarch64 cp314-manylinux_aarch64"
+          - name: macos-arm64
+            runs_on: macos-14
+            build: "cp312-macosx_arm64 cp313-macosx_arm64 cp314-macosx_arm64"
 
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-
-      # SLIM FOR PyPI. `pyproject.toml` deliberately ships the libcifpp data
-      # so a source install (and CI's `uv run build_data`) works; with it the
-      # wheel is ~250 MB and PyPI's per-file limit is 100 MB. So the exclusion
-      # lives here, on the PyPI path only, and the fat build below skips it.
-      #
-      # python, not `sed -i`: BSD sed on the macOS runner takes the next
-      # argument as a backup suffix, so `sed -i` misparses there while working
-      # on the Linux runners -- which is how the first fat build failed on
-      # macos-arm64 and nowhere else.
-      # Editing pyproject.toml leaves the checkout DIRTY, and setuptools_scm
-      # renders a dirty tree as a LOCAL version -- `3.1.9.dev0+g7f79c77bd.d20260916`
-      # even with the v3.1.8 tag on HEAD. PyPI rejects any local version with
-      # `400 The use of local versions ... is not allowed`, which is how v3.1.8
-      # built three green platforms and published nothing. So on a tag push,
-      # pin the version to the tag before touching the file.
-      - name: Slim the wheel for PyPI
-        run: |
-          case "$GITHUB_REF" in
-            refs/tags/v*)
-              v="${GITHUB_REF#refs/tags/v}"
-              echo "SETUPTOOLS_SCM_PRETEND_VERSION=${v}" >> "$GITHUB_ENV"
-              echo "pinned version ${v} from the tag"
-              ;;
-          esac
-          python - <<'EOF'
-          import pathlib
-          p = pathlib.Path('pyproject.toml')
-          t = p.read_text()
-          anchor = '    "var/**",'
-          assert anchor in t, 'exclude block not in the expected shape'
-          assert '"share/**",' not in t, 'share/** already excluded'
-          p.write_text(t.replace(anchor, '    "share/**",\n' + anchor, 1))
-          print('excluded share/** for the PyPI build')
-          EOF
 
       - name: Build wheels
         uses: pypa/cibuildwheel@v4.2.1
@@ -81,12 +35,6 @@ jobs:
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
           CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
           CIBW_BUILD_VERBOSITY: 1
-          # SETUPTOOLS_SCM_PRETEND_VERSION is exported to $GITHUB_ENV by the
-          # step above, but cibuildwheel builds Linux wheels INSIDE a manylinux
-          # container and the host environment does not follow it in. Without
-          # this the wheels came out as 3.1.8.dev4+ge07472ed8 -- setuptools_scm
-          # falling back to `git describe` inside the container.
-          CIBW_ENVIRONMENT_PASS_LINUX: SETUPTOOLS_SCM_PRETEND_VERSION
 
       - name: Upload wheels as workflow artifact
         uses: actions/upload-artifact@v4
@@ -96,11 +44,7 @@ jobs:
 
   publish:
     needs: [build-wheel]
-    # Any run on a tag ref publishes -- a push, or a workflow_dispatch against
-    # that tag. The dispatch path is the only way to publish the full matrix,
-    # since `inputs` do not exist on a push:
-    #     gh workflow run release_wheel.yaml --ref v3.1.11 -f all_platforms=true
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
