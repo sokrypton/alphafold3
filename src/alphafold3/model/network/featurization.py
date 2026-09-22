@@ -19,6 +19,7 @@
 
 """Model-side of the input features processing."""
 
+import contextlib
 import functools
 
 from alphafold3.constants import residue_names
@@ -216,6 +217,40 @@ def token_profile(profile, token_index, design_mask):
 # Read at trace time, so switching modes recompiles -- an experiment knob, not a
 # per-step option. See colabdesign2/af2/runner.py update_seq (the pssm_hard site).
 PROFILE_MODE = 'soft'
+
+PROFILE_MODES = ('soft', 'hard', 'frozen', 'unk', 'gap', 'zero')
+
+
+def set_profile_mode(mode: str) -> str:
+  """Set PROFILE_MODE by name, rejecting a typo instead of silently ignoring it.
+
+  A module global assigned from outside is a global assigned WITHOUT a spell
+  check: `PROFILE_MODE = 'hrad'` is not an error, it just falls through every
+  branch to the default and the caller gets soft profiles while believing it
+  asked for hard ones. Returns the previous value so a caller can restore it.
+  """
+  global PROFILE_MODE
+  if mode not in PROFILE_MODES:
+    raise ValueError(
+        f'unknown profile mode {mode!r}; expected one of '
+        + ', '.join(repr(m) for m in PROFILE_MODES))
+  previous, PROFILE_MODE = PROFILE_MODE, mode
+  return previous
+
+
+@contextlib.contextmanager
+def profile_mode(mode: str):
+  """PROFILE_MODE for the duration of a block, restored on the way out.
+
+  Remember what it costs: the mode is read at TRACE time, so entering and
+  leaving this around traced code buys a recompile each way. It is for setting
+  up a design run, not for wrapping a step.
+  """
+  previous = set_profile_mode(mode)
+  try:
+    yield mode
+  finally:
+    set_profile_mode(previous)
 
 
 def create_msa_feat(msa: features.MSA, soft_seq=None,

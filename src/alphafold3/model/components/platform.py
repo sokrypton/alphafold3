@@ -338,3 +338,38 @@ def cache_stats(path: str = DEFAULT_CACHE) -> dict:
       n += 1
       total += os.path.getsize(os.path.join(root, f))
   return {'path': path, 'entries': n, 'bytes': total}
+
+
+def preinit_tokamax_context() -> None:
+  '''Create tokamax's JAX user context BEFORE the first trace.
+
+  tokamax builds its autotuning-cache overlay lazily, and the overlay carries a
+  `jax.make_user_context(())` (ops/op.py: get_autotuning_cache_overlay_state).
+  The first tokamax op to run creates it -- which happens INSIDE the first trace
+  of the model. JAX includes the user context in the jit cache key, so the entry
+  cached during that trace is keyed WITHOUT the context while every later call is
+  keyed with it: a guaranteed miss, and a full retrace plus recompile of the
+  whole model on call 2.
+
+  Measured on an A100 (alphafold3, 64 tokens, identical arguments both calls):
+
+      without      call 0 62.5 s   call 1 45.3 s   call 2 2.5 s   2 traces
+      with         call 0 62.5 s   call 1  2.5 s   call 2 2.5 s   1 trace
+
+  So it costs a second cold compile on every fresh process. Invisible on
+  hardware where tokamax's Pallas/Triton kernels are unavailable (an A10 raises
+  NotImplementedError for them and never creates the context), which is why this
+  only shows up on datacentre GPUs -- exactly the ones people rent.
+
+  IT LIVES HERE, not in run_alphafold.py, because anything that builds a model
+  in-process needs it and must not import a CLI script to get it.
+
+  Best-effort: the import path is tokamax-internal, so a version without it must
+  not break inference.
+  '''
+  try:
+    from tokamax._src.ops import op as _tokamax_op
+
+    _tokamax_op.get_autotuning_cache_overlay_state()
+  except Exception:  # pylint: disable=broad-except
+    pass

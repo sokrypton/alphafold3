@@ -63,11 +63,13 @@ import alphafold3.cpp
 from alphafold3.data import featurisation
 from alphafold3.data import pipeline
 from alphafold3.data.tools import shards
+from alphafold3.model import config_factory
 from alphafold3.model import features
 from alphafold3.model import model_config
 from alphafold3.model import model
 from alphafold3.model import model_registry
 from alphafold3.model.pipeline import model_features
+from alphafold3.model.components import platform as _platform
 from alphafold3.model import params
 from alphafold3.model import post_processing
 from alphafold3.model import weights
@@ -702,111 +704,13 @@ _MSA_SERVER_USER_AGENT = flags.DEFINE_string(
 )
 
 
-def _bfloat16_default() -> str:
-  """GlobalConfig.bfloat16: 'all' where bf16 pays, 'intermediate' where it does not.
-
-  'intermediate' keeps the trunk and confidence head in bf16 and leaves the
-  diffusion sampler in float32 -- which is what this model did for its whole
-  life. 'all' extends bf16 to the sampler too, worth ~10% at 256 tokens on an
-  A10 (cc 8.6).
-
-  The boundary is compute capability 8.0 (Ampere) and it is MEASURED. Below it
-  there are no bf16 tensor cores and XLA's converts cost more than the narrower
-  operands save: on a real Colab T4 (sm_75), openbind0 at 59 residues / 10
-  recycles / 5 samples reads 30.91 s with the sampler in f32 and 32.19 s in
-  bf16 -- +4.2%, over interleaved reps on warm caches. It runs correctly either
-  way, it is just slower, so a T4 gets 'intermediate'.
-
-  The TRUNK keeps bf16 on that card regardless: its own cost there is 1.1%, and
-  'none' would buy that back by doubling the [N, N, 128] pair representation's
-  activation memory on the GPU with the least to spare.
-
-  Here rather than in the model because choosing needs the device, and a model
-  module should not be asking what GPU this is. AF3_SAMPLER_BF16=1 / =0 forces
-  'all' / 'intermediate'.
-  """
-  env = os.environ.get('AF3_SAMPLER_BF16')
-  if env is not None:
-    return 'all' if env not in ('', '0', 'false', 'False') else 'intermediate'
-  try:
-    device = jax.devices()[0]
-    # A TPU has no compute_capability to read, and bfloat16 is its native
-    # matmul type -- 'intermediate' (the except branch's answer) would leave
-    # the sampler in f32 on the one accelerator built around bf16.
-    if device.platform == 'tpu':
-      return 'all'
-    cc = str(getattr(device, 'compute_capability', '') or '')
-    major, _, minor = cc.partition('.')
-    return 'all' if (int(major), int(minor or 0)) >= (8, 0) else 'intermediate'
-  except Exception:
-    return 'intermediate'
-
-
-def make_model_config(
-    *,
-    flash_attention_implementation: tokamax.DotProductAttentionImplementation = 'triton',
-    glu_kernel: str = 'auto',
-    num_diffusion_samples: int = 5,
-    num_sampling_steps: int | None = None,
-    num_recycles: int = 10,
-    return_embeddings: bool = False,
-    return_distogram: bool = False,
-    model_name: str = 'alphafold3',
-    num_msa: int | None = None,
-) -> model.Model.Config:
-  """Returns a model config with some defaults overridden.
-
-  `model_name` selects the family: it lands in global_config.model, which every
-  ported-family forward branch keys on, and brings that family's config shapes
-  and sampler constants with it (model_registry.ModelSpec.configure).
-  """
-  config = model.Model.Config()
-  config.global_config.flash_attention_implementation = (
-      flash_attention_implementation
-  )
-  config.global_config.glu_kernel = glu_kernel
-  config.heads.diffusion.eval.num_samples = num_diffusion_samples
-  config.num_recycles = num_recycles
-  config.return_embeddings = return_embeddings
-  config.return_distogram = return_distogram
-  config.global_config.bfloat16 = _bfloat16_default()
-  model_registry.get(model_name).configure(config)
-  # AFTER configure(), NOT BEFORE. The model spec sets its own sampler
-  # constants -- ESMFold2's 15 steps, AF3's 200 -- so an assignment made before
-  # it is silently overwritten, and a sweep at 5/15/60 steps then returns three
-  # IDENTICAL structures, which is how this was caught.
-  if num_sampling_steps is not None:
-    config.heads.diffusion.eval.steps = num_sampling_steps
-  # HOW MANY MSA ROWS THE TRUNK SEES. Featurisation always hands over a fixed
-  # 16384-row buffer (pipeline.msa_crop_size) and the trunk subsamples to this,
-  # keeping the query at row 0. Lowering it is the one MSA knob a user can turn.
-  #
-  # Measured, and worth saying before anyone reaches for it as a speed dial:
-  # sweeping 1 / 256 / 1024 moved steady-state runtime by 0.4% at 512 tokens.
-  # It changes MEMORY and it changes the compiled executable -- a different
-  # value is a different shape, so it misses a compile cache built at another.
-  #
-  # ANY value is allowed, not just the notebook's ladder. Two need a guard:
-  # below 1 there is no query row, and above the featurisation buffer jax does
-  # NOT raise -- a gather CLAMPS out-of-range indices, so `--num_msa=20000`
-  # against a 16384-row buffer would hand the trunk 3616 duplicates of the
-  # last padded row and fold on quietly (checked: a[arange(3,8)] on a 5-row
-  # array repeats row 4 four times).
-  if num_msa is not None:
-    num_msa = int(num_msa)
-    from alphafold3.model.pipeline import pipeline as _model_pipeline
-    buffer = _model_pipeline.WholePdbPipeline.Config().msa_crop_size
-    if num_msa < 1:
-      raise ValueError(
-          f'--num_msa must be at least 1 -- row 0 is the query -- got {num_msa}.')
-    if num_msa > buffer:
-      print(f'--num_msa={num_msa} is above the {buffer}-row featurisation '
-            f'buffer, so {buffer} is what the trunk can actually read; using '
-            'that. Rows past the buffer would be copies of its last padded row.')
-      num_msa = buffer
-    config.evoformer.num_msa = num_msa
-
-  return config
+# make_model_config and _bfloat16_default MOVED TO THE LIBRARY
+# (alphafold3.model.config_factory). Design code needs a configured model
+# in-process and cannot import a script to get one -- see that module's
+# docstring, and staged.py's. Re-exported so the CLI's own callers are
+# unaffected.
+_bfloat16_default = config_factory.bfloat16_default
+make_model_config = config_factory.make_model_config
 
 
 class ModelRunner:
@@ -868,37 +772,10 @@ class ModelRunner:
     loaded = params.get_model_haiku_params(model_dir=self._model_dir)
     return loaded
 
-  @staticmethod
-  def _preinit_tokamax_context() -> None:
-    """Create tokamax's JAX user context BEFORE the first trace.
-
-    tokamax builds its autotuning-cache overlay lazily, and the overlay carries
-    a `jax.make_user_context(())` (ops/op.py: get_autotuning_cache_overlay_state).
-    The first tokamax op to run creates it -- which happens INSIDE the first
-    trace of the model. JAX includes the user context in the jit cache key, so
-    the entry cached during that trace is keyed without the context while every
-    later call is keyed with it: a guaranteed miss, and a full RETRACE plus
-    recompile of the whole model on call 2.
-
-    Measured on an A100 (alphafold3, 64 tokens, identical arguments both calls):
-
-        without      call 0 62.5 s   call 1 45.3 s   call 2 2.5 s   2 traces
-        with         call 0 62.5 s   call 1  2.5 s   call 2 2.5 s   1 trace
-
-    So it costs a second cold compile on every fresh process. Invisible on
-    hardware where tokamax's Pallas/Triton kernels are unavailable (an A10
-    raises NotImplementedError for them and never creates the context), which is
-    why this only shows up on datacentre GPUs -- exactly the ones people rent.
-
-    Best-effort: the import path is tokamax-internal, so a version without it
-    must not break inference.
-    """
-    try:
-      from tokamax._src.ops import op as _tokamax_op
-
-      _tokamax_op.get_autotuning_cache_overlay_state()
-    except Exception:  # pylint: disable=broad-except
-      pass
+  # _preinit_tokamax_context MOVED TO platform.preinit_tokamax_context: the
+  # same retrace bites anything that builds a model in-process, not just this
+  # script.
+  _preinit_tokamax_context = staticmethod(_platform.preinit_tokamax_context)
 
   def live_model(self):
     """Staged, frame-by-frame fold. See alphafold3.model.staged.

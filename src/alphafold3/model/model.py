@@ -579,6 +579,14 @@ class Model(hk.Module):
     num_recycles: int = 10
     return_embeddings: bool = False
     return_distogram: bool = False
+    # DESIGN: differentiate the LAST trunk pass only, AF2's recycle_mode='last'.
+    # Off is AF3's own behaviour -- the recycle loop has no stop_gradient on
+    # `prev`, so a gradient flows through every pass. Measured on the AF2 side,
+    # where the same mistake cost 3x the interface quality (plddt 0.598->0.760,
+    # iptm 0.167->0.522) AND 1.6x the runtime, so for design this wants to be
+    # True. It was read by getattr and never declared here, which made it
+    # invisible to anyone reading the config.
+    recycle_last_only: bool = False
 
   def __init__(self, config: Config, name: str = 'diffuser'):
     super().__init__(name=name)
@@ -938,7 +946,7 @@ class Model(hk.Module):
       # `num_iter > 1` is a Python bool only while the count is static, which is
       # exactly when this branch applies: recycle_last_only exists for design,
       # and design does not pass an override.
-      if (getattr(self.config, 'recycle_last_only', False)
+      if (self.config.recycle_last_only
           and num_trunk_passes_override is None and num_iter > 1):
         embeddings, key = hk.fori_loop(0, num_iter - 1, recycle_body,
                                        (embeddings, key))
