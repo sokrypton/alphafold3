@@ -93,7 +93,7 @@ class AF2ModelRunner:
     return self._runner.model_params
 
   def forward(self, batch, *, soft_seq=None, design_mask=None, key=None,
-              opt=None, model_params=None):
+              opt=None, model_params=None, on_recycle=None):
     """batch (+ an optional soft sequence) -> AF2 outputs. DIFFERENTIABLE.
 
     `soft_seq` is a distribution over the 20 standard amino acids, shaped
@@ -161,7 +161,8 @@ class AF2ModelRunner:
     if key is None:
       key = jax.random.PRNGKey(0)
     return self._runner.apply(
-        params, {**inputs, 'opt': full_opt}, key, model_params=model_params)
+        params, {**inputs, 'opt': full_opt}, key, model_params=model_params,
+        on_recycle=on_recycle)
 
   @property
   def num_param_sets(self) -> int:
@@ -175,7 +176,8 @@ class AF2ModelRunner:
     """
     return len(self.model_params)
 
-  def run_inference(self, featurised_example, rng_key, model_index: int = 0):
+  def run_inference(self, featurised_example, rng_key, model_index: int = 0,
+                    on_recycle=None):
     """One forward pass, from the SAME featurised batch an AF3 model gets.
 
     `model_index` picks which of the five parameter sets to use. Each set is a
@@ -189,7 +191,11 @@ class AF2ModelRunner:
 
     batch = feat_batch.Batch.from_data_dict(featurised_example)
     mp = self.model_params[model_index % len(self.model_params)]
-    outputs = self.forward(batch, key=rng_key, model_params=mp)
+    # on_recycle, if given, is called with (pass_index, that pass's outputs)
+    # -- AF2's answer to watching a fold, there being no diffusion to
+    # animate. See AF2Runner.apply.
+    outputs = self.forward(batch, key=rng_key, model_params=mp,
+                           on_recycle=on_recycle)
     result = jax.tree.map(np.asarray, dict(outputs))
     names = getattr(self._runner, 'model_names', None)
     tag = (names[model_index % len(names)] if names else self.model_name)

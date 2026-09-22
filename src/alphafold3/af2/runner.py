@@ -559,7 +559,7 @@ class AF2Runner:
 
   # -------------------------------------------------------------------- apply
 
-  def apply(self, params, inputs, key=None, model_params=None):
+  def apply(self, params, inputs, key=None, model_params=None, on_recycle=None):
     """parameters -> outputs; pure and differentiable
 
     Recycling runs here rather than in the design loop. num_recycle extra passes
@@ -596,6 +596,14 @@ class AF2Runner:
     for _i in range(n):
       key, sub = jax.random.split(key)
       out, _full, _seq = body(params, inputs, sub)
+      # 🔴 A RECYCLE IS AF2's ONLY INTERMEDIATE STRUCTURE, and the loop it
+      # lives in is Python -- RunModel.apply is jitted over ONE pass, so a
+      # callback here costs no extra compile and no restructuring. It is what
+      # the diffusion steps are for AF3: the thing a live view can show while
+      # a fold is still running. `None` by default, so every existing caller
+      # is unchanged.
+      if on_recycle is not None:
+        on_recycle(_i, out)
       prev = out['prev']
       if not (self.recycle_remat or self.recycle_backprop):
         prev = jax.lax.stop_gradient(prev)
@@ -603,6 +611,11 @@ class AF2Runner:
 
     key, sub = jax.random.split(key)
     outputs, full, seq = one_pass(params, inputs, sub)
+    # The last pass is a recycle too as far as a watcher is concerned: it is
+    # the one whose structure is kept, so a view that skipped it would stop
+    # one frame short of the answer.
+    if on_recycle is not None:
+      on_recycle(n, outputs)
     outputs['seq'] = seq
     outputs['inputs'] = full
     return outputs
