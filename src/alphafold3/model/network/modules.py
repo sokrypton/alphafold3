@@ -25,6 +25,7 @@ from typing import Literal
 from alphafold3.common import base_config
 from alphafold3.model import model_config
 from alphafold3.model.components import haiku_modules as hm
+from alphafold3.model.components import utils
 from alphafold3.model.components import mapping
 from . import diffusion_transformer
 import haiku as hk
@@ -137,6 +138,29 @@ class TransitionBlock(hk.Module):
     return out
 
 
+def _msa_pair_logits(pair_act, num_head):
+  """`Linear(LayerNorm(pair_act))` in float32, the norm folded into the weights.
+
+  The logits reach tens, where half-precision rounding shifts the softmax weights;
+  folding keeps the pair in its own dtype. Same parameters under the same names.
+  """
+  channels = pair_act.shape[-1]
+  with hk.name_scope('pair_norm'):
+    scale = hk.get_parameter('scale', (channels,), jnp.float32, init=jnp.ones)
+    offset = hk.get_parameter('offset', (channels,), jnp.float32, init=jnp.zeros)
+  with hk.name_scope('pair_logits'):
+    weights = hk.get_parameter(
+        'weights', (channels, num_head), jnp.float32,
+        hm.get_initializer_scale('linear', (channels,)))
+  x = pair_act.astype(jnp.float32)
+  mean = jnp.mean(x, axis=-1, keepdims=True)
+  var = jnp.mean(jnp.square(x - mean), axis=-1, keepdims=True)
+  folded = scale[:, None] * weights
+  logits = jnp.einsum('...c,ch->...h', x, folded, precision='highest')
+  logits = (logits - mean * jnp.sum(folded, axis=0)) * jax.lax.rsqrt(var + 1e-5)
+  return logits + offset @ weights
+
+
 class MSAAttention(hk.Module):
   """MSA Attention."""
 
@@ -158,10 +182,7 @@ class MSAAttention(hk.Module):
   def __call__(self, act, mask, pair_act, pair_mask=None):
     chai1 = self.global_config.model == 'chai1'
     act = hm.LayerNorm(name='act_norm')(act)
-    pair_act = hm.LayerNorm(name='pair_norm')(pair_act)
-    logits = hm.Linear(
-        self.config.num_head, use_bias=False, name='pair_logits'
-    )(pair_act)
+    logits = _msa_pair_logits(pair_act, self.config.num_head)
     logits = jnp.transpose(logits, [2, 0, 1])
     if chai1 and pair_mask is not None:
       # chai masks these logits with the TOKEN PAIR mask (fill -10000), where we
@@ -169,8 +190,9 @@ class MSAAttention(hk.Module):
       # rather than inferred -- trunk forward_256 node 10767.
       logits = jnp.where(pair_mask[None].astype(jnp.bool_), logits, -10000.0)
     else:
-      logits += 1e9 * (jnp.max(mask, axis=0) - 1.0)
-    weights = jax.nn.softmax(logits, axis=-1)
+      logits += utils.mask_bias(
+          lambda m: 1e9 * (jnp.max(m, axis=0) - 1.0), mask)
+    weights = jax.nn.softmax(logits, axis=-1).astype(act.dtype)
     num_channels = act.shape[-1]
     value_dim = self.config.value_dim or num_channels // self.config.num_head
     v = hm.Linear(
@@ -597,6 +619,9 @@ class OuterProductMean(hk.Module):
     # two release lines disagree about it.
     bias_after_norm = (
         self.global_config.model in model_config.OPM_BIAS_AFTER_NORM)
+    if act.dtype == jnp.float16:
+      return self._float16_mean(left_act, right_act, output_w, output_b, mask,
+                                bias_after_norm)
 
     def compute_chunk(left_act):
       # Make sure that the 'b' dimension is the most minor batch like dimension
@@ -633,6 +658,32 @@ class OuterProductMean(hk.Module):
       return act / jnp.maximum(norm, 1.0)
     epsilon = 1e-3
     return act / (epsilon + norm)
+
+  def _float16_mean(self, left_act, right_act, output_w, output_b, mask,
+                    bias_after_norm):
+    """The mean with each row pre-divided, so its float16 sum stays in range."""
+    ones = mask.astype(jnp.float32)
+    norm = jnp.einsum('abc,adc->bdc', ones, ones)
+    if bias_after_norm or self.global_config.model in model_config.CLAMPED_OPM_NORM:
+      denom = jnp.maximum(norm, 1.0)
+    else:
+      denom = 1e-3 + norm
+    rows = jnp.maximum(jnp.max(norm), 1.0)
+    dtype = left_act.dtype
+    act = mapping.inference_subbatch(
+        lambda left: jnp.einsum('abc,ade,cef->bdf', left, right_act, output_w),
+        self.config.chunk_size,
+        batched_args=[left_act * (1.0 / rows).astype(dtype)],
+        nonbatched_args=[],
+        input_subbatch_dim=1,
+        output_subbatch_dim=0,
+    )
+    # a pair with no rows has act 0 and a 1e-3 denominator: keep the ratio finite
+    ratio = jnp.minimum(rows / denom, jnp.finfo(dtype).max / 2).astype(dtype)
+    act = act * ratio
+    if bias_after_norm:
+      return act + output_b
+    return act + output_b * (1.0 / denom).astype(dtype)
 
   @hk.transparent
   def _chai_grouped(self, act, mask):

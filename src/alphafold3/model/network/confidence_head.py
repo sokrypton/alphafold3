@@ -338,11 +338,7 @@ class ConfidenceHead(hk.Module):
     Returns:
       Dictionary of results.
     """
-    dtype = (
-        jnp.bfloat16
-        if self.global_config.bfloat16 in ('all', 'intermediate')
-        else jnp.float32
-    )
+    dtype = utils.compute_dtype(self.global_config)
     with utils.bfloat16_context():
       seq_mask_cast = seq_mask.astype(dtype)
       pair_mask = seq_mask_cast[:, None] * seq_mask_cast[None, :]

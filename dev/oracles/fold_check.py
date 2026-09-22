@@ -128,6 +128,10 @@ def _fold_setup(model_name, seq, model_dir=None, templates=None, seed=0,
   # bfloat16, and that is invisible next to a gate that was measured in fp32.
   if os.environ.get('BF16'):
     cfg.global_config.bfloat16 = os.environ['BF16']
+  # HALF_DTYPE says which half precision `bfloat16` means. float16 is what a
+  # pre-Ampere card runs, having no bfloat16 units, and nothing else reaches it.
+  if os.environ.get('HALF_DTYPE'):
+    cfg.global_config.half_dtype = os.environ['HALF_DTYPE']
   # STEPS overrides the sampler's step count. Needed to compare like with like:
   # esmfold2_native_variants.py runs native at num_sampling_steps=200 whatever
   # the release's config says, so a fold at the config's own count is not the

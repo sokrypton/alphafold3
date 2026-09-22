@@ -25,6 +25,7 @@ from alphafold3.common import base_config
 from alphafold3.model import model_config
 from alphafold3.model.atom_layout import atom_layout
 from alphafold3.model.components import haiku_modules as hm
+from alphafold3.model.components import utils
 import haiku as hk
 import jax
 from jax import numpy as jnp
@@ -313,7 +314,7 @@ def self_attention(
   """
   assert len(mask.shape) == len(x.shape) - 1, f'{mask.shape}, {x.shape}'
   # bias: ... x heads (1) x query (1) x key
-  bias = (1e9 * (mask - 1.0))[..., None, None, :]
+  bias = utils.mask_bias(lambda m: 1e9 * (m - 1.0), mask)[..., None, None, :]
 
   x = adaptive_layernorm(x, single_cond, name=name, global_config=global_config)
 
@@ -647,15 +648,15 @@ def cross_attention(
     # rule. Note AF3's own token-level `self_attention` already masks keys alone
     # (`1e9 * (mask - 1)`); the AND form appears ONLY here, where the sliding
     # guarantee was what made it safe.
-    bias = -1e9 * (
-        (1.0 - mask_q)[..., None, :, None] + (1.0 - mask_k)[..., None, None, :]
-    )
+    bias = utils.mask_bias(lambda q, k: -1e9 * (
+        (1.0 - q)[..., None, :, None] + (1.0 - k)[..., None, None, :]
+    ), mask_q, mask_k)
   else:
-    bias = (
+    bias = utils.mask_bias(lambda q, k: (
         1e9
-        * (mask_q - 1.0)[..., None, :, None]
-        * (mask_k - 1.0)[..., None, None, :]
-    )
+        * (q - 1.0)[..., None, :, None]
+        * (k - 1.0)[..., None, None, :]
+    ), mask_q, mask_k)
 
   if pair_mask is not None:
     # chai-1 restricts ATOM attention to atoms of the same token: its

@@ -771,9 +771,7 @@ class Evoformer(hk.Module):
     num_residues = target_feat.shape[0]
     assert batch.token_features.aatype.shape == (num_residues,)
 
-    dtype = (jnp.bfloat16
-             if self.global_config.bfloat16 in ('all', 'intermediate')
-             else jnp.float32)
+    dtype = utils.compute_dtype(self.global_config)
 
     with utils.bfloat16_context():
       # OpenDDE derives the pair init from s_init (single_activations) instead of

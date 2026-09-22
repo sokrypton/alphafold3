@@ -43,11 +43,23 @@ def remove_invalidly_typed_feats(
   }
 
 
+def compute_dtype(global_config, sampler: bool = False):
+  """The dtype the model computes in, from its `bfloat16` and `half_dtype`.
+
+  `intermediate` is the trunk and the confidence head only, so the sampler asks
+  for itself and takes float32 there.
+  """
+  narrow = ('all',) if sampler else ('all', 'intermediate')
+  if global_config.bfloat16 not in narrow:
+    return jnp.float32
+  return jnp.float16 if global_config.half_dtype == 'float16' else jnp.bfloat16
+
+
 def bfloat16_getter(next_getter, value, context):
-  """Ensures that a bfloat16 parameter is provided by casting if necessary."""
-  if context.original_dtype == jnp.bfloat16:
-    if value.dtype != jnp.bfloat16:
-      value = value.astype(jnp.bfloat16)
+  """Ensures that a half-precision parameter is provided by casting if necessary."""
+  if context.original_dtype in (jnp.bfloat16, jnp.float16):
+    if value.dtype != context.original_dtype:
+      value = value.astype(context.original_dtype)
   return next_getter(value)
 
 
@@ -93,3 +105,13 @@ def mask_mean(
           jnp.sum(mask, keepdims=keepdims, axis=axis) * broadcast_factor, eps
       )
   )
+
+
+def mask_bias(bias_fn, *masks):
+  """`bias_fn(*masks)`, computed in float32 when a mask is float16, where 1e9 is inf."""
+  if not any(m.dtype == jnp.float16 for m in masks):
+    return bias_fn(*masks)
+  dtype = jnp.result_type(*masks)
+  limit = jnp.finfo(dtype).max / 2
+  bias = bias_fn(*(m.astype(jnp.float32) for m in masks))
+  return jnp.clip(bias, -limit, limit).astype(dtype)
