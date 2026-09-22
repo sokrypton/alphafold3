@@ -9,6 +9,7 @@
 cd /home/ubuntu/alphafold3
 B=dev/bench
 OUT=$1; : > $OUT
+mkdir -p /home/ubuntu/alphafold3/dev/bench/out
 run() {  # model, hidden-file
   local log=/home/ubuntu/alphafold3/dev/bench/out/gradlm.$1.log
   ESMC_HIDDEN=$B/$2 PYTHONPATH=src:. timeout 1800 ~/venv/bin/python \
