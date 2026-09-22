@@ -153,7 +153,16 @@ def aa_bias(length, rm_aa=None, bias=None, positions=None):
   positions: bool array; restrict the bias to these positions (default: all).
   '''
   import numpy as np
-  from .pdb import AA1
+
+  # `from .pdb import AA1` -- what this said when the file arrived here, and it
+  # has never worked: there is no alphafold3.af2.pdb. The line is correct in the
+  # package it was copied FROM, where the relative import lands on a module that
+  # does exist, so the two files stayed byte-identical while only one of them
+  # ran. A relative import is not portable between packages even when the bytes
+  # are. AA1 is AF2's own restype order, which this package already ships.
+  from alphafold3.af2.common import residue_constants as _rc
+
+  AA1 = ''.join(_rc.restypes)   # 'ARNDCQEGHILKMFPSTWYV'
   out = np.zeros((length, len(AA1)), dtype=np.float32)
   row = np.zeros(len(AA1), dtype=np.float32)
   if rm_aa:
