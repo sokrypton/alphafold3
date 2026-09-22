@@ -38,7 +38,7 @@ jobs:
       run: sudo apt-get install -y hmmer
 
     - name: Install Python dependencies
-      run: uv sync --frozen --all-groups
+      run: uv sync --frozen --group dev --group runtime
 
     - name: Fetch components.cif
       run: |

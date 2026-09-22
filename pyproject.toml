@@ -35,11 +35,13 @@ gcsfs = [
 dev = [
     "pytest>=6.0",
 ]
+cuda12 = [
+    "jax[cuda12]==0.10.2; sys_platform != 'darwin'",
+]
 runtime = [
     "absl-py>=2.3.1",
     "dm-haiku==0.0.17",
     "jax==0.10.2",
-    "jax[cuda12]==0.10.2; sys_platform != 'darwin'",
     "rdkit==2025.9.4",
     "tokamax==0.0.12",
 ]
