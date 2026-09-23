@@ -216,6 +216,34 @@ def token_profile(profile, token_index, design_mask):
 #   'zero'  no MSA profile information.
 # Read at trace time, so switching modes recompiles -- an experiment knob, not a
 # per-step option. See colabdesign2/af2/runner.py update_seq (the pssm_hard site).
+# ColabDesign2: does the designed sequence reach the model through the MSA and
+# profile channels WITH A GRADIENT, or only through the target-feature one?
+#
+# Ours says yes on all three paths. BoltzDesign1 says no: it writes the current
+# sequence into batch['msa'] and batch['profile'] with `.detach()`
+# (boltzdesign_utils.py:797-798), so its optimiser only ever sees the
+# target-feature route. Which is better is an empirical question -- an MSA
+# channel that is a softmax over 20 classes is an odd object for a trunk
+# trained on real alignments -- so it is a switch, not a rewrite.
+MSA_GRADIENT = True
+
+
+def set_msa_gradient(enabled: bool) -> bool:
+  '''let (or stop) the designed sequence carrying a gradient through the MSA.
+
+  Returns the previous setting, so a caller can restore it.
+  '''
+  global MSA_GRADIENT
+  previous, MSA_GRADIENT = MSA_GRADIENT, bool(enabled)
+  return previous
+
+
+def _msa_blend(one_hot, soft_seq, design_mask):
+  '''blend_soft, with the gradient cut when MSA_GRADIENT is off.'''
+  out = blend_soft(one_hot, soft_seq, design_mask)
+  return out if MSA_GRADIENT else jax.lax.stop_gradient(out)
+
+
 PROFILE_MODE = 'soft'
 
 PROFILE_MODES = ('soft', 'hard', 'frozen', 'unk', 'gap', 'zero')
@@ -274,7 +302,7 @@ def create_msa_feat(msa: features.MSA, soft_seq=None,
   msa_1hot = jax.nn.one_hot(
       rows, residue_names.POLYMER_TYPES_NUM_WITH_UNKNOWN_AND_GAP + 1
   )
-  msa_1hot = blend_soft(msa_1hot, soft_seq, design_mask)
+  msa_1hot = _msa_blend(msa_1hot, soft_seq, design_mask)
   deletion_matrix = msa.deletion_matrix
   has_deletion = jnp.clip(deletion_matrix, 0.0, 1.0)[..., None]
   deletion_value = (jnp.arctan(deletion_matrix / 3.0) * (2.0 / jnp.pi))[
@@ -361,9 +389,9 @@ def create_target_feat(
   # 'hard' == pssm_hard=True, 'frozen' = ignore the sequence, 'zero' = no info.
   profile = batch.msa.profile
   if PROFILE_MODE == 'soft':
-    profile = blend_soft(profile, soft_seq, design_mask)
+    profile = _msa_blend(profile, soft_seq, design_mask)
   elif PROFILE_MODE == 'hard':
-    profile = blend_soft(profile, hard_seq(soft_seq), design_mask)
+    profile = _msa_blend(profile, hard_seq(soft_seq), design_mask)
   elif PROFILE_MODE == 'zero':
     profile = jnp.zeros_like(profile)
   elif PROFILE_MODE in ('unk', 'gap') and soft_seq is not None:
