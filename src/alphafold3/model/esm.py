@@ -69,10 +69,21 @@ BOS, PAD, EOS, MASK = 0, 1, 2, 32
 VOCABS = {'esm2': ESM2_VOCAB, 'esmc': ESMC_VOCAB}
 
 
-def sequence_ids(seq, family='esmc'):
-  """One-letter sequence -> residue token ids (no BOS/EOS)."""
+def sequence_ids(seq, family='esmc', mask_x=False):
+  """One-letter sequence -> residue token ids (no BOS/EOS).
+
+  mask_x sends 'X' to <mask> rather than to the X token. The two are NOT the
+  same input: X is a residue the model has seen in real sequences (an unknown
+  or non-standard one, usually in a resolved but unassigned position), while
+  <mask> is the token the model was TRAINED to fill in, so its embedding is the
+  LM's prior over what belongs there. Protein-Hunter uses it for exactly this
+  (chai_ph/predict.py:1396, `replace_x_with_mask`): a binder whose sequence is
+  not yet decided is a masked chain, not a chain of unknown residues.
+  """
   table = {tok: i for i, tok in enumerate(VOCABS[family])}
   unk = table['<unk>']
+  if mask_x:
+    table = {**table, 'X': MASK}
   return np.array([table.get(c.upper(), unk) for c in seq], np.int64)
 
 
@@ -592,7 +603,8 @@ def _dims_from(p, family):
                               if family == 'esmc' else 1.0))
 
 
-def embed(sequences, model_dir=None, family='esmc', tower=None):
+def embed(sequences, model_dir=None, family='esmc', tower=None,
+          mask_x=False):
   """-> the array the consumer wants, BOS/EOS stripped.
 
   ESM-C: (L, n_layers + 1, d_model), every state, for ESMFold2's layer mix.
@@ -606,7 +618,7 @@ def embed(sequences, model_dir=None, family='esmc', tower=None):
   p, dims = load(model_dir, family, tower)
   rows = []
   for seq in sequences:
-    ids = lm_input_ids(sequence_ids(seq, family))
+    ids = lm_input_ids(sequence_ids(seq, family, mask_x=mask_x))
     out = np.asarray(forward(ids, p, dims))
     if family == 'esmc':
       rows.append(out[:, 1:-1, :].transpose(1, 0, 2))

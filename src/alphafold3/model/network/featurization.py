@@ -225,23 +225,36 @@ def token_profile(profile, token_index, design_mask):
 # target-feature route. Which is better is an empirical question -- an MSA
 # channel that is a softmax over 20 classes is an odd object for a trunk
 # trained on real alignments -- so it is a switch, not a rewrite.
-MSA_GRADIENT = True
+# 'both' (ours), 'none' (BoltzDesign's), or ONE of the two channels, because
+# they are different objects: the MSA one-hot is a row of an alignment the
+# trunk attends over, while the profile is a per-position frequency vector.
+# Measured (design, 3 seeds, PD1): boltz2 0.935 attached against 0.914
+# detached, so the extra paths help slightly rather than hurting.
+MSA_GRADIENT = 'both'
+MSA_GRADIENT_MODES = ('both', 'msa', 'profile', 'none')
 
 
-def set_msa_gradient(enabled: bool) -> bool:
-  '''let (or stop) the designed sequence carrying a gradient through the MSA.
+def set_msa_gradient(enabled) -> str:
+  '''which channels the designed sequence carries a gradient through.
 
-  Returns the previous setting, so a caller can restore it.
+  True/False keep the original two-valued meaning. Returns the previous
+  setting, so a caller can restore it.
   '''
   global MSA_GRADIENT
-  previous, MSA_GRADIENT = MSA_GRADIENT, bool(enabled)
+  mode = {True: 'both', False: 'none'}.get(enabled, enabled)
+  if mode not in MSA_GRADIENT_MODES:
+    raise ValueError('msa gradient must be one of %s, got %r'
+                     % (', '.join(MSA_GRADIENT_MODES), enabled))
+  previous, MSA_GRADIENT = MSA_GRADIENT, mode
   return previous
 
 
-def _msa_blend(one_hot, soft_seq, design_mask):
-  '''blend_soft, with the gradient cut when MSA_GRADIENT is off.'''
+def _msa_blend(one_hot, soft_seq, design_mask, channel='msa'):
+  '''blend_soft, with the gradient cut on the channels that are switched off.'''
   out = blend_soft(one_hot, soft_seq, design_mask)
-  return out if MSA_GRADIENT else jax.lax.stop_gradient(out)
+  if MSA_GRADIENT in ('both', channel):
+    return out
+  return jax.lax.stop_gradient(out)
 
 
 PROFILE_MODE = 'soft'
@@ -302,7 +315,7 @@ def create_msa_feat(msa: features.MSA, soft_seq=None,
   msa_1hot = jax.nn.one_hot(
       rows, residue_names.POLYMER_TYPES_NUM_WITH_UNKNOWN_AND_GAP + 1
   )
-  msa_1hot = _msa_blend(msa_1hot, soft_seq, design_mask)
+  msa_1hot = _msa_blend(msa_1hot, soft_seq, design_mask, channel='msa')
   deletion_matrix = msa.deletion_matrix
   has_deletion = jnp.clip(deletion_matrix, 0.0, 1.0)[..., None]
   deletion_value = (jnp.arctan(deletion_matrix / 3.0) * (2.0 / jnp.pi))[
@@ -389,9 +402,10 @@ def create_target_feat(
   # 'hard' == pssm_hard=True, 'frozen' = ignore the sequence, 'zero' = no info.
   profile = batch.msa.profile
   if PROFILE_MODE == 'soft':
-    profile = _msa_blend(profile, soft_seq, design_mask)
+    profile = _msa_blend(profile, soft_seq, design_mask, channel='profile')
   elif PROFILE_MODE == 'hard':
-    profile = _msa_blend(profile, hard_seq(soft_seq), design_mask)
+    profile = _msa_blend(profile, hard_seq(soft_seq), design_mask,
+                         channel='profile')
   elif PROFILE_MODE == 'zero':
     profile = jnp.zeros_like(profile)
   elif PROFILE_MODE in ('unk', 'gap') and soft_seq is not None:
