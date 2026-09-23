@@ -600,7 +600,7 @@ class Model(hk.Module):
     # projection and two transition blocks over (num_tokens, num_tokens,
     # pair_channel), plus an (L, L, 139) relative encoding, were rebuilt for
     # every step of every sample: ~1000 times in a default fold.
-    pair_cond, atom_cond, pair_logits = self.diffusion_module(
+    pair_cond, atom_cond = self.diffusion_module(
         positions_noisy=None,        # unused on this path
         noise_level=jnp.zeros(()),   # unused by the pair half
         batch=batch,
@@ -616,7 +616,6 @@ class Model(hk.Module):
         use_conditioning=True,
         pair_cond=pair_cond,
         atom_cond=atom_cond,
-        pair_logits=pair_logits,
     )
 
     sample = diffusion_head.sample(

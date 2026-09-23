@@ -455,7 +455,6 @@ class DiffusionHead(hk.Module):
       use_conditioning: bool,
       pair_cond: jnp.ndarray | None = None,
       atom_cond: tuple | None = None,
-      pair_logits: jnp.ndarray | None = None,
       conditioning_only: bool = False,
   ) -> jnp.ndarray:
 
@@ -487,23 +486,7 @@ class DiffusionHead(hk.Module):
             name='diffusion',
             conditioning_only=True,
         )
-        # The per-block pair logits are likewise position- and noise-independent,
-        # and go through the same module so they land on one set of parameters.
-        # Same dtype the sampler gives them per step, or the cache holds a
-        # different number than the block would have computed.
-        only_pair_logits = diffusion_transformer.Transformer(
-            self.config.transformer, self.global_config
-        )(
-            act=None,
-            mask=None,
-            single_cond=None,
-            pair_cond=jnp.asarray(
-                only_pair_cond,
-                dtype=utils.compute_dtype(self.global_config, sampler=True)),
-            extra_pair_bias=embeddings.get('structural_pair_attn_bias'),
-            precompute_pair_logits=True,
-        )
-        return only_pair_cond, atom_cond, only_pair_logits
+        return only_pair_cond, atom_cond
 
       # Get conditioning. The pair half is noise- and sample-independent, so
       # `sample` builds it once and hands it in; only the single half, which
@@ -583,7 +566,6 @@ class DiffusionHead(hk.Module):
           # OpenDDE threads the structural-token pair attention bias (from the
           # token expander) into the diffusion transformer too; None otherwise.
           extra_pair_bias=embeddings.get('structural_pair_attn_bias'),
-          pair_logits=pair_logits,
       )
       act = hm.LayerNorm(
           use_fast_variance=False,
