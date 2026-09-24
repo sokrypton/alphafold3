@@ -77,7 +77,54 @@ _DNA_TO_ID = {
 }
 
 
+def _lookup(char_map: dict[str, int]) -> np.ndarray:
+  table = np.full(256, -1, dtype=np.int32)
+  for char, idx in char_map.items():
+    table[ord(char)] = idx
+  return table
+
+
+_LOOKUPS = {}
+
+
 def extract_msa_features(
+    msa_sequences: Sequence[str], chain_poly_type: str
+) -> tuple[np.ndarray, np.ndarray]:
+  """`_extract_msa_features_loop` on whole arrays; it raises the same errors."""
+  char_map = {
+      mmcif_names.RNA_CHAIN: _RNA_TO_ID,
+      mmcif_names.DNA_CHAIN: _DNA_TO_ID,
+      mmcif_names.PROTEIN_CHAIN: _PROTEIN_TO_ID,
+  }.get(chain_poly_type)
+  if char_map is None or not msa_sequences:
+    return _extract_msa_features_loop(msa_sequences, chain_poly_type)
+  try:
+    codes = np.frombuffer(''.join(msa_sequences).encode('ascii'), dtype=np.uint8)
+  except UnicodeEncodeError:
+    return _extract_msa_features_loop(msa_sequences, chain_poly_type)
+  if chain_poly_type not in _LOOKUPS:
+    _LOOKUPS[chain_poly_type] = _lookup(char_map)
+  ids = _LOOKUPS[chain_poly_type][codes]
+  match = ids >= 0
+  lower = (codes >= ord('a')) & (codes <= ord('z'))
+  lengths = np.fromiter((len(s) for s in msa_sequences), dtype=np.int64, count=len(msa_sequences))
+  rows = np.repeat(np.arange(len(msa_sequences)), lengths)
+  per_row = np.bincount(rows[match], minlength=len(msa_sequences))
+  num_cols = int(per_row[0])
+  if (~match & ~lower).any() or (per_row != num_cols).any():
+    return _extract_msa_features_loop(msa_sequences, chain_poly_type)  # its errors
+  # each match's deletions are the characters since the previous match of its row
+  positions = np.flatnonzero(match)
+  previous = np.concatenate(([-1], positions[:-1]))
+  if num_cols:
+    previous[::num_cols] = np.concatenate(([0], np.cumsum(lengths)[:-1])) - 1  # row starts
+  shape = (len(msa_sequences), num_cols)
+  msa_arr = ids[positions].reshape(shape).astype(np.int32)
+  deletions_arr = (positions - previous - 1).reshape(shape).astype(np.int32)
+  return msa_arr, deletions_arr
+
+
+def _extract_msa_features_loop(
     msa_sequences: Sequence[str], chain_poly_type: str
 ) -> tuple[np.ndarray, np.ndarray]:
   """Extracts MSA features.

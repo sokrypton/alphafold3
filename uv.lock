@@ -124,6 +124,9 @@ gcsfs = [
 ]
 
 [package.dev-dependencies]
+cuda12 = [
+    { name = "jax", extra = ["cuda12"], marker = "sys_platform == 'linux'" },
+]
 dev = [
     { name = "pytest" },
 ]
@@ -131,7 +134,6 @@ runtime = [
     { name = "absl-py" },
     { name = "dm-haiku" },
     { name = "jax" },
-    { name = "jax", extra = ["cuda12"], marker = "sys_platform == 'linux'" },
     { name = "rdkit" },
     { name = "tokamax" },
 ]
@@ -149,12 +151,12 @@ requires-dist = [
 provides-extras = ["gcsfs"]
 
 [package.metadata.requires-dev]
+cuda12 = [{ name = "jax", extras = ["cuda12"], marker = "sys_platform != 'darwin'", specifier = "==0.10.2" }]
 dev = [{ name = "pytest", specifier = ">=6.0" }]
 runtime = [
     { name = "absl-py", specifier = ">=2.3.1" },
     { name = "dm-haiku", specifier = "==0.0.17" },
     { name = "jax", specifier = "==0.10.2" },
-    { name = "jax", extras = ["cuda12"], marker = "sys_platform != 'darwin'", specifier = "==0.10.2" },
     { name = "rdkit", specifier = "==2025.9.4" },
     { name = "tokamax", specifier = "==0.0.12" },
 ]

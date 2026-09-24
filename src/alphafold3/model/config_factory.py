@@ -61,6 +61,7 @@ def make_model_config(
     return_distogram: bool = False,
     model_name: str = 'alphafold3',
     num_msa: int | None = None,
+    bfloat16: str | None = None,
 ) -> model.Model.Config:
   """Returns a model config with some defaults overridden.
 
@@ -77,7 +78,9 @@ def make_model_config(
   config.num_recycles = num_recycles
   config.return_embeddings = return_embeddings
   config.return_distogram = return_distogram
-  config.global_config.bfloat16 = bfloat16_default()
+  # an explicit precision wins over the device-derived default (main added
+  # this alongside the float16 mode; the CLI passes --bfloat16 through)
+  config.global_config.bfloat16 = bfloat16 or bfloat16_default()
   model_registry.get(model_name).configure(config)
   # AFTER configure(), NOT BEFORE. The model spec sets its own sampler
   # constants -- ESMFold2's 15 steps, AF3's 200 -- so an assignment made before

@@ -553,8 +553,7 @@ class DiffusionHead(hk.Module):
       # 24 token blocks and the atom encoder/decoder, and the residual stream
       # they accumulate on. `precision='highest'` projections above are
       # unaffected -- they pin their own precision.
-      dtype = (jnp.bfloat16 if self.global_config.bfloat16 == 'all'
-               else jnp.float32)
+      dtype = utils.compute_dtype(self.global_config, sampler=True)
       act = jnp.asarray(act, dtype=dtype)
       trunk_single_cond = jnp.asarray(trunk_single_cond, dtype=dtype)
       trunk_pair_cond = jnp.asarray(trunk_pair_cond, dtype=dtype)

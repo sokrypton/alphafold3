@@ -531,6 +531,26 @@ def assign_atom_names_from_graph(
   return mol
 
 
+# conformers embedded ahead by prefetch_conformers, by (name, seed, max_iterations)
+_PREFETCHED = {}
+
+
+def prefetch_conformers(jobs, max_workers: int) -> None:
+  """Embeds (mol, seed, max_iterations, name) jobs on threads; RDKit drops the GIL."""
+  import concurrent.futures
+
+  def embed(job):
+    mol, seed, max_iterations, name = job
+    return (name, seed, max_iterations), _embed(mol, seed, max_iterations, name)
+
+  with concurrent.futures.ThreadPoolExecutor(max_workers) as pool:
+    _PREFETCHED.update(pool.map(embed, jobs))
+
+
+def clear_prefetched_conformers() -> None:
+  _PREFETCHED.clear()
+
+
 def get_random_conformer(
     mol: rd_chem.Mol,
     random_seed: int,
@@ -538,6 +558,16 @@ def get_random_conformer(
     logging_name: str,
 ) -> rd_chem.Conformer | None:
   """Stochastic conformer search method using V3 ETK."""
+  key = (logging_name, random_seed, max_iterations)
+  if key in _PREFETCHED:
+    conformer = _PREFETCHED[key]
+    if conformer is None:
+      logging.warning('Failed to generate conformer for: %s', logging_name)
+    return conformer
+  return _embed(mol, random_seed, max_iterations, logging_name, warn=True)
+
+
+def _embed(mol, random_seed, max_iterations, logging_name, warn=False):
   params = rd_all_chem.ETKDGv3()
   params.randomSeed = random_seed
   if max_iterations is not None:  # Override default value.
@@ -547,6 +577,7 @@ def get_random_conformer(
     conformer_id = rd_all_chem.EmbedMolecule(mol_copy, params)
     conformer = mol_copy.GetConformer(conformer_id)
   except ValueError:
-    logging.warning('Failed to generate conformer for: %s', logging_name)
+    if warn:
+      logging.warning('Failed to generate conformer for: %s', logging_name)
     conformer = None
   return conformer

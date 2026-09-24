@@ -202,13 +202,14 @@ class DataPipelineTest(parameterized.TestCase):
 
   def test_all_examples_are_valid(self):
     examples_dir = testing_data.Data(resources.ROOT / '../../examples').path()
-    for filename in sorted(os.listdir(examples_dir)):
-      with open(os.path.join(examples_dir, filename), 'rt') as f:
-        with self.subTest(filename):
+    for path in sorted(pathlib.Path(examples_dir).rglob('*.json')):
+      with open(path, 'rt') as f:
+        with self.subTest(path.name):
           folding_input.Input.from_json(f.read())
 
   def test_config(self):
-    model_config = run_alphafold.make_model_config()
+    # pin bfloat16 for test stability
+    model_config = run_alphafold.make_model_config(bfloat16='all')
     model_config_as_str = json.dumps(
         model_config.as_dict(), sort_keys=True, indent=2
     )

@@ -24,6 +24,7 @@ import gzip
 import pickle
 import sys
 
+from alphafold3.constants import chemical_components
 from alphafold3.cpp import cif_dict
 import tqdm
 
@@ -53,6 +54,7 @@ def main(argv: Sequence[str]) -> None:
   print(f'Writing {output_file}', flush=True)
   with open(output_file, 'wb') as f:
     pickle.dump(result, f, protocol=pickle.HIGHEST_PROTOCOL)
+  chemical_components.write_ccd_index(result, output_file)
   print('Done', flush=True)
 
 if __name__ == '__main__':

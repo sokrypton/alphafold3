@@ -1011,6 +1011,7 @@ class GlobalConfig(base_config.BaseConfig):
   # [N, N, 128] pair representation's activation memory on the card with the
   # least to spare.)
   bfloat16: Literal['all', 'none', 'intermediate'] = 'all'
+  half_dtype: Literal['bfloat16', 'float16'] = 'bfloat16'
   final_init: Literal['zeros', 'linear'] = 'zeros'
   pair_attention_chunk_size: Sequence[_Shape2DType] = ((1536, 128), (None, 32))
   pair_transition_shard_spec: Sequence[_Shape2DType] = (
