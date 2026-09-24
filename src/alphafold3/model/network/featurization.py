@@ -154,6 +154,30 @@ def blend_soft(one_hot: jax.Array, soft_seq, design_mask=None) -> jax.Array:
   return jnp.where(design_mask[..., None], soft, one_hot)
 
 
+def blend_profile(profile, soft_seq, design_mask):
+  """The profile channel, updated with the designed sequence per PROFILE_MODE.
+
+  `create_target_feat` does this for the AF3 path; the boltz2 and chai-1
+  branches of model.py read `batch.msa.profile` directly and so were handed the
+  PLACEHOLDER's profile for the whole of a design -- the same confidently wrong
+  signal PROFILE_MODE exists to remove. This is that logic, callable from a
+  model branch.
+  """
+  if soft_seq is None:
+    return profile
+  if PROFILE_MODE == 'soft':
+    return _msa_blend(profile, soft_seq, design_mask, channel='profile')
+  if PROFILE_MODE == 'hard':
+    return _msa_blend(profile, hard_seq(soft_seq), design_mask,
+                      channel='profile')
+  if PROFILE_MODE == 'zero':
+    return jnp.zeros_like(profile)
+  if PROFILE_MODE in ('unk', 'gap'):
+    idx = _PROFILE_UNK_INDEX if PROFILE_MODE == 'unk' else _PROFILE_GAP_INDEX
+    return token_profile(profile, idx, design_mask)
+  return profile                       # 'frozen'
+
+
 def hard_seq(soft_seq):
   """straight-through one-hot(argmax) of a soft distribution, or None.
 

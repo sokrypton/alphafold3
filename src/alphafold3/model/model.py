@@ -228,7 +228,16 @@ def create_target_feat_embedding(
       n_restype = residue_names.POLYMER_TYPES_NUM_WITH_UNKNOWN_AND_GAP
       res_oh = jax.nn.one_hot(batch.token_features.aatype, n_restype)
       res_oh = featurization.blend_soft(res_oh, soft_seq, design_mask).astype(dtype)
-      profile = batch.msa.profile.astype(dtype)
+      # THE PROFILE IS A SEQUENCE FEATURE TOO. Read raw it is the profile of
+      # whatever placeholder the batch was built from -- poly-alanine, in
+      # design -- while res_type above moves with soft_seq: the trunk is then
+      # told two different sequences, which is AF3's own PROFILE_MODE problem
+      # (featurization.py, 'frozen' == exactly this) and AF2's pssm_hard one.
+      # Measured before the fix: boltz2's profile channel contributed EXACTLY
+      # zero design gradient -- `both` and `msa`-only agreed to the last digit
+      # over six seeds, as did `none` and `profile`-only.
+      profile = featurization.blend_profile(
+          batch.msa.profile, soft_seq, design_mask).astype(dtype)
       deletion = batch.msa.deletion_mean[..., None].astype(dtype)
       s_inputs = enc.token_act.astype(dtype)
       s_inputs += hm.Linear(config.seq_channel, use_bias=False,
@@ -307,7 +316,8 @@ def create_target_feat_embedding(
       token_feats += hm.Linear(
           config.seq_channel, use_bias=False,
           name='chai1_msa_profile_embedding')(
-              jnp.concatenate([batch.msa.profile,
+              jnp.concatenate([featurization.blend_profile(
+                                   batch.msa.profile, soft_seq, design_mask),
                                batch.msa.deletion_mean[..., None]],
                               axis=-1).astype(dtype))
       esm = batch.token_features.esm_embeddings
