@@ -265,3 +265,36 @@ class RegistryTest(parameterized.TestCase):
 
 if __name__ == '__main__':
   absltest.main()
+
+
+def test_the_lm_tier_pair_now_carry_a_trained_confidence_head():
+  """Synthyra released heads for ESMFold2-300/-600 on 2026-09-25.
+
+  Three exceptions have to move together, and they are keyed on what the
+  CHECKPOINT has: the pair leave NO_CONFIDENCE_HEAD, and enter NO_PDE_HEAD,
+  NO_RESOLVED_HEAD and NO_HEAD_NORM['...'] = ('pae_logits_ln',), because their
+  93 confidence tensors carry pae_head and plddt_ln but no pde_head, no
+  resolved_weight and no pae_ln. Getting one of those wrong builds a head from
+  random init and emits a number that looks like a prediction.
+  """
+  from alphafold3.model import model_config
+
+  for m in ('esmfold2_lm600m', 'esmfold2_lm300m'):
+    assert m not in model_config.NO_CONFIDENCE_HEAD
+    assert m in model_config.NO_PDE_HEAD
+    assert m in model_config.NO_RESOLVED_HEAD
+    assert model_config.NO_HEAD_NORM.get(m) == ('pae_logits_ln',)
+
+
+def test_the_lm_tier_pair_are_served_from_the_repos_that_have_the_head():
+  """biohub's step1500k checkpoints have no confidence head; Synthyra's do.
+
+  The folding weights are bit-identical between them (820 tensors, verified),
+  so this is the only thing that decides whether a fold reports pLDDT.
+  """
+  import sys
+  sys.path.insert(0, '.')
+  from converters import sources
+
+  assert sources.SOURCES['esmfold2_lm600m']['repo'] == 'Synthyra/ESMFold2-600'
+  assert sources.SOURCES['esmfold2_lm300m']['repo'] == 'Synthyra/ESMFold2-300'

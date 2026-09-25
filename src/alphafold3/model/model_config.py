@@ -123,17 +123,23 @@ ESMFOLD2_EXPERIMENTAL = tuple(m for m in ESMFOLD2_FAMILY
 # parameters at random init and emits a prediction that looks like a prediction
 # and is noise -- which is what happened to chai1's experimentally-resolved.
 #
-# NO_PDE_HEAD is gone: its only members were the ESMFold2-Experimental releases
-# (dropped 2026-09-09) plus the lm-tier pair, and the lm pair ship NO confidence
-# head at all (NO_CONFIDENCE_HEAD), so nothing could reach it.
-NO_RESOLVED_HEAD = ('chai1',)
+# NO_PDE_HEAD came back on 2026-09-25. It was retired when its last members lost
+# their confidence heads; Synthyra then trained heads for the lm-tier pair
+# (ESMFold2-300 / -600, 780 updates on a frozen backbone) and those heads have
+# pae_head but NO pde_head, no resolved_weight and no pae_ln -- 93 confidence
+# tensors, the shape the dropped Experimental releases had. So all three
+# exceptions below are earned by the checkpoint, not inherited from a name.
+NO_PDE_HEAD = ('esmfold2_lm600m', 'esmfold2_lm300m')
+NO_RESOLVED_HEAD = ('chai1', 'esmfold2_lm600m', 'esmfold2_lm300m')
 # ...and the LayerNorms they do not have. boltz2 has none before ANY head;
 # ESMFold2's experimental line keeps plddt_ln but not pae_ln, so this is keyed
 # by head, not by model.
 # boltz2 has none before ANY head. The ESMFold2 entry that used to live here
-# (`pae_logits_ln` for the experimental line) went with those releases: the
-# lm-tier survivors build no confidence head at all.
-NO_HEAD_NORM = {'boltz2': ('*',)}
+# (`pae_logits_ln` for the experimental line) is back with the lm-tier heads,
+# which keep plddt_ln and have no pae_ln -- keyed by head, not by model.
+NO_HEAD_NORM = {'boltz2': ('*',),
+                'esmfold2_lm600m': ('pae_logits_ln',),
+                'esmfold2_lm300m': ('pae_logits_ln',)}
 
 # Models whose confidence re-embedding bins the predicted distances with their
 # OWN trained boundaries rather than boltz2's constant 2..22 A over 63 edges.
@@ -146,10 +152,16 @@ LEARNED_CONFIDENCE_BINS = ESMFOLD2_FAMILY
 
 # Models that ship NO confidence head at all (`confidence_head.enabled: false`
 # in their config, and zero confidence_head tensors in the checkpoint).
-# ESMFold2's language-model-tier releases are structure-only. Building the head
-# anyway would leave ~100 parameters at random init and emit a pLDDT that looks
-# like a prediction and is noise -- the same trap as chai1's resolved head.
-NO_CONFIDENCE_HEAD = ('esmfold2_lm600m', 'esmfold2_lm300m')
+# Building the head anyway leaves ~100 parameters at random init and emits a
+# pLDDT that looks like a prediction and is noise -- the same trap as chai1's
+# resolved head.
+#
+# EMPTY since 2026-09-25: the lm-tier pair were its only members and Synthyra
+# released trained heads for both (ESMFold2-300 / -600, `confidence_head.enabled:
+# true`, 93 tensors each, separate weights and separate training runs). The
+# tuple stays because the branch it guards in model.py is the right shape for
+# the next head-less port, not because anything is in it today.
+NO_CONFIDENCE_HEAD = ()
 
 
 # Which LayerNorms carry a trained OFFSET, keyed by the norm's own name.

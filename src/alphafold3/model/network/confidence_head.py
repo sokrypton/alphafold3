@@ -471,11 +471,16 @@ class ConfidenceHead(hk.Module):
       # between the input prediction and the ground truth.
       pred_distance_error = None
       average_pred_distance_error = None
-      # NO_PDE_HEAD went with the ESMFold2-Experimental releases on 2026-09-09:
-      # the only other members were the lm-tier pair, which build no confidence
-      # head at all (NO_CONFIDENCE_HEAD), so the branch was unreachable.
+      # NO_PDE_HEAD is live again. It was retired on 2026-09-09 when its last
+      # members lost their confidence heads entirely; Synthyra's 2026-09-25
+      # release gives the lm-tier pair a TRAINED head that still has no
+      # pde_head tensor, so the branch it used to guard is reachable once more.
+      # Building it anyway would emit a PDE from random init -- a number that
+      # looks like a prediction and is noise.
       # Shape (num_res, num_res, num_bins)
-      if self.global_config.model == 'boltz2':
+      if self.global_config.model in model_config.NO_PDE_HEAD:
+        distance_logits = None
+      elif self.global_config.model == 'boltz2':
         # boltz2 has use_separate_heads=True: SEPARATE intra- and inter-chain heads for
         # both PDE and PAE, each hard-masked to its half of the pair matrix. On a
         # monomer the inter head never fires, which is why the intra head alone was
@@ -522,14 +527,15 @@ class ConfidenceHead(hk.Module):
           [bin_centers, bin_centers[-1:] + step], axis=0
       )
 
-      distance_probs = jax.nn.softmax(distance_logits, axis=-1)
+      if distance_logits is not None:
+        distance_probs = jax.nn.softmax(distance_logits, axis=-1)
 
-      pred_distance_error = (
-          jnp.sum(distance_probs * bin_centers, axis=-1) * pair_mask
-      )
-      average_pred_distance_error = jnp.sum(
-          pred_distance_error, axis=[-2, -1]
-      ) / jnp.sum(pair_mask, axis=[-2, -1])
+        pred_distance_error = (
+            jnp.sum(distance_probs * bin_centers, axis=-1) * pair_mask
+        )
+        average_pred_distance_error = jnp.sum(
+            pred_distance_error, axis=[-2, -1]
+        ) / jnp.sum(pair_mask, axis=[-2, -1])
 
       # Predicted aligned error
       pae_outputs = {}

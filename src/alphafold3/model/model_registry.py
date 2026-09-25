@@ -430,14 +430,19 @@ ESMFOLD2_VARIANTS = {
     # tier. (Its architecture came from the dropped ESMFold2-Experimental-Fast,
     # which is why these two rows carry bins 128 and conf_bins 128 where the
     # released pair carry 64 and 39.)
+    #
+    # Now served from Synthyra/ESMFold2-600 and -300, which add a TRAINED
+    # confidence head (pLDDT/PAE/pTM/iPTM) to folding weights that are
+    # bit-identical to biohub's step1500k. These were the only members of
+    # NO_CONFIDENCE_HEAD, which is why that tuple is now empty.
     'esmfold2_lm600m': dict(
-        hub='ESMFold2-Experimental-Fast-base600M-step1500k', trunk=24, msa=0,
+        hub='ESMFold2-600', trunk=24, msa=0,
         coda=0, lm_enc=0, msa_w=0, bins=128, conf_bins=128, esmc='esmc_600m'),
     # Identical to the row above in every field but the tower: the two configs
     # differ only in esmc_id, lm_d_model (960 vs 1152) and lm_num_layers (30 vs
     # 36), all of which live in the LM, not the folding trunk.
     'esmfold2_lm300m': dict(
-        hub='ESMFold2-Experimental-Fast-base300M-step1500k', trunk=24, msa=0,
+        hub='ESMFold2-300', trunk=24, msa=0,
         coda=0, lm_enc=0, msa_w=0, bins=128, conf_bins=128, esmc='esmc_300m'),
 }
 

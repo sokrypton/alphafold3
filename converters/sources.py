@@ -25,11 +25,15 @@ SOURCES = {
     # writes beside the blob as <model>.lm.npz.
     'esmfold2': dict(repo='biohub/ESMFold2'),
     'esmfold2_fast': dict(repo='biohub/ESMFold2-Fast'),
-    # the 600M-ESM-C tier; pairs with the esmc_600m tower below
-    'esmfold2_lm600m': dict(
-        repo='biohub/ESMFold2-Experimental-Fast-base600M-step1500k'),
-    'esmfold2_lm300m': dict(
-        repo='biohub/ESMFold2-Experimental-Fast-base300M-step1500k'),
+    # The 600M/300M-ESM-C tier; pairs with the esmc_600m / esmc_300m towers
+    # below. SYNTHYRA's repos, not biohub's, since 2026-09-25: they carry the
+    # same folding weights plus a trained confidence head. Verified rather than
+    # assumed -- all 820 tensors of biohub's step1500k checkpoint are
+    # BIT-IDENTICAL in Synthyra/ESMFold2-600, which adds exactly 93
+    # confidence_head tensors and changes nothing else. So the structure gates
+    # taken against the old repo still hold, and only the head is new.
+    'esmfold2_lm600m': dict(repo='Synthyra/ESMFold2-600'),
+    'esmfold2_lm300m': dict(repo='Synthyra/ESMFold2-300'),
     # The protein language model ESMFold2 conditions on. NOT an AF3 model -- a
     # separate graph with its own loader (alphafold3/model/esm.py). float32 is
     # 25.4 GB and cannot even be WRITTEN as a blob (a record header packs its

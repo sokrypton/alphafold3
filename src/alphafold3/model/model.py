@@ -1210,17 +1210,26 @@ class Model(hk.Module):
         full_pae=result['full_pae'],
         mask=pae_single_mask,
     )
-    chain_pair_pde_mean, chain_pair_pde_min = confidences.chain_pair_pde(
-        num_tokens=num_tokens,
-        asym_ids=batch.token_features.asym_id,  # pyrefly: ignore[missing-attribute]
-        full_pde=result['full_pde'],
-    )
-    intra_chain_single_pde, cross_chain_single_pde, _ = confidences.pde_single(
-        num_tokens,
-        batch.token_features.asym_id,  # pyrefly: ignore[missing-attribute]
-        result['full_pde'],
-        contact_probs,
-    )
+    # A head in model_config.NO_PDE_HEAD emits no PDE at all (ESMFold2's
+    # lm-tier pair have pae_head and no pde_head), so every PDE-derived metric
+    # is absent rather than zero. Substituting zeros here would be worse than
+    # omitting them: a chain-pair PDE of 0.0 reads as a PERFECT prediction, and
+    # ranking scores are built from these.
+    if 'full_pde' in result:
+      chain_pair_pde_mean, chain_pair_pde_min = confidences.chain_pair_pde(
+          num_tokens=num_tokens,
+          asym_ids=batch.token_features.asym_id,  # pyrefly: ignore[missing-attribute]
+          full_pde=result['full_pde'],
+      )
+      intra_chain_single_pde, cross_chain_single_pde, _ = confidences.pde_single(
+          num_tokens,
+          batch.token_features.asym_id,  # pyrefly: ignore[missing-attribute]
+          result['full_pde'],
+          contact_probs,
+      )
+    else:
+      chain_pair_pde_mean = chain_pair_pde_min = None
+      intra_chain_single_pde = cross_chain_single_pde = None
     pae_metrics = confidences.pae_metrics(
         num_tokens=num_tokens,
         asym_ids=batch.token_features.asym_id,  # pyrefly: ignore[missing-attribute]
@@ -1254,7 +1263,7 @@ class Model(hk.Module):
     #  [x, , ]]]
     iptm_xchain = confidences.get_iptm_xchain(chain_pair_iptm)
 
-    predicted_distance_errors = result['average_pde']
+    predicted_distance_errors = result.get('average_pde')
 
     # Computing solvent accessible area with dssp can be slow for large
     # structures with lots of chains, so we parallelize the call.
@@ -1277,25 +1286,34 @@ class Model(hk.Module):
       yield InferenceResult(
           predicted_structure=pred_structure,
           numerical_data={
-              'full_pde': result['full_pde'][idx, :num_tokens, :num_tokens],
+              # omitted entirely for a NO_PDE_HEAD model -- see above
+              **({} if 'full_pde' not in result else {
+                  'full_pde': result['full_pde'][idx, :num_tokens, :num_tokens],
+              }),
               'full_pae': result['full_pae'][idx, :num_tokens, :num_tokens],
               'contact_probs': contact_probs[:num_tokens, :num_tokens],
           },
           metadata={  # pyrefly: ignore[bad-argument-type]
-              'predicted_distance_error': predicted_distance_errors[idx],
+              'predicted_distance_error': (
+                  None if predicted_distance_errors is None
+                  else predicted_distance_errors[idx]),
               'ranking_score': ranking_score,
               'fraction_disordered': fraction_disordered[idx],
               'has_clash': has_clash[idx],
               'predicted_tm_score': ptm[idx],
               'interface_predicted_tm_score': iptm[idx],
-              'chain_pair_pde_mean': chain_pair_pde_mean[idx],
-              'chain_pair_pde_min': chain_pair_pde_min[idx],
+              'chain_pair_pde_mean': (None if chain_pair_pde_mean is None
+                                   else chain_pair_pde_mean[idx]),
+              'chain_pair_pde_min': (None if chain_pair_pde_min is None
+                                   else chain_pair_pde_min[idx]),
               'chain_pair_pae_min': chain_pair_pae_min[idx],
               'ptm': ptm[idx],
               'iptm': iptm[idx],
               'ptm_iptm_average': ptm_iptm_average[idx],
-              'intra_chain_single_pde': intra_chain_single_pde[idx],
-              'cross_chain_single_pde': cross_chain_single_pde[idx],
+              'intra_chain_single_pde': (None if intra_chain_single_pde is None
+                                   else intra_chain_single_pde[idx]),
+              'cross_chain_single_pde': (None if cross_chain_single_pde is None
+                                   else cross_chain_single_pde[idx]),
               'pae_ichain': pae_metrics['pae_ichain'][idx],
               'pae_xchain': pae_metrics['pae_xchain'][idx],
               'ranking_confidence': ranking_confidence[idx],
