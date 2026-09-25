@@ -23,10 +23,16 @@ def _registry():
   Uploading needs huggingface_hub, which does not have to live in the same
   environment as the model code -- so this falls back to reading the directory
   rather than making the two dependencies meet.
+
+  Any failure counts, not just ImportError. The environment that HAS
+  huggingface_hub is typically the system python, and importing the model code
+  there fails on whatever it happens to lack -- `typing.dataclass_transform` on
+  a pre-3.11 interpreter, which is an AttributeError and sailed straight past a
+  narrower except, defeating the fallback this function exists to provide.
   """
   try:
     from alphafold3.model import model_registry
-  except ImportError:
+  except Exception:                                    # noqa: BLE001
     return None
   return model_registry
 
