@@ -20,8 +20,44 @@ def as_batch(batch_dict):
   cleaned dict has `convert_model_output` set to None -- surfacing later as
   `AttributeError: 'NoneType' object has no attribute 'chain_id'` from inside
   the coordinate conversion.
+
+  A STRUCTURAL-TOKEN model needs one thing more. Batch.from_data_dict drops
+  every slashed key, which is right for it and wrong for us: opendde diffuses
+  in its `struct/` layout, so its frames are (n_struct, max_atoms, 3) where the
+  output layout has n_res rows -- 128 against 59 on a 59-residue input. The
+  gather that reconciles them is `structbook/residue_atom_gather`, so it is
+  carried on the side, where frame_positions can find it.
   """
-  return feat_batch.Batch.from_data_dict(batch_dict)
+  batch = feat_batch.Batch.from_data_dict(batch_dict)
+  gather = batch_dict.get('structbook/residue_atom_gather')
+  if gather is not None:
+    # An attribute rather than a wrapper: everything downstream already takes
+    # a Batch, and a second type would have to be threaded through all of it.
+    object.__setattr__(batch, '_structbook_gather', gather)
+  return batch
+
+
+def _to_residue_layout(positions, batch):
+  """Structural-token frame -> residue layout, or the frame unchanged.
+
+  Uses the SAME gather the finished structure is built with
+  (structural_features.opendde_predicted_structure), so an animation frame
+  cannot show an arrangement the fold did not produce -- which is the whole
+  claim this module makes.
+  """
+  import numpy as np
+
+  gather = getattr(batch, '_structbook_gather', None)
+  if gather is None:
+    return positions
+  n_res = np.asarray(
+      batch.convert_model_output.token_atoms_layout.atom_name).shape[0]
+  pos = np.asarray(positions)
+  if pos.shape[0] == n_res:
+    return pos                      # already residue-shaped; nothing to do
+  from alphafold3.model.pipeline.structural_features import (
+      structural_to_residue_positions)
+  return structural_to_residue_positions(pos, np.asarray(gather))
 
 
 def frame_cif(positions, batch, name='frame'):
@@ -32,7 +68,8 @@ def frame_cif(positions, batch, name='frame'):
   animation frame has the same atom naming and ordering as the final answer
   and a viewer cannot show something the fold did not produce.
   """
-  struc = model.predicted_structure_from_coords(positions, batch)
+  struc = model.predicted_structure_from_coords(
+      _to_residue_layout(positions, batch), batch)
   return struc.to_mmcif()
 
 
@@ -89,6 +126,7 @@ def frame_positions(positions, batch):
   import numpy as np
   idx, valid = rep_atom_index(batch)
   layout = batch.convert_model_output.token_atoms_layout
+  positions = _to_residue_layout(positions, batch)
   xyz = np.asarray(positions)[np.arange(len(idx)), idx]
   chains = np.asarray(layout.chain_id)[:, 0]
   resids = np.asarray(layout.res_id)[:, 0]
