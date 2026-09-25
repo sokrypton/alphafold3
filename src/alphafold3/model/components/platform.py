@@ -325,7 +325,8 @@ def apply_xla_flags(flags, env=None) -> str:
 DEFAULT_CACHE = '~/.cache/alphafold3/jax'
 
 
-def enable_compilation_cache(path: str = DEFAULT_CACHE, min_seconds: float = 1.0):
+def enable_compilation_cache(path: str = DEFAULT_CACHE, min_seconds: float = 1.0,
+                             max_gb: float | None = None):
   '''persist compiled executables across processes
 
   AF2 and AF3 both compile for a minute or more before the first design step --
@@ -355,9 +356,64 @@ def enable_compilation_cache(path: str = DEFAULT_CACHE, min_seconds: float = 1.0
     jax.config.update('jax_persistent_cache_min_compile_time_secs', min_seconds)
     # without this, JAX declines to cache anything it considers not worth it
     jax.config.update('jax_persistent_cache_min_entry_size_bytes', 0)
+    # a cache with no ceiling eventually takes the disk down with it
+    if max_gb is None:
+      max_gb = float(os.environ.get('AF3_CACHE_MAX_GB', '20'))
+    if max_gb > 0:
+      prune_compilation_cache(path, max_gb)
     return path
   except Exception:
     return None
+
+
+def prune_compilation_cache(path: str = DEFAULT_CACHE,
+                            max_gb: float = 20.0) -> dict:
+  """Keep the compilation cache under a budget, oldest entries first.
+
+  JAX has no size limit on the persistent cache, and it does not need one until
+  it does: a long multi-model session compiles hundreds of large executables,
+  and this cache reached 39 GB and filled a 497 GB disk, which killed a running
+  design job with `No space left on device` -- an error that names neither JAX
+  nor the cache. Deleting the whole cache is the obvious response and the wrong
+  one, because the next run then recompiles everything.
+
+  Eviction is by access time, so the shapes a session keeps reusing survive and
+  the one-off compiles from a finished experiment go first. Entries are files
+  here, so this cannot corrupt a half-written entry belonging to another
+  process any more than the filesystem already allows: a missing entry is a
+  cache MISS, never a wrong answer (see enable_compilation_cache).
+  """
+  import os
+
+  path = os.path.expanduser(path)
+  budget = int(max_gb * 1024 ** 3)
+  entries = []
+  total = 0
+  for root, _dirs, files in os.walk(path):
+    for f in files:
+      fp = os.path.join(root, f)
+      try:
+        st = os.stat(fp)
+      except OSError:
+        continue
+      entries.append((st.st_atime, st.st_size, fp))
+      total += st.st_size
+  if total <= budget:
+    return {'path': path, 'bytes': total, 'removed': 0, 'freed': 0}
+
+  entries.sort()                       # oldest access first
+  freed = removed = 0
+  for _atime, size, fp in entries:
+    if total - freed <= budget:
+      break
+    try:
+      os.remove(fp)
+    except OSError:
+      continue
+    freed += size
+    removed += 1
+  return {'path': path, 'bytes': total - freed, 'removed': removed,
+          'freed': freed}
 
 
 def cache_stats(path: str = DEFAULT_CACHE) -> dict:
