@@ -1124,21 +1124,17 @@ def _resolve_esm(use_esm, fold_input, model_runner):
   tower = model_registry.ESMFOLD2_VARIANTS[model_name]['esmc']
   print(f'Running the {tower} tower for {model_name}'
         f'{"" if len(sequences) == 1 else f" ({len(sequences)} chains)"}...')
-  # default_dir at fp32 on purpose, whatever --weights_precision says: a tower
-  # is only ever int8 (converters.esm_lm.QUANT_SCHEME), so it has one directory
-  # rather than one per precision.
+  # Tower choice, tower run and the release's own shim are one piece of
+  # knowledge with a silent failure mode (a variant on another's shim reads
+  # corr 0.026), so they live in esm.lm_pair_for and are not spelled out per
+  # caller -- design code builds its own batches and needs the same three steps.
   #
   # Several chains are passed straight through: ESM-C restricts attention to
   # within a chain, so folding them one at a time and concatenating is exactly
   # the wrapped [BOS, c1, EOS, BOS, c2, EOS] form -- see esm.embed, which cites
   # the native mask. This used to raise, on a comment claiming the tower
   # implemented the wrapping but had not been gated; neither half was true.
-  hidden = esm.embed(sequences, weights_lib.default_dir(tower),
-                        'esmc', tower)
-  # The shim is the model's own -- every ESMFold2 release trains one, and
-  # feeding a variant another's reads corr 0.026 against native.
-  shim = esm.load_shim_params(model_runner.model_dir, model_name)
-  return None, esm.shim(hidden, shim)
+  return None, esm.lm_pair_for(model_name, sequences, model_runner.model_dir)
 
 
 def predict_structure(

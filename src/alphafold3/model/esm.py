@@ -768,6 +768,36 @@ def shim(hidden, params):
     return _shim(hidden, params)
 
 
+def lm_pair_for(model_name, sequences, model_dir=None):
+  """ESMFold2's language-model pair rep for `sequences`, or None if N/A.
+
+  The three steps -- pick the tower this release was trained against, run it,
+  put the states through the release's OWN shim -- are one piece of knowledge
+  with a silent failure mode: a variant fed another variant's shim reads corr
+  0.026 against native, and the fold still comes out looking like a fold. It
+  therefore lives in ONE place, called both by run_alphafold and by design code
+  that builds its own batches, rather than being re-derived per caller.
+
+  Returns None for a model with no language model, so a caller can pass the
+  result straight through without asking what kind of model it has.
+  """
+  from alphafold3.model import model_registry
+  from alphafold3.model import weights as weights_lib
+
+  variants = getattr(model_registry, 'ESMFOLD2_VARIANTS', {})
+  if model_name not in variants:
+    return None
+  if isinstance(sequences, str):
+    sequences = [sequences]
+  tower = variants[model_name]['esmc']
+  # default_dir at fp32 whatever the MODEL's precision is: a tower is only ever
+  # int8 (converters.esm_lm.QUANT_SCHEME), so it has one directory, not one per
+  # precision.
+  hidden = embed(list(sequences), weights_lib.default_dir(tower), 'esmc', tower)
+  return shim(hidden, load_shim_params(
+      model_dir or weights_lib.default_dir(model_name), model_name))
+
+
 def _shim(hidden, params):
   p = {k: jnp.asarray(v) for k, v in params.items()}
   hidden = jnp.asarray(hidden, jnp.float32)
