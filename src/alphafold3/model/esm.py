@@ -628,10 +628,36 @@ def embed(sequences, model_dir=None, family='esmc', tower=None,
         raise ValueError(f'{out.shape[0]} rows for a {len(seq)}-residue chain')
       rows.append(out)
   if family == 'esmc':
-    if len(rows) > 1:
-      raise ValueError('ESM-C multi-chain wrapping is [EOS, BOS] separated; '
-                       'pass one chain')
-    return rows[0]
+    # MULTI-CHAIN, and why running the chains SEPARATELY is the whole of it.
+    #
+    # ESM-C wraps several chains as [BOS, c1, EOS, BOS, c2, EOS] with
+    # `sequence_id = cumsum(ids == BOS) - 1`, which gives each chain's
+    # [BOS, residues, EOS] a single id. Native builds its attention mask as
+    #
+    #     (sequence_id.unsqueeze(-1) == sequence_id.unsqueeze(-2))
+    #
+    # (esm/models/esmc/model.py), so a query attends to a key ONLY when the two
+    # share a chain id. Every chain therefore sees exactly its own
+    # [BOS, chain, EOS] window and nothing else -- bit-for-bit a solo run, since
+    # rotary attention depends only on the relative offset i - j and that does
+    # not change with where the chain starts in the stream.
+    #
+    # So this concatenation is not an approximation of the wrapped form, it is
+    # EQUAL to it, and the tower needs no mask, no sequence_id argument and no
+    # separator tokens to fold several chains. Read off the native source
+    # rather than assumed: no self-consistency test can tell "attention is
+    # restricted to a chain" from "there is no restriction", because both give
+    # the same answer for one chain.
+    #
+    # It is also faster than native's own multi-chain path, which REFUSES
+    # sequence_id > 0 under flash_attention_2 and tells the caller to re-load
+    # with sdpa or eager. Running the chains one at a time never builds the
+    # mask, so it keeps the fast kernel.
+    #
+    # This used to raise rather than fold: the wrapping was described in a
+    # docstring and never implemented, while a comment in run_alphafold said it
+    # WAS implemented but ungated. It was neither.
+    return np.concatenate(rows, axis=0)
   return np.concatenate(rows, axis=0).astype(np.float32)
 
 

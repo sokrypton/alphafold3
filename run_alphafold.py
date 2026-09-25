@@ -1121,20 +1121,19 @@ def _resolve_esm(use_esm, fold_input, model_runner):
     return rows, None
 
   from alphafold3.model import model_registry
-  if len(sequences) != 1:
-    # ESM-C wraps multiple chains as [EOS, BOS]-separated with a sequence_id
-    # that restricts attention within a chain. That is implemented in the tower
-    # but not gated against native, so refuse rather than fold something
-    # plausible-looking.
-    raise ValueError(
-        f'--use_esm_embeddings handles a single protein chain for ESMFold2; '
-        f'this input has {len(sequences)}. Fold from an MSA instead.')
   tower = model_registry.ESMFOLD2_VARIANTS[model_name]['esmc']
-  print(f'Running the {tower} tower for {model_name}...')
+  print(f'Running the {tower} tower for {model_name}'
+        f'{"" if len(sequences) == 1 else f" ({len(sequences)} chains)"}...')
   # default_dir at fp32 on purpose, whatever --weights_precision says: a tower
   # is only ever int8 (converters.esm_lm.QUANT_SCHEME), so it has one directory
   # rather than one per precision.
-  hidden = esm.embed(sequences[0], weights_lib.default_dir(tower),
+  #
+  # Several chains are passed straight through: ESM-C restricts attention to
+  # within a chain, so folding them one at a time and concatenating is exactly
+  # the wrapped [BOS, c1, EOS, BOS, c2, EOS] form -- see esm.embed, which cites
+  # the native mask. This used to raise, on a comment claiming the tower
+  # implemented the wrapping but had not been gated; neither half was true.
+  hidden = esm.embed(sequences, weights_lib.default_dir(tower),
                         'esmc', tower)
   # The shim is the model's own -- every ESMFold2 release trains one, and
   # feeding a variant another's reads corr 0.026 against native.
