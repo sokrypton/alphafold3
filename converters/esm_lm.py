@@ -29,6 +29,56 @@ from alphafold3.model.esm import VOCABS  # noqa: F401  (re-exported)
 # Weight maps.
 # ---------------------------------------------------------------------------
 
+def normalise_esmc_layout(sd):
+  """Rewrite an HF-transformers ESM-C checkpoint into ESM-C's native names.
+
+  The same tower ships in two layouts. Everything below reads the NATIVE one
+  (`esmc.transformer.blocks.N.attn.layernorm_qkv.weight`, a fused QKV, and a
+  fused SwiGLU `ffn.fc1_weight`); biohub's ESMC-300M-1500000 and
+  ESMC-600M-1500000 now ship the transformers one instead
+  (`esmc.layers.N.self_attn.q_proj.weight`, separate q/k/v, separate
+  gate/up/down). Our towers were converted before that change and still load,
+  so nothing was broken -- but a fresh conversion died on
+  `KeyError: 'esmc.embed.weight'`, which names neither the layout nor the repo.
+
+  Every correspondence here was measured against a native copy of the SAME
+  300M tower, not inferred from the names: all of them are exact to 0.0, and
+  the two orderings a name cannot settle came out as concat(q, k, v) and
+  concat(gate, up) -- the latter reads max|d| 3.88 the other way round.
+
+  A checkpoint already in the native layout is returned untouched.
+  """
+  if 'esmc.embed.weight' in sd:
+    return sd
+  if 'esmc.embed_tokens.weight' not in sd:
+    return sd                      # not an ESM-C tower; leave it alone
+
+  import numpy as np
+  cat = lambda *xs: np.concatenate([np.asarray(x) for x in xs], axis=0)
+  out = {'esmc.embed.weight': sd['esmc.embed_tokens.weight'],
+         'esmc.transformer.norm.weight': sd['esmc.norm.weight']}
+  n = len({k.split('.')[2] for k in sd if k.startswith('esmc.layers.')})
+  for i in range(n):
+    src, dst = 'esmc.layers.%d.' % i, 'esmc.transformer.blocks.%d.' % i
+    out[dst + 'attn.layernorm_qkv.layer_norm_weight'] = sd[src + 'input_layernorm.weight']
+    out[dst + 'attn.layernorm_qkv.layer_norm_bias'] = sd[src + 'input_layernorm.bias']
+    out[dst + 'attn.layernorm_qkv.weight'] = cat(
+        sd[src + 'self_attn.q_proj.weight'],
+        sd[src + 'self_attn.k_proj.weight'],
+        sd[src + 'self_attn.v_proj.weight'])
+    out[dst + 'attn.q_ln.weight'] = sd[src + 'self_attn.q_norm.weight']
+    out[dst + 'attn.k_ln.weight'] = sd[src + 'self_attn.k_norm.weight']
+    out[dst + 'attn.out_proj.weight'] = sd[src + 'self_attn.o_proj.weight']
+    out[dst + 'ffn.layer_norm_weight'] = sd[src + 'post_attention_layernorm.weight']
+    out[dst + 'ffn.layer_norm_bias'] = sd[src + 'post_attention_layernorm.bias']
+    out[dst + 'ffn.fc1_weight'] = cat(sd[src + 'mlp.gate_proj.weight'],
+                                      sd[src + 'mlp.up_proj.weight'])
+    out[dst + 'ffn.fc2_weight'] = sd[src + 'mlp.down_proj.weight']
+  # lm_head.* is the masked-LM decoder; the tower is used for hidden states and
+  # has never carried it, in either layout.
+  return out
+
+
 def derive_dims(sd, family):
   """Read the tower's shape off the checkpoint rather than hard-coding it."""
   if family == 'esmc':
@@ -152,7 +202,7 @@ def convert_tower(checkpoint, output_dir, family, tower=None):
   from . import common, quantise
   if family == 'esmc':
     from .esmfold2 import load_esmfold2_checkpoint
-    sd = load_esmfold2_checkpoint(checkpoint)
+    sd = normalise_esmc_layout(load_esmfold2_checkpoint(checkpoint))
   else:
     sd = load_esm2_checkpoint(checkpoint)
   dims = derive_dims(sd, family)
