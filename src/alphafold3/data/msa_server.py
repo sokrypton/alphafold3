@@ -28,8 +28,15 @@ def _query_server(
     use_env: bool = True,
     host_url: str = 'https://api.colabfold.com',
     user_agent: str = 'alphafold3/1.0',
+    template_hits: dict | None = None,
 ) -> list[str]:
-    """Submit protein sequences to ColabFold and return a3m strings (one per input)."""
+    """Submit protein sequences to ColabFold and return a3m strings (one per input).
+
+    `template_hits`, when given a dict, is filled with {sequence: [pdb70 hit
+    names, best first]} from the `pdb70.m8` the same result tar carries - the
+    template hits come free with an unpaired MSA job, and they were being
+    extracted and thrown away with the tar.
+    """
     import io
     import requests
 
@@ -119,6 +126,13 @@ def _query_server(
         with tarfile.open(fileobj=io.BytesIO(r.content)) as tf:
             tf.extractall(tmp)
 
+        if template_hits is not None and not use_pairing and (tmp / 'pdb70.m8').exists():
+            by_id = {101 + i: seq for i, seq in enumerate(unique_seqs)}
+            for line in (tmp / 'pdb70.m8').read_text().splitlines():
+                parts = line.split()
+                if len(parts) >= 2 and parts[0].isdigit() and int(parts[0]) in by_id:
+                    template_hits.setdefault(by_id[int(parts[0])], []).append(parts[1])
+
         if use_pairing:
             a3m_files = [tmp / 'pair.a3m']
         else:
@@ -167,8 +181,13 @@ def fill_missing_msas(
     *,
     host_url: str = 'https://api.colabfold.com',
     user_agent: str = 'alphafold3/1.0',
+    template_hits: dict | None = None,
 ) -> object:
     """Fill missing MSAs in a FoldInput via the ColabFold server.
+
+    Pass a dict as `template_hits` to have it filled with {sequence: [pdb70 hit
+    names, best first]} from the same search; `fetch_template` turns a name
+    into its mmCIF.
 
     Protein chains missing `unpaired_msa` are queried in a single batch.
     RNA chains get a query-sequence-only stub (ColabFold is protein-only).
@@ -202,7 +221,8 @@ def fill_missing_msas(
             f' {len(protein_seqs_needing_msa)} unique protein sequence(s)...'
         )
         a3m_results = _query_server(
-            protein_seqs_needing_msa, host_url=host_url, user_agent=user_agent
+            protein_seqs_needing_msa, host_url=host_url, user_agent=user_agent,
+            template_hits=template_hits,
         )
         seq_to_a3m = dict(zip(protein_seqs_needing_msa, a3m_results))
         print('MSA query complete.')
@@ -267,6 +287,33 @@ def fill_missing_msas(
         new_chains.append(chain)
 
     return dataclasses.replace(fold_input, chains=new_chains)
+
+
+def fetch_template(
+    target: str,
+    *,
+    host_url: str = 'https://api.colabfold.com',
+    user_agent: str = 'alphafold3/1.0',
+) -> str:
+    """One pdb70 hit (`1abc_A`) as mmCIF text, from ColabFold's template endpoint.
+
+    Ask with the hit NAME, chain suffix included: the endpoint returns one
+    `<entry>.cif` per entry, and asked for the bare entry it answers 200 with a
+    tar holding no structure at all.
+    """
+    import io
+    import requests
+
+    headers = {'User-Agent': user_agent} if user_agent else {}
+    r = requests.get(f'{host_url.rstrip("/")}/template/{target}', timeout=120,
+                     headers=headers)
+    r.raise_for_status()
+    entry = target.split('_')[0].lower()
+    with tarfile.open(fileobj=io.BytesIO(r.content), mode='r:gz') as tf:
+        for member in tf.getmembers():
+            if member.name.split('/')[-1].lower() == f'{entry}.cif':
+                return tf.extractfile(member).read().decode()
+    raise RuntimeError(f'no structure came back for the template hit {target}')
 
 
 def save_msas(fold_input, output_dir: str | Path) -> None:

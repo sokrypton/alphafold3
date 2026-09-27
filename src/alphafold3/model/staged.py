@@ -93,6 +93,15 @@ def staged_fold(config, params, *, jit=True, chunk=10,
   the recycle count nor the step count reaches a graph, so changing either
   costs nothing and one compile cache covers both.
   """
+  # 🔴 THIS DRIVER IS THE STEPWISE SAMPLER, SO IT SAYS SO ITSELF. `diff_cond`
+  # hands back an initial state only when `eval.stepwise` is set; the notebook
+  # set it, and `--stepwise_recycles` (run_alphafold._stepwise_model) did not,
+  # so that flag died at `st['init']` with KeyError: 'init'. A copy, because the
+  # caller's config also drives its fused path.
+  import copy
+  config = copy.deepcopy(config)
+  config.heads.diffusion.eval.stepwise = True
+
   def _stage(name):
     @hk.transform
     def fn(batch, carry=None, key=None, diffusion_state=None):
@@ -189,8 +198,11 @@ def staged_fold(config, params, *, jit=True, chunk=10,
                               # assigning it here made it local and unbound
       pwin = prev[t:t + k]
       xs = ((window, pwin) if len(window) > 1 else (window[0], pwin[0]))
-      out = step(params, rng_key, batch, carry, key, dcarry, xs,
-                 st['pair_cond'], atom_arrays)
+      # A structural-token model (opendde) denoises on its OWN embeddings -
+      # the expander and refiner's, which diff_cond ran once and hands back -
+      # not on the residue trunk's. See model.Model's 'denoise' stage.
+      out = step(params, rng_key, batch, st.get('denoise_carry', carry), key,
+                 dcarry, xs, st['pair_cond'], atom_arrays)
       dcarry = out['carry']
       if on_step is not None:
         # STEERING. The callback sees the coordinates this step produced and

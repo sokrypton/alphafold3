@@ -799,6 +799,18 @@ class Model(hk.Module):
     if stage == 'denoise':
       if recycle_carry is None or diffusion_state is None:
         raise ValueError("stage='denoise' needs the trunk carry and a state")
+      # 🔴 A STRUCTURAL-TOKEN MODEL DENOISES ON ITS OWN BATCH. opendde diffuses
+      # in its `struct/` layout (160 tokens against 68 residues on a 68-residue
+      # input), so the residue batch here handed its positions a residue-shaped
+      # mask: "Incompatible shapes: mask_shape=(68, 24, 1), value_shape=(160,
+      # 24, 3)" in random_augmentation, and live mode could not run opendde. The
+      # batch is rebuilt from the struct/ keys - cheap - and the carry the
+      # driver passes for such a model is diff_cond's `denoise_carry`, the
+      # expander and refiner's embeddings, which are not rebuilt per step.
+      if has_structural:
+        batch = feat_batch.Batch.from_data_dict(
+            {k[len('struct/'):]: v for k, v in _struct.items()
+             if k.startswith('struct/')})
       return self._sample_diffusion(  # pyrefly: ignore[bad-return]
           batch, recycle_carry,
           sample_config=self.config.heads.diffusion.eval,
@@ -1026,10 +1038,15 @@ class Model(hk.Module):
     if stage in ('diff_cond', 'denoise'):
       # Either hand back the conditioning, or apply one denoise step to the
       # state the caller passes in. Both return before the confidence heads.
-      return self._sample_diffusion(  # pyrefly: ignore[bad-return]
+      out = self._sample_diffusion(  # pyrefly: ignore[bad-return]
           diff_batch, diff_emb,
           sample_config=self.config.heads.diffusion.eval,
           diffusion_state=diffusion_state)
+      # ...and the embeddings a structural-token model's steps must denoise
+      # on, so the per-step path need not run the expander and refiner again.
+      if has_structural and stage == 'diff_cond' and 'init' in out:
+        out = {**out, 'denoise_carry': diff_emb}
+      return out
 
     if diffusion_state is not None and stage == 'score':
       # Coordinates the caller produced by driving the steps itself; scored
