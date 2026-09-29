@@ -581,6 +581,9 @@ class AF2Runner:
     backpropagating through every pass costs memory linear in the count and is
     what v1's "backprop" mode does deliberately, not by default.
 
+    on_recycle(pass_index, outputs) watches each pass; returning True from a
+    recycle ends the loop there and returns that pass (an early stop).
+
     Before this, num_recycle set a config field and nothing drove a loop, so
     num_recycle=1 gave a loss identical to num_recycle=0 to full precision. It
     was the third flag in this codebase that looked like a control and was not.
@@ -615,8 +618,14 @@ class AF2Runner:
       # the diffusion steps are for AF3: the thing a live view can show while
       # a fold is still running. `None` by default, so every existing caller
       # is unchanged.
-      if on_recycle is not None:
-        on_recycle(_i, out)
+      # ...and it may END the loop: a truthy return says the structure has
+      # stopped moving, and this pass is the answer. That is ColabFold's
+      # recycle_early_stop_tolerance, decided by the caller (it holds the
+      # previous pass to measure against); a design caller never passes one.
+      if on_recycle is not None and on_recycle(_i, out):
+        out['seq'] = _seq
+        out['inputs'] = _full
+        return out
       prev = out['prev']
       if not (self.recycle_remat or self.recycle_backprop):
         prev = jax.lax.stop_gradient(prev)
