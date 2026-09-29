@@ -81,6 +81,13 @@ class AF2ModelRunner:
         num_extra_msa=self._num_extra_msa,
         use_cluster_profile=self._use_cluster_profile,
         use_mlm=self._use_mlm,
+        # Prediction takes no gradient, so the recycle body is not wrapped in
+        # jax.checkpoint. Wrapped, the recycles and the final pass were two
+        # different programs, and the first fold to reach the final pass paid a
+        # second compile of the whole network: 11 s on an A100, which is what a
+        # fold that stops early on convergence skipped and one that runs every
+        # pass did not.
+        recycle_remat=False,
     )
 
   @functools.cached_property
