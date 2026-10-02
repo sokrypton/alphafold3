@@ -127,7 +127,11 @@ def staged_fold(config, params, *, jit=True, chunk=10,
       # `hasattr(v, 'shape')` filed it as an array and it came back a tracer.
       is_flag = isinstance(v, bool) or (
           np.ndim(v) == 0 and np.asarray(v).dtype == np.bool_)
-      (static if is_flag or not hasattr(v, 'shape') else arrays)[k] = v
+      # A tuple or list of arrays is data too: ESMFold2's rope_q/rope_k are (cos, sin) pairs, and closed
+      # over they were baked into the memoised denoise stage - every later fold reused the first's.
+      is_arrays = hasattr(v, 'shape') or (isinstance(v, (tuple, list)) and len(v) > 0
+                                          and all(hasattr(x, 'shape') for x in v))
+      (static if is_flag or not is_arrays else arrays)[k] = v
     return arrays, static
 
   # MEMOISED. Building this inside `run` re-traced the whole score model on
