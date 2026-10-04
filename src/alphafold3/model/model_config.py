@@ -721,6 +721,23 @@ REALIGN_SAMPLER = ESMFOLD2_FAMILY
 
 # Models that LayerNorm the summed per-atom reference features. AF3 sums
 # bias-free per-feature Linears and leaves the result unnormalised.
+#: Models whose checkpoint holds TWO DIFFERENT weights under the colliding
+#: `*_single_to_pair_cond_row/_col` names, so the atom encoder's own site must
+#: be bound to the `_1` copy explicitly.
+#:
+#: `_per_atom_conditioning`'s pair branch and `atom_cross_att_encoder` create
+#: Linears with the SAME name in the same scope; haiku uniquifies the second
+#: occurrence. While the pair branch ran, the encoder was `_row_1`/`_col_1`;
+#: once it was skipped (it builds a tensor its only caller discards) the
+#: encoder became first and silently took `_row`/`_col` -- the same shape, so
+#: nothing errored, and AF3's K65-D278 salt bridge moved 2.96 -> 3.61 A.
+#:
+#: Only AlphaFold 3 is listed because only DeepMind's checkpoint has two
+#: DISTINCT matrices here. Our converters either write one value to both names
+#: (boltz2, opendde, intellifold2, esmfold2) or only the base name (chai1,
+#: openfold3, protenix2, rosettafold3), and for those the binding cannot matter.
+ATOM_PAIR_COND_SPLIT = ('alphafold3',)
+
 NORMED_ATOM_FEATURES = ESMFOLD2_FAMILY
 
 

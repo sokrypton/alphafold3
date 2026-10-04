@@ -464,8 +464,18 @@ def atom_cross_att_encoder(
 
     # Embed single features into the pair conditioning.
     # shape (num_subsets, num_queries, num_keys, ch)
+    # NAME COLLISION, and it is load-bearing. _per_atom_conditioning's pair
+    # branch creates Linears with these exact names in this same scope, so
+    # haiku uniquifies whichever runs SECOND. While that branch ran, this site
+    # was `_row_1`/`_col_1`; when it stopped running -- it built a tensor its
+    # only caller discards, so skipping it looked free -- this site became
+    # first and silently took `_row`/`_col` instead. Same shape, no error, and
+    # AF3 folded on the other site's matrix: the 9OQ3 K65-D278 salt bridge went
+    # 2.96 -> 3.61 A against native's 2.92. Name it explicitly so the binding
+    # no longer depends on whether some other branch happened to run.
+    suffix = '_1' if global_config.model in model_config.ATOM_PAIR_COND_SPLIT else ''
     row_act = hm.Linear(
-        c.per_atom_pair_channels, name=f'{name}_single_to_pair_cond_row'
+        c.per_atom_pair_channels, name=f'{name}_single_to_pair_cond_row{suffix}'
     )(jax.nn.relu(queries_single_cond))
     pair_cond_keys_input = atom_layout.convert(
         queries_to_keys,
@@ -473,7 +483,7 @@ def atom_cross_att_encoder(
         layout_axes=(-3, -2),
     )
     col_act = hm.Linear(
-        c.per_atom_pair_channels, name=f'{name}_single_to_pair_cond_col'
+        c.per_atom_pair_channels, name=f'{name}_single_to_pair_cond_col{suffix}'
     )(jax.nn.relu(pair_cond_keys_input))
     pair_act = row_act[:, :, None, :] + col_act[:, None, :, :]
 
