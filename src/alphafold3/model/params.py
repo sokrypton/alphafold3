@@ -313,6 +313,13 @@ def get_model_haiku_params(model_dir: epath.PathLike) -> hk.Params:
   if not params:
     raise FileNotFoundError(f'Model missing from "{model_dir}"')
   _check_blob_convention(model_dir, params)
+  # chai1's blobs carry chai-lab's structure token-pair weights from 28141c7 on (model.Chai1StructurePair);
+  # one fetched before has the model and not its diffusion's pair input
+  if (any(scope.endswith('diffusion_embed_atom_pair_feat') for scope in params)      # (chai's alone)
+      and 'diffuser/chai1_structure_token_pair' not in params):
+    raise ValueError(
+        f'{model_dir}: these chai1 weights predate chai-lab\'s structure token-pair weights, which its '
+        'diffusion conditions on. Delete the blob there and run again to fetch the current one.')
   return params
 
 

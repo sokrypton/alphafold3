@@ -562,6 +562,46 @@ def num_trunk_passes(num_recycles: int, model: str) -> int:
   return num_recycles + 1
 
 
+class Chai1StructurePair(hk.Module):
+  """chai-1's STRUCTURE token-pair features, the pair input of its diffusion module.
+
+  chai-lab chunks its 512-wide TOKEN_PAIR input projection (and its bond projection) in two: the first halves
+  build the trunk's z_init, the second halves `token_pair_structure_input_feats`, which its diffusion module
+  conditions on beside z_trunk (chai1.py, run_folding_on_context). This repository's converter kept only the
+  trunk halves and fed the diffusion the trunk's z_init instead -- relRMS 9.2 apart on 6MRR, measured on
+  chai-lab's own tensors. The published chai1 blobs carry the second halves now, under this module's name
+  (huggingface.co/sokrypton/af3-any-model 28141c7).
+
+  The 163 inputs are chai's own columns (its generators, alphabetical): docking 0:6 (class 5: no
+  constraint), relative chain 6:12, relative entity 12:15, residue separation 15:82, token separation
+  82:149, the two restraints' masked columns 155 and 162. A one-hot that wide is never built: each pair
+  adds the rows its classes select. The bond projection's structure half reads chai's declared-covalent-
+  bond feature, which nothing here builds -- zero for every input without one, as chai-lab's is.
+
+  Relative entity and chain read the raw ids, which is chai's dense ranking for every purpose here: entity
+  enters only through same/greater/less (clipped to +-1), and sym ids within one entity are consecutive.
+  """
+
+  def __init__(self, num_channels, name='chai1_structure_token_pair'):
+    super().__init__(name=name)
+    self.num_channels = num_channels
+
+  def __call__(self, tf):
+    w = hk.get_parameter('weights', [163, self.num_channels], jnp.float32, init=jnp.zeros)
+    b = hk.get_parameter('bias', [self.num_channels], jnp.float32, init=jnp.zeros)
+    ri = tf.residue_index.astype(jnp.int32)
+    ti = tf.token_index.astype(jnp.int32)
+    asym, ent, sym = (x.astype(jnp.int32) for x in (tf.asym_id, tf.entity_id, tf.sym_id))
+    same_chain = asym[:, None] == asym[None]
+    rss = jnp.where(same_chain, jnp.clip(ri[:, None] - ri[None] + 33, 0, 65), 66)
+    rts = jnp.where(same_chain & (ri[:, None] == ri[None]), jnp.clip(ti[:, None] - ti[None] + 32, 0, 65), 66)
+    rel_e = ent[:, None] - ent[None]
+    rchain = jnp.where(rel_e != 0, 5, jnp.clip(sym[:, None] - sym[None] + 2, 0, 4))
+    rent = jnp.clip(rel_e + 1, 0, 2)
+    return ((b + w[5] + w[155] + w[162])[None, None] + w[6 + rchain] + w[12 + rent]
+            + w[15 + rss] + w[82 + rts])
+
+
 class Model(hk.Module):
   """Full model. Takes in data batch and returns model outputs."""
 
@@ -807,6 +847,11 @@ class Model(hk.Module):
       else:
         embeddings, _ = hk.fori_loop(0, num_iter, recycle_body,
                                      (embeddings, key))
+
+    if self.global_config.model == 'chai1':
+      # chai's diffusion conditions on [z_trunk | its STRUCTURE token-pair features], not on the trunk's
+      # z_init -- see Chai1StructurePair
+      embeddings['pair_init'] = Chai1StructurePair(self.config.evoformer.pair_channel)(batch.token_features)
 
     # ColabDesign2: the distogram head stays with the trunk. It reads embeddings
     # only, it is what every design objective is built on, and it is cheap.
