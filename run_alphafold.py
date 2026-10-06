@@ -1116,6 +1116,12 @@ def _resolve_esm(use_esm, fold_input, model_runner):
     print('Running the ESM2 tower for chai-1...')
     # Multi-chain is fine here: the rows are concatenated in chain order and
     # land on the batch's protein tokens in that order.
+    # chai-lab hands ESM2 its entity sequence 'with modified residues encoded as
+    # X' (all_atom_entity_data.py), so a modified position reads X here too.
+    sequences = [
+        ''.join('X' if i + 1 in {p for _, p in (c.ptms or ())} else a
+                for i, a in enumerate(c.sequence))
+        for c in fold_input.chains if isinstance(c, folding_input.ProteinChain)]
     rows = esm.embed(sequences, weights_lib.default_dir('esm2'), 'esm2')
     print(f'ESM2 embeddings {rows.shape}')
     return rows, None

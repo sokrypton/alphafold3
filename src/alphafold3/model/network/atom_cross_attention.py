@@ -439,25 +439,29 @@ def atom_cross_att_encoder(
         queries_to_keys, queries_mask, layout_axes=(-2, -1)
     )
 
-    # chai-1's atom_block_pair_mask is exactly (same token) AND (both atoms real)
-    # -- verified against the 6MRR seam over every one of its 184x32x128 entries.
-    # Build it in the same two gathers the layouts already use: a dense per-atom
-    # token index into the queries layout, then into the keys layout.
+    # chai-1's atom_block_pair_mask is (both atoms real) AND (same REFERENCE
+    # SPACE), not same token. chai-lab builds it as both-real
+    # (model/utils.py get_block_atom_pair_mask) and then
+    # get_blocked_atom_pair_dists (blocked_atom_pair_distances.py) does
+    #     block_atom_pair_mask &= block_same_atom_ref_space
+    # IN PLACE on the tensor the atom attention later reads. A ref space is a
+    # residue or a whole ligand, so on 6MRR it is exactly the token (verified
+    # there over every one of its 184x32x128 entries) -- and on a ligand, whose
+    # atoms are a token each, the token rule blinds every atom to the rest of
+    # its molecule: GOL's bonds 0.29 A rms, worse with more steps (LocalFold's
+    # native port, which had the same rule; 0.053 with this one).
     same_token_mask = None
     if global_config.model == 'chai1':
-      tok_idx = jnp.broadcast_to(
-          jnp.arange(token_atoms_mask.shape[-2], dtype=jnp.int32)[:, None],
-          token_atoms_mask.shape[-2:],
-      )
-      queries_tok = atom_layout.convert(
-          batch.atom_cross_att.token_atoms_to_queries, tok_idx,
+      queries_uid = atom_layout.convert(
+          batch.atom_cross_att.token_atoms_to_queries,
+          batch.ref_structure.ref_space_uid,
           layout_axes=(-2, -1),
       )
-      keys_tok = atom_layout.convert(
-          queries_to_keys, queries_tok, layout_axes=(-2, -1)
+      keys_uid = atom_layout.convert(
+          queries_to_keys, queries_uid, layout_axes=(-2, -1)
       )
       same_token_mask = (
-          (queries_tok[..., :, None] == keys_tok[..., None, :])
+          (queries_uid[..., :, None] == keys_uid[..., None, :])
           & queries_mask[..., :, None].astype(jnp.bool_)
           & keys_mask[..., None, :].astype(jnp.bool_)
       )
