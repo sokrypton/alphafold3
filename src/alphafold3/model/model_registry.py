@@ -684,8 +684,14 @@ _FEATURISE = {
     # values every other model uses are the default. Pass
     # std_conformers='std_conformers.npz' here, with the file beside the blob,
     # to restore them.
+    # atomized_unknown_restype: chai-lab's restype is gemmi's fasta_code(), X for
+    # every modified residue (SEP, TPO, MSE ...), where AlphaFold 3 keeps the
+    # parent; atomised, a phosphoserine's ten tokens are UNKNOWN to chai
+    # (data/parsing/structure/residue.py get_restype), and its ESM2 sequence
+    # reads X there too (_resolve_esm).
     'chai1': dict(circular_keys=True, drop_atoms=('OXT',),
-                  zero_msa_without_alignment=True, esm=True),
+                  zero_msa_without_alignment=True, esm=True,
+                  atomized_unknown_restype=True),
 }
 
 # Conformer centering rides in as a featurise KNOB as well as a
