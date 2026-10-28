@@ -26,7 +26,7 @@ groups are restored (tests/crosslinks_test.py). The components are generated
 once by `python -m alphafold3.common.crosslinks --write` into crosslinkers.cif
 beside this file, so every port reads the same atoms, names and ideal geometry.
 
-Each pair becomes one ligand chain (the next free chain ids) and two
+Each pair becomes one ligand chain (chain ids after the job's last) and two
 bondedAtomPairs. A residue can carry one crosslink: with remove_overlapping
 (af3x's default) a pair touching a residue an earlier pair already used is
 dropped, and without it such a job is refused, since the second bond would
@@ -319,7 +319,10 @@ def expand_json(raw: Mapping[str, Any], ccd, remove_overlapping_pairs: bool = Tr
       for i, code in enumerate(seq, 1):
         residues[(cid, i)] = code
   blocks, sites = components()
-  fresh = (c for c in _chain_ids() if c not in used_ids)
+  # after the job's last chain id, not in its first gap: the ligands are appended, and a job of A and C would
+  # otherwise name the crosslinker after C "B"
+  last = max(((len(c), c) for c in used_ids), default=(0, ''))
+  fresh = (c for c in _chain_ids() if (len(c), c) > last)
   sequences = list(raw['sequences'])
   bonds = [list(map(list, b)) for b in raw.get('bondedAtomPairs') or []]
   codes = []

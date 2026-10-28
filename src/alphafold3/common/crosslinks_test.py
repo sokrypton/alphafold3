@@ -85,6 +85,13 @@ class ExpandTest(absltest.TestCase):
     ])
     self.assertEqual(set(cif_dict.parse_multi_data_cif(fi.user_ccd)), {'XL-DSSO', 'XL-SDA'})
 
+  def test_ligand_ids_follow_the_last_chain(self):
+    fi = folding_input.Input.from_json(json.dumps({
+        'dialect': 'alphafold3', 'version': 4, 'name': 'xl', 'modelSeeds': [1],
+        'sequences': [{'protein': {'id': 'A', 'sequence': _SEQ_A}}, {'protein': {'id': 'C', 'sequence': _SEQ_B}}],
+        'crosslinks': [{'name': 'DSS', 'residue_pairs': [[['A', 2], ['C', 3]], [['A', 8], ['C', 8]]]}]}))
+    self.assertEqual([c.id for c in fi.expand_crosslinks()[0].chains], ['A', 'C', 'D', 'E'])
+
   def test_diazirine_end_is_the_last_side_chain_atom(self):
     ccd = chemical_components.Ccd()
     for restype, atom in (('LYS', 'NZ'), ('ARG', 'NH2'), ('PHE', 'CZ'), ('TRP', 'CH2'), ('GLY', 'CA'), ('ALA', 'CB')):

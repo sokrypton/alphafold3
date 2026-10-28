@@ -399,7 +399,7 @@ rather than as a distance restraint. The input is af3x's:
 ]
 ```
 
-Each pair becomes one ligand chain (the next free chain id) and two
+Each pair becomes one ligand chain (on the chain ids after the job's last) and two
 `bondedAtomPairs`: nothing is model-specific and no weights are involved, so
 each model treats a crosslinker as it treats any covalently bonded ligand. An NHS-ester end
 acylates LYS NZ, SER OG, THR OG1, TYR OH or residue 1's N; a diazirine end (the
@@ -417,6 +417,11 @@ are here too: `--remove_overlapping_crosslinks` (default true: a pair touching
 an already crosslinked residue is dropped and reported) and
 `--sample_crosslink_combinations=k` (every k-subset as its own job). af3x's
 experimental dynamic-length and disulfide links are not.
+
+A declared bond is a feature, not a hard constraint, so how firmly it holds is the
+model's: on two DSSO crosslinks the structure can satisfy (localfold's page, with
+an MSA), AlphaFold 3 closed all four residue-bridge bonds and Boltz-2 two. Pairs the
+model's confident structure cannot satisfy get broken, as af3x notes.
 
 ### Licences and porting notes
 
