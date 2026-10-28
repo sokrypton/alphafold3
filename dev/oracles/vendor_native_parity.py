@@ -326,12 +326,6 @@ def featurise_ours(model, j, recycles, bf16):
           else np.asarray(batch['msa']).shape[0] if 'msa' in batch else 0)
   if rows > cfg.evoformer.num_msa:
     cfg.evoformer.num_msa = rows
-  # chai runs every row to its 16384 depth, padding included, and so does ours by default - but a padded row is inert
-  # (protein, msa and long_chain read the same PARITY on live rows alone), and the padded stack does not fit an A10 at
-  # float32 past a few hundred tokens: long_chain's pair-weighted average is one 7.2 GiB buffer. So ours takes the live
-  # rows; AF3_CHAI_NUM_MSA set by hand keeps whatever it names.
-  if model == 'chai1' and 'AF3_CHAI_NUM_MSA' not in os.environ:
-    cfg.evoformer.num_msa = max(rows, 1)
   cfg.return_embeddings = True
   cfg.return_distogram = True
   return batch, fold_check.LAST_RAW_BATCH, cfg, model_dir

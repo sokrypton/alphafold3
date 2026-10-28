@@ -752,8 +752,12 @@ class Evoformer(hk.Module):
       if not chai1:
         msa_batch, key, row_origin = featurization.shuffle_msa_with_order(
             key, msa_batch)
-      msa_batch = featurization.truncate_msa_batch(msa_batch,
-                                                   self.config.num_msa)
+      # chai takes the rows featurisation cropped to (full_msa: a power-of-two bucket over the live rows), capped at
+      # num_msa, never padded up to it: a padded row is inert, and 16384 of them ran the MSA stack over one 7.2 GiB
+      # buffer at float32 on a 600-token single sequence
+      num_msa = (min(self.config.num_msa, msa_batch.rows.shape[0]) if chai1
+                 else self.config.num_msa)
+      msa_batch = featurization.truncate_msa_batch(msa_batch, num_msa)
     msa_feat = featurization.create_msa_feat(
         msa_batch, self.soft_seq, self.design_mask, chai1=chai1,
         is_ligand=is_ligand, asym_id=asym_id,

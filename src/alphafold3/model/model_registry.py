@@ -379,7 +379,9 @@ CHAI1_SETTINGS = (
     # confirms it: chai's step-0 noise_sigma is 1261.6. Starting at twice the
     # noise the denoiser was trained for is not a small error.
     ('heads.diffusion.eval.sigma_max', 80.0),
-    # chai runs every MSA row, up to its MAX_MSA_DEPTH, on every pass (recycle_msa_subsample=0 by default)
+    # chai runs every MSA row, up to its MAX_MSA_DEPTH, on every pass (recycle_msa_subsample=0 by default). A CAP for
+    # chai, not a depth: the trunk takes the power-of-two bucket featurisation cropped to (full_msa), so its padding
+    # to 16384 -- inert rows -- is not run
     ('evoformer.num_msa', int(os.environ.get('AF3_CHAI_NUM_MSA', 16384))),
 )
 

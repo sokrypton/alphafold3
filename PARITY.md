@@ -194,9 +194,10 @@ These are the places where a vendor deliberately differs from AlphaFold 3, and w
   - **Stock's MSA row order depends on its CPU.** Its unstable pandas sort goes to numpy 1.26's x86-simd-sort on an
     AVX-512 CPU and to the generic introsort elsewhere; ours ports the generic one. The harness pins stock to it
     (`NPY_DISABLE_CPU_FEATURES`), without which `paired_msa` read BAD at the trunk pair on the A10's Xeon.
-  - Ours runs on the live MSA rows only (stock pads to 16384; a padded row is inert, and protein, msa and
-    `long_chain` read the same PARITY either way), which is what lets `long_chain` fit an A10 at float32.
-  - 2026-10-28, A10, ESM2 on: all 22 cases chai accepts PASS, `paired_msa` and `long_chain` included; `pocket` and
+  - Ours runs the MSA stack over a power-of-two bucket of the live rows, not stock's 16384 (a padded row is inert,
+    and protein, msa and `long_chain` read the same PARITY either way), which is what lets `long_chain` fit an A10 at
+    float32. Since 2026-10-28 that is the shipped path, not a harness setting.
+  - 2026-10-28, A10, ESM2 on, shipped MSA path: all 22 cases chai accepts PASS, `paired_msa` and `long_chain` included; `pocket` and
     `contact` with the restraint-carrying blob.
 - **IntelliFold-2:** uses the boltz-fork MSA build, with a per-chain profile over `msa_valid_depths`.
 - **protenix:** the seed applies MC dropout on the recycled pair. Replaying it needs torch's fused-dropout vector width: 4 for float32, 8 for bfloat16.
