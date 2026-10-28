@@ -135,6 +135,13 @@ def _vendor(model, *args):
   if model == 'chai1':
     env.setdefault('CHAI_DOWNLOADS_DIR', _H + '/chai1_weights')
     env.setdefault('DISABLE_PANDERA_IMPORT_WARNING', 'True')
+    # chai orders each chain's unpaired MSA rows with pandas' unstable sort, and numpy 1.26 sends that argsort to
+    # x86-simd-sort on an AVX-512 CPU: equal keys then come out in another order, so which rows two chains pair in the
+    # merged MSA - what the outer product reads - depends on the CPU stock runs on. Ours ports the generic introsort
+    # (model_features._np126_argsort), which is what stock takes on every CPU without AVX-512; this pins stock to it
+    # here. (A10 host, Xeon with AVX-512: paired_msa read trunk pair corr 0.9974 without this, PASS with it.)
+    env.setdefault('NPY_DISABLE_CPU_FEATURES', 'AVX512F AVX512CD AVX512_KNL AVX512_KNM AVX512_SKX AVX512_CLX '
+                                               'AVX512_CNL AVX512_ICL AVX512_SPR')
   r = subprocess.run(cmd + [os.path.join(HERE, runner), args[0], model,
                             *args[1:]],
                      capture_output=True, text=True, env=env,
@@ -319,6 +326,12 @@ def featurise_ours(model, j, recycles, bf16):
           else np.asarray(batch['msa']).shape[0] if 'msa' in batch else 0)
   if rows > cfg.evoformer.num_msa:
     cfg.evoformer.num_msa = rows
+  # chai runs every row to its 16384 depth, padding included, and so does ours by default - but a padded row is inert
+  # (protein, msa and long_chain read the same PARITY on live rows alone), and the padded stack does not fit an A10 at
+  # float32 past a few hundred tokens: long_chain's pair-weighted average is one 7.2 GiB buffer. So ours takes the live
+  # rows; AF3_CHAI_NUM_MSA set by hand keeps whatever it names.
+  if model == 'chai1' and 'AF3_CHAI_NUM_MSA' not in os.environ:
+    cfg.evoformer.num_msa = max(rows, 1)
   cfg.return_embeddings = True
   cfg.return_distogram = True
   return batch, fold_check.LAST_RAW_BATCH, cfg, model_dir

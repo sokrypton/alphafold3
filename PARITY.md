@@ -189,11 +189,15 @@ These are the places where a vendor deliberately differs from AlphaFold 3, and w
   - Its rows are ordered by numpy 1.26's unstable quicksort, which is ported exactly.
   - Since 2026-10-28 both sides fold with ESM2, as chai-1 is run: stock embeds each protein with its own ESM2 3B
     trace, and ours folds from those rows (`chai1_upstream_runner.py` writes them; `CHAI_NO_ESM=1` turns both off;
-    `CHAI_ESM_TOWER=1` grades our tower against them, corr 0.99993 on the heterodimer). Run one case per process: in
-    one process ours keeps up to 14 GiB between cases and stock's forward then runs out of memory on an A10. With ESM:
-    20 cases PASS (`pocket` and `contact` with the restraint-carrying blob). `paired_msa` reads BAD at the trunk pair
-    (corr 0.9993; 0.9974 without ESM, so not ESM's) and is open; `long_chain` does not fit ours at float32 on an A10,
-    with or without ESM.
+    `CHAI_ESM_TOWER=1` grades our tower against them, corr 0.99993 on the heterodimer). Run one case per process on an
+    A10: in one process ours keeps up to 14 GiB between cases and stock's forward then runs out of memory.
+  - **Stock's MSA row order depends on its CPU.** Its unstable pandas sort goes to numpy 1.26's x86-simd-sort on an
+    AVX-512 CPU and to the generic introsort elsewhere; ours ports the generic one. The harness pins stock to it
+    (`NPY_DISABLE_CPU_FEATURES`), without which `paired_msa` read BAD at the trunk pair on the A10's Xeon.
+  - Ours runs on the live MSA rows only (stock pads to 16384; a padded row is inert, and protein, msa and
+    `long_chain` read the same PARITY either way), which is what lets `long_chain` fit an A10 at float32.
+  - 2026-10-28, A10, ESM2 on: all 22 cases chai accepts PASS, `paired_msa` and `long_chain` included; `pocket` and
+    `contact` with the restraint-carrying blob.
 - **IntelliFold-2:** uses the boltz-fork MSA build, with a per-chain profile over `msa_valid_depths`.
 - **protenix:** the seed applies MC dropout on the recycled pair. Replaying it needs torch's fused-dropout vector width: 4 for float32, 8 for bfloat16.
 - **Padded atoms:** every non-AF3 model masks padded atom queries.
