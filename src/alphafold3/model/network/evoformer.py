@@ -1077,6 +1077,10 @@ class Evoformer(hk.Module):
         single_activations = hm.Linear(
             self.config.seq_channel, name='single_activations'
         )(target_feat)
+      if self.global_config.model in model_config.FP32_TRUNK_SINGLE:
+        # see model_config.FP32_TRUNK_SINGLE: the residual stream stays float32
+        # through every block, which promotes each bfloat16 update on the add
+        single_activations = single_activations.astype(jnp.float32)
 
       s_prev = prev['single'].astype(single_activations.dtype)
       if first is not None:

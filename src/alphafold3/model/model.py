@@ -21,6 +21,7 @@
 
 from collections.abc import Iterable, Mapping
 import concurrent
+import copy
 import dataclasses
 import functools
 import os
@@ -1415,10 +1416,17 @@ class Model(hk.Module):
       # honest and is what keeps the converter's coverage exact.
       confidence_output = {}
     else:
+      head_config = self.global_config
+      if (self.global_config.model in model_config.FP32_CONFIDENCE_HEAD
+          and diff_batch.token_features.mask.shape[0]
+          <= model_config.FP32_CONFIDENCE_HEAD[self.global_config.model]):
+        # see model_config.FP32_CONFIDENCE_HEAD
+        head_config = copy.copy(self.global_config)
+        head_config.bfloat16 = 'none'
       # Compute dist_error_fn over all samples for distance error logging.
       confidence_output = mapping.sharded_map(
           lambda dense_atom_positions: confidence_head.ConfidenceHead(
-              self.config.heads.confidence, self.global_config
+              self.config.heads.confidence, head_config
           )(
               dense_atom_positions=dense_atom_positions,
               # the TRUNK projection of the token embedding, as chai's confidence head reads it; diff_emb carries the

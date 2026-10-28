@@ -77,7 +77,9 @@ with its 48-block trunk split in two: 8 "PairMixer" blocks (no triangle
 attention) at 448, then 40 pairformer blocks at 320 between two bias-free width
 adapters. Its own converter (`converters/mol1.py`) maps that split; everything
 else reuses the Protenix mappers. It recycles 20 times by default, against
-Protenix's 10.
+Protenix's 10. Its trunk single and confidence head stay float32 in bf16 mode:
+stock Mol-1's default bf16 run flattens pLDDT to ~89 for any input (see
+[PARITY.md](PARITY.md#mol-1)).
 
 ### Other AF3-architecture models
 

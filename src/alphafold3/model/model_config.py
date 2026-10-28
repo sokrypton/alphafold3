@@ -323,6 +323,26 @@ TEMPLATE_UNK_BACKBONE = ('openfold3', 'openbind0')
 # trunk_pair_channel), not a family branch.
 PROTENIX_FAMILY = ('protenix1', 'protenix2', 'mol1')
 
+# Models whose trunk SINGLE track stays float32 when the trunk computes in
+# bfloat16 (the pair track, where the cost is, stays half).
+#
+# Mol-1's trained weights drive a handful of trunk single channels (222, 172,
+# 363, 123, 47, 118) to |s| ~300,000 on every token -- an activation, not a
+# parameter, and ours reproduces it -- on top of a per-token signal of rms ~44. At that magnitude bfloat16 steps by 256, so a bfloat16
+# residual stream rounds every token to the same vector. Stock Mol-1 runs its
+# default --dtype bf16 exactly so: its token spread falls from 44 (fp32) to
+# 0.001 after the first recycle, and its pLDDT comes out a flat ~89 for any
+# input -- poly-G, a random sequence, ubiquitin and 7r6r alike. With --dtype
+# fp32 it reads 78 / 75 / 92, and that is the reference ours keeps.
+FP32_TRUNK_SINGLE = ('mol1',)
+
+# Models whose confidence head runs in float32 when the model computes in
+# bfloat16, up to the token count given. Mol-1's inference runner disables
+# autocast for its confidence head (skip_amp.confidence_head) at <= 2560 tokens
+# and leaves it bfloat16 above, to save memory (update_inference_configs). With
+# FP32_TRUNK_SINGLE alone our bf16 random-sequence pLDDT sat ~2 below fp32.
+FP32_CONFIDENCE_HEAD = {'mol1': 2560}
+
 
 # Models whose forward graph follows OpenFold3's conventions rather than stock
 # AlphaFold3's: the 1-indexed element shift, the symmetrised bond matrix, and

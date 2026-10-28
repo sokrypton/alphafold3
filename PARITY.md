@@ -284,7 +284,9 @@ Its runner (`dev/oracles/mol1_upstream_runner.py`) drives stock `mol` in `~/venv
 - **At stock settings** (20 recycles, stock's per-pass MSA rows replayed), all 24 pass again: 186 rows PARITY, 6 CLOSE (1-2e-3). Unlike HelixFold3, Mol-1's recycling does not amplify float-level differences, so no row needed grading against its own spread.
 - **`long_chain`** needs smaller stock attention chunks to fit a 22 GB card (`MOL1_CHUNK=64`, memory only).
 - **Full trajectory, 8 cases.** `ion`, `heterodimer` and `ligand_ccd` are PARITY (≤0.003 Å). `dna`, `protein`, `rna` and `msa` are CLOSE (0.013-0.066 Å). `ptm` reads 0.084 Å, FLOOR: nudged by 1e-4 at its own trunk, stock moves itself by up to 7.9 Å on that input.
-- **bf16** (`--bf16-graded all`, 4 cases) passes: our bf16 error averages 0.30× stock's own on the trunk pair, 0.34× on PAE and 0.55× on the denoise step.
+- **bf16** (`--bf16-graded all`, 4 cases) passes: our bf16 error averages 0.31× stock's own on the trunk pair, 0.27× on PAE, 0.35× on the denoise step and 0.12× on pLDDT.
+  - Two things stay float32 in our bf16 mode, as `model_config.FP32_TRUNK_SINGLE` and `FP32_CONFIDENCE_HEAD` record. The trunk single carries six channels at ~3×10⁵ on every token, on top of a per-token signal of ~44 rms. A bf16 residual stream (step 256 at that size) rounds every token to the same vector after the first recycle. The confidence head runs in fp32 up to 2560 tokens, as stock's inference runner does.
+  - **Stock's own default `--dtype bf16` hits exactly that.** Its pLDDT comes out a flat ~89 for any input: poly-G, a random 80-mer and ubiquitin all read 84–88, with every residue's CA at 89.2. Stock at `--dtype fp32` reads 78 / 75 / 92 with real per-residue variation, and ours matches it in both precisions (fp32 78.5 / 75 / 92.4; bf16 78.3 / 75.3 / 92.4). Run stock Mol-1 at `--dtype fp32` if its pLDDT matters.
   - Stock computes its row-chunked diffusion-conditioning cache in bf16, where Protenix computes it in fp32.
   - Measured with the chunking on and off, that changes stock's own bf16 error by less than its case-to-case spread, in both directions. The port does not imitate it.
 
