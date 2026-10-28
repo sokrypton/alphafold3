@@ -560,17 +560,18 @@ _MODEL = flags.DEFINE_enum(
 
 _USE_ESM_EMBEDDINGS = flags.DEFINE_bool(
     'use_esm_embeddings',
-    False,
-    'Run this model with its protein language model. Two of the ported models'
-    ' fold from one and are a different model without it: chai-1 from ESM2 3B'
-    ' (its token feature stream is mostly ESM2 -- a natural protein folds to'
-    ' 5.70 A without it where chai-1 reaches 0.642), and ESMFold2 from ESM-C,'
-    ' which is its alternative to an MSA rather than an extra on top of one --'
-    ' a variant with no MSA encoder folds to ~14 A without it.'
-    ' The tower runs in-process and is downloaded on demand (2.4 GB for ESM2,'
-    ' 5.1 GB for ESM-C 6B), which is why this is opt-in rather than the'
-    ' default. WHICH tower is read from the model, not chosen here: ESMFold2'
-    ' variants are trained against step-matched ESM-C snapshots.',
+    None,
+    'Run this model with its protein language model: ON by default for the two'
+    ' ported models that fold from one, which are a different model without it'
+    ' -- chai-1 from ESM2 3B (its token feature stream is mostly ESM2 -- a'
+    ' natural protein folds to 5.70 A without it where chai-1 reaches 0.642),'
+    ' and ESMFold2 from ESM-C, which is its alternative to an MSA rather than an'
+    ' extra on top of one -- a variant with no MSA encoder folds to ~14 A'
+    ' without it. --nouse_esm_embeddings turns it off (and warns). The tower'
+    ' runs in-process and is downloaded on first use (2.5 GB for ESM2, 5.5 GB'
+    ' for ESM-C 6B). WHICH tower is read from the model, not chosen here:'
+    ' ESMFold2 variants are trained against step-matched ESM-C snapshots.'
+    ' Passing it to any other model is an error.',
 )
 
 _REMOVE_OVERLAPPING_CROSSLINKS = flags.DEFINE_bool(
@@ -1887,18 +1888,19 @@ def main(_):
   cyclic = _CYCLIC.value or False
   if cyclic and [c.lower() for c in cyclic] == ['all']:
     cyclic = True
-  use_esm = _USE_ESM_EMBEDDINGS.value
   wants_esm = model_name == 'chai1' or model_name in model_config.ESMFOLD2_FAMILY
+  # unset: the model's own default, which is its language model when it has one
+  use_esm = wants_esm if _USE_ESM_EMBEDDINGS.value is None else _USE_ESM_EMBEDDINGS.value
   if use_esm and not wants_esm:
     raise ValueError(
         f'--use_esm_embeddings is for chai-1 and the ESMFold2 family; '
         f'{model_name} does not read a language model')
   if not use_esm and wants_esm:
-    # Silent until now, and the cost is not subtle for either family: see the
-    # flag's help.
-    print('WARNING: %s is running WITHOUT its language model, which is part of'
-          ' the model rather than an extra; see --use_esm_embeddings.'
-          % model_name)
+    # Only when asked for, and the cost is not subtle for either family: see
+    # the flag's help.
+    print('WARNING: %s is running WITHOUT its language model'
+          ' (--nouse_esm_embeddings), which is part of the model rather than an'
+          ' extra; see --use_esm_embeddings.' % model_name)
   if MODEL_DIR.value is not None:
     model_dir = MODEL_DIR.value
   elif model_name == 'alphafold3':

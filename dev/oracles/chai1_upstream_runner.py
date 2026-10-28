@@ -24,8 +24,12 @@ the harness aligns those atoms by token + element. A glycan goes in as chai's
 glycan entity, a covalent bond as a restraints-CSV `covalent` row. An MSA is
 written as chai's own ColabFold path writes one (colabfold.py): the query as
 the paired block, the unpaired rows not already in it, a source per header.
-ESM embeddings are off (use_esm_embeddings=False: zeros), as on our side
-without ESM_EMB.
+ESM2 embeddings are ON, as chai-1 is run: chai's own traced ESM2 3B (fp16, on
+the GPU) embeds each protein chain, and `featurise` writes its rows -- one per
+protein residue, in token order -- to esm2_rows.npz, which the harness hands
+ours (fold_check's ESM_EMB) so both fold from the same embeddings; our own tower
+is graded against those rows separately. CHAI_NO_ESM=1 runs both without
+(zeros), the way every chai number before 2026-10-28 was measured.
 
 There is no distogram: stock chai-lab ships no distogram head.
 """
@@ -308,7 +312,8 @@ def _run(case_dir, recycles, on_inputs, inject=None, traj=None):
   shutil.rmtree(out, ignore_errors=True)
   m8 = _template_m8(case_dir, str(out / 'templates'))
   ctx = C.make_all_atom_feature_context(
-      Path(fasta), output_dir=out, use_esm_embeddings=False,
+      Path(fasta), output_dir=out, use_esm_embeddings=not os.environ.get('CHAI_NO_ESM'),
+      esm_device=torch.device('cuda:0' if torch.cuda.is_available() else 'cpu'),
       msa_directory=Path(msa_dir) if msa_dir else None,
       constraint_path=Path(rpath) if rpath else None,
       templates_path=Path(m8) if m8 else None)
@@ -439,6 +444,22 @@ def _ref_only(inputs, real):
           'refonly.ref_pos': _np(inputs['atom_ref_pos'])[0][ref]}
 
 
+def _esm_rows(inputs):
+  """chai's ESM2 rows, one per protein RESIDUE in token order: chai gives each of
+  a residue's tokens its residue's row (get_esm_embedding_context), which is the
+  per-residue form model_features accepts."""
+  emb = _np(inputs['esm_embeddings'])[0]
+  real = _np(inputs['token_exists_mask'])[0].astype(bool)
+  protein = real & (_np(inputs['token_entity_type'])[0] == 0)   # EntityType.PROTEIN
+  asym, res = _np(inputs['token_asym_id'])[0], _np(inputs['token_residue_index'])[0]
+  seen, keep = set(), []
+  for t in np.flatnonzero(protein):
+    if (asym[t], res[t]) not in seen:
+      seen.add((asym[t], res[t]))
+      keep.append(t)
+  return emb[keep].astype(np.float32)
+
+
 def featurise(model, case_json, out_dir):
   os.makedirs(out_dir, exist_ok=True)
   import shutil
@@ -446,6 +467,9 @@ def featurise(model, case_json, out_dir):
 
   def on_inputs(inputs):
     np.savez(os.path.join(out_dir, 'layout.npz'), **_layout(inputs))
+    rows = _esm_rows(inputs)
+    if not os.environ.get('CHAI_NO_ESM') and len(rows):
+      np.savez(os.path.join(out_dir, 'esm2_rows.npz'), esm=rows)
     raise _Stop
   _run(out_dir, 0, on_inputs)
 

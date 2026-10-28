@@ -349,7 +349,7 @@ python run_alphafold.py \
   --output_dir=./output/
 ```
 
-### chai-1 needs ESM2 embeddings
+### chai-1 and ESMFold2 fold with their language model
 
 Two of the models fold from a protein language model, and are a different model
 without it: chai-1 from ESM2 3B, whose token embeddings are most of its token
@@ -358,19 +358,19 @@ reaches 0.642), and ESMFold2 from ESM-C, which is its alternative to an MSA
 rather than an extra on top of one (a variant with no MSA encoder folds to
 ~14 Å without it).
 
-Both towers are converted and run here, in jax, so one flag covers both. Which
-tower is right is read from the model, not chosen on the command line —
-ESMFold2's variants are trained against step-matched ESM-C snapshots:
+Both towers are converted and run here, in jax, and both models run with theirs
+by default. Which tower is right is read from the model, not chosen on the
+command line — ESMFold2's variants are trained against step-matched ESM-C
+snapshots. The tower runs in-process and is downloaded on first use (2.5 GB for
+ESM2, 5.5 GB for ESM-C 6B). `--nouse_esm_embeddings` folds without it, and warns,
+because the result is a different model rather than a slightly worse one:
 
 ```bash
-python run_alphafold.py --model=chai1         --use_esm_embeddings ...
-python run_alphafold.py --model=esmfold2_fast --use_esm_embeddings ...
+python run_alphafold.py --model=chai1 ...                          # with ESM2
+python run_alphafold.py --model=chai1 --nouse_esm_embeddings ...   # without
 ```
 
-The tower runs in-process and is downloaded on demand (2.5 GB for ESM2, 5.5 GB
-for ESM-C 6B), which is why it is opt-in rather than the default. Running one of
-these models without the flag warns, because the result is a different model
-rather than a slightly worse one.
+`--use_esm_embeddings` on any other model is an error.
 
 `python -m alphafold3.model.esm` also runs either tower standalone, if you want the hidden
 states themselves rather than a fold.

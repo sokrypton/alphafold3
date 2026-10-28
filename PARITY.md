@@ -187,6 +187,13 @@ These are the places where a vendor deliberately differs from AlphaFold 3, and w
   - The MSA query row is marked paired.
   - Its pair mask comes from the reference mask, so a reference-only leaving atom (NAG O1) is still an attended key.
   - Its rows are ordered by numpy 1.26's unstable quicksort, which is ported exactly.
+  - Since 2026-10-28 both sides fold with ESM2, as chai-1 is run: stock embeds each protein with its own ESM2 3B
+    trace, and ours folds from those rows (`chai1_upstream_runner.py` writes them; `CHAI_NO_ESM=1` turns both off;
+    `CHAI_ESM_TOWER=1` grades our tower against them, corr 0.99993 on the heterodimer). Run one case per process: in
+    one process ours keeps up to 14 GiB between cases and stock's forward then runs out of memory on an A10. With ESM:
+    20 cases PASS (`pocket` and `contact` with the restraint-carrying blob). `paired_msa` reads BAD at the trunk pair
+    (corr 0.9993; 0.9974 without ESM, so not ESM's) and is open; `long_chain` does not fit ours at float32 on an A10,
+    with or without ESM.
 - **IntelliFold-2:** uses the boltz-fork MSA build, with a per-chain profile over `msa_valid_depths`.
 - **protenix:** the seed applies MC dropout on the recycled pair. Replaying it needs torch's fused-dropout vector width: 4 for float32, 8 for bfloat16.
 - **Padded atoms:** every non-AF3 model masks padded atom queries.

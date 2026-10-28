@@ -221,6 +221,41 @@ def _tower_rows(model, j, hidden):
   return rows
 
 
+def _chai_esm(model, j, bdir):
+  """chai-1 folds from ESM2, as run_alphafold.py runs it: ours from the vendor's
+  own rows (chai1_upstream_runner's esm2_rows.npz, through fold_check's ESM_EMB),
+  so the fold rows grade the model, and OUR tower against those rows on its own
+  (CHAI_ESM_TOWER=1, one case at a time). chai's tower is its fp16 trace, so that row is INFO. Cleared for every other
+  case, so one case's rows never reach the next."""
+  path = os.path.join(bdir, 'esm2_rows.npz')
+  if model != 'chai1' or not os.path.exists(path):
+    os.environ.pop('ESM_EMB', None)
+    return []
+  os.environ['ESM_EMB'] = path
+  # CHAI_ESM_TOWER=1 only: our 3B tower stays resident in this process (8.75 GiB on an A10), and every later case's
+  # vendor forward then runs out of memory beside it
+  if not os.environ.get('CHAI_ESM_TOWER'):
+    return []
+  if any(entry['protein'].get('modifications') for entry in j['sequences'] if 'protein' in entry):
+    return []
+  from alphafold3.model import esm
+  # the shipped (int8) tower, ~/ported/esm2; ESM2_DIR names another (~/ported/esm2_fp32 reads ~1e-2 against chai's)
+  d = os.environ.get('ESM2_DIR') or dev_path('~/ported/esm2')
+  if not os.path.isdir(d):
+    return [('lm', 'tower esm2: our blob not at %s' % d, 'INFO')]
+  seqs = []
+  for entry in j['sequences']:
+    if 'protein' in entry:
+      e = entry['protein']
+      seqs += [e['sequence']] * (len(e['id']) if isinstance(e['id'], list) else 1)
+  ours = np.asarray(esm.embed(seqs, d, 'esm2'), np.float32)
+  ref = np.load(path)['esm'].astype(np.float32)
+  if ours.shape != ref.shape:
+    return [('lm', 'esm2 rows shape ours %s vendor %s' % (ours.shape, ref.shape), 'BAD')]
+  c, ratio = P.compare(ours, ref)
+  return [('lm', 'esm2 rows (ours vs chai fp16 trace) corr %.6f max|d|/rms %.2e' % (c, ratio), 'INFO')]
+
+
 # run_alphafold.py's --buckets default: OURS_BUCKET=shipped pads ours exactly as
 # a real run does (the first bucket at or above the token count)
 _SHIPPED_BUCKETS = [32, 64, 128, 256, 384, 512, 768, 1024, 1280, 1536, 2048, 2560,
@@ -510,6 +545,7 @@ def trajectory_case(model, name, j, recycles):
     hidden = os.path.join(bdir, 'esmc_hidden.npz')
     if os.path.exists(hidden):
       os.environ['ESMC_HIDDEN'] = hidden
+    rows += _chai_esm(model, j, bdir)
     batch, raw, cfg, model_dir = featurise_ours(model, j, recycles, 'none')
     idx, arows = align(raw, lay)
     rows += arows
@@ -978,6 +1014,7 @@ def run_case(model, name, j, recycles, bf16, graded=False):
     if os.path.exists(hidden):
       os.environ['ESMC_HIDDEN'] = hidden
       rows += _tower_rows(model, j, hidden)
+    rows += _chai_esm(model, j, bdir)
     batch, raw, cfg, model_dir = featurise_ours(model, j, recycles, bf16)
     idx, arows = align(raw, lay)
     rows += arows
