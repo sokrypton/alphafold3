@@ -384,6 +384,40 @@ feature (the input JSON has no way to say it), but the encoding is shared, so
 cyclic input and refuses it; AlphaFold 2 does not read it. Only Boltz-2 was trained with it, so for the others it is an
 extrapolation; stock IntelliFold accepts the flag and ignores it. A chain left out is byte-identical to before.
 
+### Crosslinks as explicit ligands
+
+A crosslinking mass-spec result can be given the way
+[af3x](https://github.com/KosinskiLab/af3x) takes it
+([Obarska-Kosinska & Kosinski, bioRxiv 2024](https://www.biorxiv.org/content/10.1101/2024.12.03.626671v2)):
+as the crosslinker itself, covalently bonded to the two residues it joined,
+rather than as a distance restraint. The input is af3x's:
+
+```json
+"crosslinks": [
+  {"name": "DSSO", "residue_pairs": [[["A", 2], ["B", 3]], [["A", 8], ["B", 11]]]},
+  {"name": "sulfo-SDA", "residue_pairs": [[["A", 16], ["B", 20]]]}
+]
+```
+
+Each pair becomes one ligand chain (the next free chain id) and two
+`bondedAtomPairs`: nothing is model-specific and no weights are involved, so
+each model treats a crosslinker as it treats any covalently bonded ligand. An NHS-ester end
+acylates LYS NZ, SER OG, THR OG1, TYR OH or residue 1's N; a diazirine end (the
+SDA family; a pair's second residue) bonds to the residue's last side-chain
+atom, CA for glycine. Known: DSS, BS3, DSG, BS2G, DSSO, DSBU, CDI, PhoX,
+BS(PEG)5, BS(PEG)9, azide-A-DSBSO, SDA, LC-SDA, SDAD (sulfo- forms take the
+same bridge).
+
+This is an independent implementation of af3x's input, not its code: each
+crosslinker is written as its reacted bridge from the public structure
+([src/alphafold3/common/crosslinks.py](src/alphafold3/common/crosslinks.py),
+checked against each supplier's formula) and generated into
+`crosslinkers.cif`, so geometry and atom names are not af3x's. af3x's options
+are here too: `--remove_overlapping_crosslinks` (default true: a pair touching
+an already crosslinked residue is dropped and reported) and
+`--sample_crosslink_combinations=k` (every k-subset as its own job). af3x's
+experimental dynamic-length and disulfide links are not.
+
 ### Licences and porting notes
 
 The terms of use written beside a prediction follow the weights that made it,

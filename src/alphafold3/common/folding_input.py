@@ -31,6 +31,7 @@ import string
 from typing import Any, BinaryIO, Final, Self, TypeAlias, cast
 
 from alphafold3 import structure
+from alphafold3.common import crosslinks as crosslinks_lib
 from alphafold3.constants import chemical_components
 from alphafold3.constants import mmcif_names
 from alphafold3.constants import residue_names
@@ -1066,6 +1067,11 @@ class Input:
     constraints: Pocket and contact constraints (this fork; JSON `constraints`).
       Only models trained with pocket/contact conditioning honour them, and a
       model that is not refuses an input that carries any.
+    crosslinks: af3x's `crosslinks` (this fork), as written:
+      [{"name": "DSSO", "residue_pairs": [[["A", 53], ["B", 66]], ...]}].
+      Held unexpanded, one (name, (chain, residue), (chain, residue)) per pair,
+      so it round-trips; `expand_crosslinks` turns each pair into a crosslinker
+      ligand and its two bonds (common/crosslinks.py).
   """
 
   name: str
@@ -1074,6 +1080,7 @@ class Input:
   bonded_atom_pairs: Sequence[tuple[BondAtomId, BondAtomId]] | None = None
   user_ccd: str | None = None
   constraints: Sequence[PocketConstraint | ContactConstraint] = ()
+  crosslinks: Sequence[tuple[str, tuple[str, int], tuple[str, int]]] = ()
 
   def __post_init__(self):
     if not self.rng_seeds:
@@ -1143,6 +1150,19 @@ class Input:
   @property
   def ligands(self) -> Sequence[Ligand]:
     return [chain for chain in self.chains if isinstance(chain, Ligand)]
+
+  def expand_crosslinks(
+      self, ccd: chemical_components.Ccd | None = None, remove_overlapping: bool = True
+  ) -> tuple[Self, list[tuple[str, tuple[str, int], tuple[str, int]]]]:
+    """-> (this input with each crosslink a ligand chain and two bonds, the pairs dropped as overlapping).
+
+    Through the JSON, so the expanded input is exactly what that JSON would load as."""
+    if not self.crosslinks:
+      return self, []
+    raw = json.loads(self.to_json())
+    raw, dropped = crosslinks_lib.expand_json(
+        raw, ccd or chemical_components.Ccd(user_ccd=self.user_ccd), remove_overlapping)
+    return Input.from_json(json.dumps(raw)), dropped
 
   def sanitised_name(self) -> str:
     """Returns sanitised version of the name that can be used as a filename."""
@@ -1258,6 +1278,7 @@ class Input:
             'userCCD',
             'userCCDPath',
             'constraints',
+            'crosslinks',
         },
     )
 
@@ -1390,6 +1411,7 @@ class Input:
         bonded_atom_pairs=bonded_atom_pairs,
         user_ccd=user_ccd,
         constraints=tuple(_parse_constraint(c, i) for i, c in enumerate(raw_json.get('constraints') or [])),
+        crosslinks=tuple(crosslinks_lib.flat(raw_json.get('crosslinks') or [])),
     )
 
   @classmethod
@@ -1602,6 +1624,7 @@ class Input:
             'userCCD': self.user_ccd,
             # written only when present, so an input without them serialises as before
             **({'constraints': [c.to_dict() for c in self.constraints]} if self.constraints else {}),
+            **({'crosslinks': crosslinks_lib.regroup(self.crosslinks)} if self.crosslinks else {}),
         },
         indent=2,
     )

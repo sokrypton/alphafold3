@@ -56,6 +56,7 @@ import warnings
 from absl import app
 from absl import flags
 from absl import logging as absl_logging
+from alphafold3.common import crosslinks as crosslinks_lib
 from alphafold3.common import folding_input
 from alphafold3.common import resources
 from alphafold3.constants import chemical_components
@@ -570,6 +571,23 @@ _USE_ESM_EMBEDDINGS = flags.DEFINE_bool(
     ' 5.1 GB for ESM-C 6B), which is why this is opt-in rather than the'
     ' default. WHICH tower is read from the model, not chosen here: ESMFold2'
     ' variants are trained against step-matched ESM-C snapshots.',
+)
+
+_REMOVE_OVERLAPPING_CROSSLINKS = flags.DEFINE_bool(
+    'remove_overlapping_crosslinks',
+    True,
+    'An input\'s `crosslinks` (af3x\'s format; common/crosslinks.py) each become'
+    ' a crosslinker ligand bonded to its two residues. A residue can carry one:'
+    ' in input order, a pair touching a residue an earlier pair used is dropped'
+    ' (and reported). False refuses such an input instead.',
+)
+
+_SAMPLE_CROSSLINK_COMBINATIONS = flags.DEFINE_integer(
+    'sample_crosslink_combinations',
+    None,
+    'Fold every combination of this many of an input\'s crosslinks, each as its'
+    ' own job named after the pairs it keeps (af3x\'s option). Unset: every'
+    ' crosslink in one job.',
 )
 
 _FEATURISE_OFF = flags.DEFINE_list(
@@ -1702,6 +1720,29 @@ def main(_):
   # template-trained 1 and 2 rather than 1-5). Fold inputs are JSON specs, so
   # this holds specs, not features.
   fold_inputs = list(fold_inputs)
+  # crosslinks -> ligands and bonds, before anything reads the chains (the data pipeline, the checks below)
+  expanded = []
+  for fold_input in fold_inputs:
+    if not fold_input.crosslinks:
+      expanded.append(fold_input)
+      continue
+    variants = [fold_input]
+    if _SAMPLE_CROSSLINK_COMBINATIONS.value:
+      variants = [
+          dataclasses.replace(fold_input, name=f'{fold_input.name}_{tag}',
+                              crosslinks=tuple(crosslinks_lib.flat(links)))
+          for tag, links in crosslinks_lib.combinations(
+              crosslinks_lib.regroup(fold_input.crosslinks), _SAMPLE_CROSSLINK_COMBINATIONS.value)]
+      print(f'{fold_input.name}: {len(variants)} crosslink combinations of'
+            f' {_SAMPLE_CROSSLINK_COMBINATIONS.value}')
+    for variant in variants:
+      variant, dropped = variant.expand_crosslinks(
+          remove_overlapping=_REMOVE_OVERLAPPING_CROSSLINKS.value)
+      for name, a, b in dropped:
+        print(f'{variant.name}: dropped crosslink {name} {a[0]}{a[1]}-{b[0]}{b[1]}:'
+              ' a residue already carries one')
+      expanded.append(variant)
+  fold_inputs = expanded
   # before any weights load: a model that cannot honour pocket/contact constraints refuses them up front
   for fold_input in fold_inputs:
     model_features.check_constraints_supported(fold_input, model_registry.get(_MODEL.value))
