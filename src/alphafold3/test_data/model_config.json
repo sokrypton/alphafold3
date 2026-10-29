@@ -307,6 +307,8 @@
         "seq_channel": 384
       },
       "eval": {
+        "calls_per_step": 0,
+        "churn": true,
         "gamma_0": 0.8,
         "gamma_min": 1.0,
         "max_sigma": 0.0,
@@ -314,12 +316,14 @@
         "num_samples": 5,
         "return_trajectory": false,
         "rho": 7.0,
+        "schedule": "karras",
         "schedule_tail": "",
         "sigma_max": 160.0,
         "sigma_min": 0.0004,
         "step_scale": 1.5,
         "steps": 200,
-        "stepwise": false
+        "stepwise": false,
+        "update": "euler"
       },
       "eval_batch_dim_shard_size": 5,
       "eval_batch_size": 5,

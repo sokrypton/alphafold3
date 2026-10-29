@@ -177,6 +177,27 @@ class SampleConfig(base_config.BaseConfig):
   # schedule opens at 2560, so a clip at 256 is a tenfold cut in initial noise
   # -- not a detail, and there is no field for it in stock AF3. 0 = no clip.
   max_sigma: float = 0.0
+  # The discretisation after Blitz (few-step AF3 / Boltz-2), as localfold's
+  # opus-55-opt samples. Both default to each vendor's own walk, so a fold is
+  # unchanged unless asked.
+  #   update   'euler'       -- x' = x + S (sigma' - t_hat) (x - D) / t_hat, every vendor's step
+  #            'exponential' -- x' = r^S x + (1 - r^S) D, r = sigma' / t_hat. Euler's
+  #                             coefficient on x, 1 + S (r - 1), goes NEGATIVE once
+  #                             r < 1/3 at S 1.5, so below ~25 steps it overshoots
+  #                             (8 steps: not a chain); r^S stays in [0, 1].
+  #   schedule 'karras'      -- the EDM rho schedule above
+  #            'geometric'   -- the same endpoints evenly spaced in log sigma (rho
+  #                             taken to infinity): at 25 steps with the
+  #                             exponential update, 200 steps' ligand bonds
+  update: str = 'euler'
+  schedule: str = 'karras'
+  # False: no noise injected back (gamma 0 on every step, chai's included).
+  churn: bool = True
+  # Denoiser calls a step: 0 is the model's own -- chai-1 two with 'euler' (its
+  # second-order step as written) and one with 'exponential'; every other model
+  # one. chai-1 alone takes 1 or 2 by hand: 2 with 'exponential' is the
+  # exponential Heun step, 1 with 'euler' the single call x + S dt grad.
+  calls_per_step: int = 0
 
 
 class DiffusionHead(hk.Module):
@@ -706,6 +727,18 @@ def gamma_scale_for(batch, global_config):
   return jnp.where(num_tokens > cutoff, 0.0, 1.0)
 
 
+def sampler_update(config, chai: bool):
+  """(update, denoiser calls a step) for this config, refused where it makes no sense."""
+  update = config.update
+  if update not in ('euler', 'exponential'):
+    raise ValueError(f'update {update!r}: want euler or exponential')
+  calls = config.calls_per_step or (2 if chai and update == 'euler' else 1)
+  if calls not in (1, 2) or (calls == 2 and not chai):
+    raise ValueError(f'calls_per_step {config.calls_per_step}: chai-1 takes 1 or 2, '
+                     'every other model 1')
+  return update, calls
+
+
 def make_denoising_body(denoising_step, mask, config, global_config, chai,
                         gamma_scale=None, hook=None):
   """The per-step body, shared by the scanned path and a Python-driven one.
@@ -718,6 +751,8 @@ def make_denoising_body(denoising_step, mask, config, global_config, chai,
   `hook` (see DENOISED_HOOK) is applied to each denoised prediction; the step
   input then carries the step index as its LAST element.
   """
+  update, calls = sampler_update(config, chai)
+
   def apply_denoising_step(carry, step_noise):
     # noise_level_prev arrives as a scan INPUT, not in the vmapped carry. Both
     # are the same numbers the carry used to hold -- noise_levels[i] and
@@ -770,7 +805,9 @@ def make_denoising_body(denoising_step, mask, config, global_config, chai,
     # min(S_churn / N, sqrt(2) - 1) applied wherever S_tmin <= sigma <= S_tmax,
     # keyed on the CURRENT sigma. AF3 instead switches a fixed gamma_0 on above
     # a threshold.
-    if chai:
+    if not config.churn:
+      gamma = 0.0
+    elif chai:
       gamma = jnp.where(
           (noise_level_prev >= CHAI_S_TMIN) & (noise_level_prev <= CHAI_S_TMAX),
           min(CHAI_S_CHURN / config.steps, 2.0 ** 0.5 - 1.0), 0.0)
@@ -811,7 +848,26 @@ def make_denoising_body(denoising_step, mask, config, global_config, chai,
     grad = (positions_noisy - positions_denoised) / t_hat
 
     d_t = noise_level - t_hat
-    if chai:
+    if update == 'exponential':
+      # Blitz's step: the noisy state kept at r^S, the rest the prediction. At a
+      # final sigma of 0 that is the prediction itself.
+      r = noise_level / t_hat
+      keep = r ** config.step_scale
+      if calls == 2:
+        # the exponential Heun step (localfold's --chai-second-order): a point at
+        # this step's own level, the second prediction there, then the same
+        # update on the two predictions' mean -- the one-call step when D2 = D1
+        positions_mid = r * positions_noisy + (1 - r) * positions_denoised
+        denoised2 = denoising_step(positions_mid, noise_level)
+        if hook is not None:
+          denoised2 = hook(denoised2, noise_level_prev, step)
+        positions_denoised_mean = jnp.where(
+            noise_level > 0, (positions_denoised + denoised2) / 2.0,
+            positions_denoised)
+        positions_out = keep * positions_noisy + (1 - keep) * positions_denoised_mean
+      else:
+        positions_out = keep * positions_noisy + (1 - keep) * positions_denoised
+    elif chai and calls == 2:
       # chai's second-order step, copied verbatim rather than tidied. Note it
       # ADDS the averaged correction to the already-Euler-updated position
       # instead of replacing the Euler term, so the total move is
@@ -828,6 +884,8 @@ def make_denoising_body(denoising_step, mask, config, global_config, chai,
           positions_out + d_t * (grad2 + grad) / 2.0,
           positions_out)
     else:
+      # (chai at one call a step: its own scale, 2 -- the two-call step's total
+      # move when the second prediction equals the first)
       positions_out = positions_noisy + config.step_scale * d_t * grad
 
     # ys carries BOTH: the state this step hands on, and the denoiser's own
@@ -864,9 +922,18 @@ def noise_schedule_for(config, chai: bool):
     times = np.linspace(0, 1, config.steps, dtype=np.float32)
   else:
     times = np.linspace(0, 1, config.steps + 1, dtype=np.float32)
-  levels = np.asarray(noise_schedule(times, smin=config.sigma_min,
-                                     smax=config.sigma_max, p=config.rho),
-                      dtype=np.float32)
+  if config.schedule == 'geometric':
+    # the same endpoints, evenly spaced in log sigma
+    levels = np.asarray(
+        SIGMA_DATA * np.exp(np.log(config.sigma_max) + times.astype(np.float64)
+                            * (np.log(config.sigma_min) - np.log(config.sigma_max))),
+        dtype=np.float32)
+  elif config.schedule == 'karras':
+    levels = np.asarray(noise_schedule(times, smin=config.sigma_min,
+                                       smax=config.sigma_max, p=config.rho),
+                        dtype=np.float32)
+  else:
+    raise ValueError(f'schedule {config.schedule!r}: want karras or geometric')
   tail = '' if chai else getattr(config, 'schedule_tail', '')
   if tail in ('append', 'extend'):
     levels = np.concatenate([levels, np.zeros((1,), np.float32)])

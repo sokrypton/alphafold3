@@ -56,6 +56,7 @@ def make_model_config(
     glu_kernel: str = 'auto',
     num_diffusion_samples: int = 5,
     num_sampling_steps: int | None = None,
+    sampler: dict | None = None,
     num_recycles: int = 10,
     return_embeddings: bool = False,
     return_distogram: bool = False,
@@ -88,6 +89,15 @@ def make_model_config(
   # IDENTICAL structures, which is how this was caught.
   if num_sampling_steps is not None:
     config.heads.diffusion.eval.steps = num_sampling_steps
+  # The sampler's discretisation (diffusion_head.SampleConfig: update, schedule,
+  # churn, step_scale, calls_per_step), after configure() for the same reason;
+  # a None leaves the model's own.
+  for field, value in (sampler or {}).items():
+    if value is None:
+      continue
+    if not hasattr(config.heads.diffusion.eval, field):
+      raise ValueError(f'sampler: no field {field!r}')
+    setattr(config.heads.diffusion.eval, field, value)
   # HOW MANY MSA ROWS THE TRUNK SEES. Featurisation always hands over a fixed
   # 16384-row buffer (pipeline.msa_crop_size) and the trunk subsamples to this,
   # keeping the query at row 0. Lowering it is the one MSA knob a user can turn.

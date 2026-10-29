@@ -696,6 +696,9 @@ class Model(hk.Module):
     override = diffusion_head.SAMPLER_OVERRIDE
     if batch.predicted_structure_info.atom_mask.shape[-1] != 24:
       override = None   # sampler kernels lay out 24 atom slots; boltz2's widened layout keeps the XLA sampler
+    if (sample_config.update, sample_config.schedule, sample_config.churn,
+        sample_config.calls_per_step) != ('euler', 'karras', True, 0):
+      override = None   # the kernels walk each vendor's own step; the Blitz options are the XLA sampler's
     sampler = None if override is None or hk.running_init() else override(
         self.global_config.model, sample_config)
     if sampler is not None:

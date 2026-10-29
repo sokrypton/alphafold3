@@ -468,6 +468,46 @@ _NUM_SAMPLING_STEPS = flags.DEFINE_integer(
     ' 15, AF3 to 200.',
     lower_bound=1,
 )
+_DIFFUSION_UPDATE = flags.DEFINE_enum(
+    'diffusion_update',
+    None,
+    ['euler', 'exponential'],
+    "The sampler's step. 'euler' is every vendor's own (the default);"
+    " 'exponential' is Blitz's x' = r^S x + (1 - r^S) D, r = sigma'/t_hat, whose"
+    ' coefficient on x stays in [0, 1] where Euler\'s goes negative below ~25'
+    ' steps. With --diffusion_schedule=geometric, 25 steps give 200 Euler'
+    " steps' ligand bonds (localfold's sampler; see README).",
+)
+_DIFFUSION_SCHEDULE = flags.DEFINE_enum(
+    'diffusion_schedule',
+    None,
+    ['karras', 'geometric'],
+    "The noise levels: 'karras' is the model's EDM rho schedule (the default),"
+    " 'geometric' the same endpoints evenly spaced in log sigma. chai-1's"
+    ' geometric schedule measured one to three more clashes a fold, so'
+    ' localfold keeps its own there.',
+)
+_DIFFUSION_CHURN = flags.DEFINE_bool(
+    'diffusion_churn',
+    None,
+    'Inject noise back on the high-noise steps, as every vendor does (the'
+    ' default). --nodiffusion_churn walks deterministically past the first'
+    ' draw; the undistilled models lose ligand geometry without it.',
+)
+_DIFFUSION_STEP_SCALE = flags.DEFINE_float(
+    'diffusion_step_scale',
+    None,
+    "The sampler's S: Euler's overshoot and the exponential step's power. None"
+    " keeps the model's own (1.5 for AF3; chai-1's one-call steps take 2).",
+)
+_DIFFUSION_CALLS_PER_STEP = flags.DEFINE_integer(
+    'diffusion_calls_per_step',
+    None,
+    "chai-1 only: denoiser calls a step. None keeps the model's own -- two with"
+    ' --diffusion_update=euler (chai-lab\'s second-order step), one with'
+    " 'exponential'. 2 with 'exponential' is the exponential Heun step, which"
+    ' localfold measured to buy nothing at twice the cost.',
+)
 _NUM_RECYCLES = flags.DEFINE_integer(
     'num_recycles',
     10,
@@ -1996,6 +2036,11 @@ def main(_):
               glu_kernel=_GLU_KERNEL.value,
               num_diffusion_samples=_NUM_DIFFUSION_SAMPLES.value,
               num_sampling_steps=_NUM_SAMPLING_STEPS.value,
+              sampler=dict(update=_DIFFUSION_UPDATE.value,
+                           schedule=_DIFFUSION_SCHEDULE.value,
+                           churn=_DIFFUSION_CHURN.value,
+                           step_scale=_DIFFUSION_STEP_SCALE.value,
+                           calls_per_step=_DIFFUSION_CALLS_PER_STEP.value),
               num_recycles=_NUM_RECYCLES.value,
               return_embeddings=_SAVE_EMBEDDINGS.value,
               return_distogram=_SAVE_DISTOGRAM.value,

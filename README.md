@@ -384,6 +384,47 @@ feature (the input JSON has no way to say it), but the encoding is shared, so
 cyclic input and refuses it; AlphaFold 2 does not read it. Only Boltz-2 was trained with it, so for the others it is an
 extrapolation; stock IntelliFold accepts the flag and ignores it. A chain left out is byte-identical to before.
 
+### Fewer diffusion steps: the exponential update and the geometric schedule
+
+Every model samples with its vendor's own walk by default. LocalFold's sampler
+(`sokrypton/localfold` opus-55-opt, after Blitz's few-step AF3 and Boltz-2) is
+available as options, on every model on the AF3 graph:
+
+```bash
+python run_alphafold.py --model=alphafold3 --num_sampling_steps=25 \
+  --diffusion_update=exponential --diffusion_schedule=geometric ...
+python run_alphafold.py --model=chai1 --num_sampling_steps=25 \
+  --diffusion_update=exponential ...     # chai-1 keeps its own schedule
+```
+
+- `--diffusion_update=exponential` replaces the Euler step
+  `x' = x + S (σ' − t̂)(x − D)/t̂` with `x' = r^S x + (1 − r^S) D`, `r = σ'/t̂`.
+  Euler's coefficient on `x` goes negative once `r < 1/3` at S = 1.5, so below
+  ~25 steps it overshoots; `r^S` stays between 0 and 1.
+- `--diffusion_schedule=geometric` spaces the same endpoints evenly in log σ.
+- `--nodiffusion_churn` stops injecting noise; `--diffusion_step_scale` sets S.
+- chai-1 only: `--diffusion_calls_per_step`. Its own step makes two denoiser
+  calls with Euler (chai-lab's as written) and one with the exponential update;
+  one-call steps take S = 2. LocalFold keeps chai-1 on its own schedule, where
+  the geometric one measured one to three more clashes a fold.
+
+LocalFold measured 25 exponential steps on the geometric schedule at 200 Euler
+steps' ligand bond geometry across seven models (its `docs/AF3.md`), and made it
+its default. On an A10 here (ubiquitin + ATP; ligand bond RMS against ideal
+geometry, median and samples past 0.15 Å):
+
+| model | 200 steps (default) | Euler 25 | exponential 25 |
+|---|---|---|---|
+| alphafold3 (1 seed × 5) | 0.046 Å, 0/5 | 0.172 Å, **4/5** | 0.064 Å, 0/5 (geometric) |
+| boltz2 (4 seeds × 5) | 0.051 Å, 0/20 | 0.056 Å, 2/20 | 0.059 Å, 1/20 (geometric) |
+| chai1 (4 seeds × 5) | 0.041 Å, 0/20 | 0.050 Å, 0/20 (one call) | 0.048 Å, 1/20; 0.046 Å, 0/20 geometric |
+
+Twenty-five steps cost an eighth of the default's denoiser calls (chai-1:
+a sixteenth). Where 25 Euler steps tear AlphaFold 3's ligand, the exponential
+update does not; elsewhere the arms are within this test's noise. The
+`SAMPLER_OVERRIDE` GPU kernels walk the vendors' own step and decline these
+options.
+
 ### Crosslinks as explicit ligands
 
 A crosslinking mass-spec result can be given the way
